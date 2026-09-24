@@ -296,11 +296,17 @@
         _            (sql.u/validate-convert-timezone-args timestamptz? target-timezone source-timezone)
         ;; a date has no clock to shift; make it a timestamp first so the source zone applies to midnight. A literal
         ;; is bound as a parameter, so it gets an explicit type too (neither planner would infer one under the UDF).
-        expr         (cond-> expr
-                       (or (string? arg)
+        ;; a literal is bound as a parameter, which neither planner types on its own under the UDF: cast it. Dates
+        ;; have no clock to shift and become timestamps so the source zone applies to midnight.
+        expr         (cond
+                       (or (instance? java.time.LocalDateTime expr)
                            (instance? java.time.LocalDate expr)
-                           (h2x/is-of-type? expr "date"))
-                       h2x/->timestamp)
+                           (h2x/is-of-type? expr "date"))                     (named-cast "TIMESTAMP" "timestamp" expr)
+                       (or (instance? java.time.OffsetDateTime expr)
+                           (instance? java.time.ZonedDateTime expr)
+                           (instance? java.time.Instant expr))                (named-cast "TIMESTAMPTZ" "timestamptz" expr)
+                       :else                                                  expr)
+        timestamptz? (or timestamptz? (h2x/is-of-type? expr "timestamptz"))
         at-zone      (fn [zone e] [:mb_at_time_zone e (h2x/literal zone)])
         expr         (at-zone target-timezone (if timestamptz?
                                                 expr
