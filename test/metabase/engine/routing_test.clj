@@ -37,15 +37,18 @@
                        :nfc-path      ["data" "count"]}]})
         nfc? #(#'engine.routing/nested-field-column-query? % mp)]
     (testing "a query touching a JSON path column stays on JDBC"
-      (is (true? (nfc? {:type :query :query {:source-table (meta/id :venues) :fields [[:field 1000 nil]]}})))
-      (is (true? (nfc? {:lib/type :mbql/query :stages [{:lib/type :mbql.stage/mbql :source-table (meta/id :venues)
+      (is (true? (nfc? {:type :query :query {:source-table (meta/id :checkins) :fields [[:field 1000 nil]]}})))
+      (is (true? (nfc? {:lib/type :mbql/query :stages [{:lib/type :mbql.stage/mbql :source-table (meta/id :checkins)
                                                         :filters [[:= {} [:field {} 1000] 5]]}]}))))
-    (testing "ordinary fields are fine"
-      (is (false? (nfc? {:type :query :query {:source-table (meta/id :venues) :fields [[:field (meta/id :venues :name) nil]]}}))))))
+    (testing "so does a query reading a table that has one whole (every field gets added later)"
+      (is (true? (nfc? {:type :query :query {:source-table (meta/id :venues)}}))))
+    (testing "tables and fields without JSON paths are fine"
+      (is (false? (nfc? {:type :query :query {:source-table (meta/id :checkins) :fields [[:field (meta/id :checkins :date) nil]]}}))))))
 
 (deftest ^:parallel standalone-compile-stays-on-the-warehouse-test
   (let [db    {:id 1 :engine :postgres :details {:host "localhost"} :settings {:query-engine "datafusion"}}
-        query {:type :query :database 1 :query {:source-table 1}}]
-    (is (= :datafusion (engine.routing/effective-driver query nil db :postgres :postgres)))
+        mp    meta/metadata-provider
+        query {:type :query :database 1 :query {:source-table (meta/id :checkins)}}]
+    (is (= :datafusion (engine.routing/effective-driver query mp db :postgres :postgres)))
     (binding [engine.routing/*standalone-compile* true]
-      (is (= :postgres (engine.routing/effective-driver query nil db :postgres :postgres))))))
+      (is (= :postgres (engine.routing/effective-driver query mp db :postgres :postgres))))))

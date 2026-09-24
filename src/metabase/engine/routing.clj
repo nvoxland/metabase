@@ -72,13 +72,30 @@
                    query)
     @ids))
 
+(defn- source-table-ids
+  "Every table the query reads directly, in any stage or join."
+  [query]
+  (let [ids (volatile! #{})]
+    (walk/postwalk (fn [x]
+                     (when (and (map? x) (integer? (:source-table x)))
+                       (vswap! ids conj (:source-table x)))
+                     x)
+                   query)
+    @ids))
+
 (defn- nested-field-column-query?
-  "Whether the query references a nested-field column (a JSON path Metabase unfolded at sync time
-  into its own Field). The engine compiler has no JSON path support yet, so those stay on JDBC."
+  "Whether the query touches a nested-field column (a JSON path Metabase unfolded at sync time into
+  its own Field): named in a `:field` clause, or present on a table the query reads whole (the
+  query processor adds every field of a bare source table). The engine compiler has no JSON path
+  support yet, so those stay on JDBC."
   [query metadata-provider]
-  (boolean (some (fn [id]
-                   (some-> (lib.metadata/field metadata-provider id) :nfc-path seq))
-                 (field-ids query))))
+  (boolean
+   (or (some (fn [id]
+               (some-> (lib.metadata/field metadata-provider id) :nfc-path seq))
+             (field-ids query))
+       (some (fn [table-id]
+               (some #(seq (:nfc-path %)) (lib.metadata/fields metadata-provider table-id)))
+             (source-table-ids query)))))
 
 (def ^:private unsupported-detail-keys
   "Connection details the Rust connectors don't implement yet. A database using any of them stays

@@ -118,10 +118,14 @@
   metadata stamp on every query and only builds the full snapshot when it changed."
   [database]
   ;; The transport is part of the stamp so a restarted engine (which starts empty) gets registered again.
-  (let [details (driver.conn/effective-details database)
-        stamp   {:stamp [(catalog-stamp database) (hash details)] :transport (engine/transport)}]
+  (let [details  (driver.conn/effective-details database)
+        ;; a database-routing destination has no synced metadata of its own: its tables are the router's
+        metadata (if-let [router-id (:router-database-id database)]
+                   (assoc database :id router-id)
+                   database)
+        stamp    {:stamp [(catalog-stamp metadata) (hash details)] :transport (engine/transport)}]
     (when (not= (engine/registration (:id database)) stamp)
-      (let [snapshot (engine.catalog/snapshot database)]
+      (let [snapshot (assoc (engine.catalog/snapshot metadata) :database_id (:id database))]
         (log/infof "Registering database %d with the native query engine (%s)" (:id database) (:catalog_version snapshot))
         (engine/register-database! (if (contains? (engine.settings/bridge-warehouses) (:engine database))
                                      ;; the engine reaches this warehouse through Metabase's own JDBC pool
