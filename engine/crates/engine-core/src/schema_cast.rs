@@ -39,12 +39,14 @@ pub fn resolve_null_types(plan: &Schema, warehouse: &Schema) -> Schema {
                 ) => true,
                 // Metabase types `bytea` as `:type/*`, which the catalog maps to Utf8; the bytes are not text
                 (DataType::Utf8, Some(DataType::Binary | DataType::LargeBinary)) => true,
-                // the catalog said integer but the warehouse now sends fractions (a column was promoted, e.g. by
-                // an upload append, and the snapshot is a few seconds behind): casting would silently truncate
-                (
-                    DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64,
-                    Some(DataType::Float32 | DataType::Float64 | DataType::Decimal128(_, _)),
-                ) => true,
+                // the catalog said integer (or boolean) but the warehouse now sends something wider (a column was
+                // promoted, e.g. by an upload append, and the snapshot is a few seconds behind): casting down would
+                // silently truncate. A narrower warehouse type still casts up to the plan's.
+                (plan, Some(actual))
+                    if numeric_rank(actual) > numeric_rank(plan) && numeric_rank(plan) > 0 =>
+                {
+                    true
+                }
                 _ => false,
             };
             match (take_warehouse_type, actual) {
@@ -56,6 +58,23 @@ pub fn resolve_null_types(plan: &Schema, warehouse: &Schema) -> Schema {
         })
         .collect();
     Schema::new_with_metadata(fields, plan.metadata().clone())
+}
+
+/// Where a type sits on the boolean -> integer -> float -> decimal ladder (0 for anything else),
+/// so a stale narrower catalog type can be recognised.
+fn numeric_rank(t: &arrow::datatypes::DataType) -> u8 {
+    use arrow::datatypes::DataType;
+    match t {
+        DataType::Boolean => 1,
+        DataType::Int8 | DataType::UInt8 => 2,
+        DataType::Int16 | DataType::UInt16 => 3,
+        DataType::Int32 | DataType::UInt32 => 4,
+        DataType::Int64 | DataType::UInt64 => 5,
+        DataType::Float32 => 6,
+        DataType::Float64 => 7,
+        DataType::Decimal128(_, _) => 8,
+        _ => 0,
+    }
 }
 
 /// The target schema with every field nullable: the warehouse decides what comes back, and a
@@ -229,13 +248,22 @@ mod tests {
     }
 
     #[test]
-    fn a_promoted_integer_column_keeps_the_warehouse_float_type() {
-        let plan = Schema::new(vec![Field::new("n", DataType::Int64, true)]);
-        let warehouse = Schema::new(vec![Field::new("n", DataType::Float64, true)]);
-        assert_eq!(
-            resolve_null_types(&plan, &warehouse).field(0).data_type(),
-            &DataType::Float64
-        );
+    fn a_promoted_column_keeps_the_wider_warehouse_type() {
+        let plan = Schema::new(vec![
+            Field::new("n", DataType::Int64, true),
+            Field::new("b", DataType::Boolean, true),
+            Field::new("narrow", DataType::Int64, true),
+        ]);
+        let warehouse = Schema::new(vec![
+            Field::new("n", DataType::Float64, true),
+            Field::new("b", DataType::Int64, true),
+            Field::new("narrow", DataType::Int32, true),
+        ]);
+        let resolved = resolve_null_types(&plan, &warehouse);
+        assert_eq!(resolved.field(0).data_type(), &DataType::Float64);
+        assert_eq!(resolved.field(1).data_type(), &DataType::Int64);
+        // a narrower warehouse type casts up to the plan's
+        assert_eq!(resolved.field(2).data_type(), &DataType::Int64);
     }
 
     #[test]
