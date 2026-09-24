@@ -246,7 +246,8 @@
 (defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/YYYYMMDDHHMMSSString->Temporal]
   [_driver _coercion-strategy expr]
   ;; DataFusion uses Chrono format strings; the Rust Postgres dialect translates them to `to_timestamp` patterns.
-  (h2x/with-database-type-info [:to_timestamp expr (h2x/literal "%Y%m%d%H%M%S")] "timestamp"))
+  ;; Postgres' `to_timestamp` returns an instant, so the result is typed zoned to match the JDBC path.
+  (named-cast "TIMESTAMPTZ" "timestamptz" [:to_timestamp expr (h2x/literal "%Y%m%d%H%M%S")]))
 
 ;;; ISO 8601 strings cast directly in both dialects.
 (defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/ISO8601->DateTime]

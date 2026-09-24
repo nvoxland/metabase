@@ -257,6 +257,7 @@ impl MetabasePostgresDialect {
             "DOUBLE" => ast::DataType::DoublePrecision,
             "DATE" => ast::DataType::Date,
             "TIMESTAMP" => ast::DataType::Timestamp(None, ast::TimezoneInfo::None),
+            "TIMESTAMPTZ" => ast::DataType::Timestamp(None, ast::TimezoneInfo::WithTimeZone),
             "TIME" => ast::DataType::Time(None, ast::TimezoneInfo::None),
             _ => return Ok(None),
         };

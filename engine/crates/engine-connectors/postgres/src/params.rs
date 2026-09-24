@@ -70,12 +70,14 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
         return Ok(null);
     }
     let bound: BoundParam = match *ty {
-        Type::BOOL => Box::new(v.as_bool().ok_or_else(|| invalid(index, ty, v))?),
-        Type::INT2 => Box::new(v.as_i64().ok_or_else(|| invalid(index, ty, v))? as i16),
-        Type::INT4 => Box::new(v.as_i64().ok_or_else(|| invalid(index, ty, v))? as i32),
-        Type::INT8 => Box::new(v.as_i64().ok_or_else(|| invalid(index, ty, v))?),
-        Type::FLOAT4 => Box::new(v.as_f64().ok_or_else(|| invalid(index, ty, v))? as f32),
-        Type::FLOAT8 => Box::new(v.as_f64().ok_or_else(|| invalid(index, ty, v))?),
+        // A cast of a literal (`CAST($1 AS BIGINT)`) makes Postgres type the placeholder by the cast while
+        // Metabase sends the literal as text, so numbers and booleans are also accepted as strings.
+        Type::BOOL => Box::new(as_bool(v).ok_or_else(|| invalid(index, ty, v))?),
+        Type::INT2 => Box::new(as_i64(v).ok_or_else(|| invalid(index, ty, v))? as i16),
+        Type::INT4 => Box::new(as_i64(v).ok_or_else(|| invalid(index, ty, v))? as i32),
+        Type::INT8 => Box::new(as_i64(v).ok_or_else(|| invalid(index, ty, v))?),
+        Type::FLOAT4 => Box::new(as_f64(v).ok_or_else(|| invalid(index, ty, v))? as f32),
+        Type::FLOAT8 => Box::new(as_f64(v).ok_or_else(|| invalid(index, ty, v))?),
         Type::NUMERIC => {
             let s = as_string(v).ok_or_else(|| invalid(index, ty, v))?;
             Box::new(
@@ -123,6 +125,27 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
         }
     };
     Ok(bound)
+}
+
+fn as_i64(v: &Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_f64().filter(|f| f.fract() == 0.0).map(|f| f as i64))
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+}
+
+fn as_f64(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+}
+
+fn as_bool(v: &Value) -> Option<bool> {
+    v.as_bool().or_else(
+        || match v.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+            Some("true") | Some("t") | Some("1") => Some(true),
+            Some("false") | Some("f") | Some("0") => Some(false),
+            _ => None,
+        },
+    )
 }
 
 /// The Postgres type to declare for a placeholder when the server can't infer it, from the Arrow
