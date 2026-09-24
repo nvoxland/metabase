@@ -63,6 +63,7 @@
                               :inner-join                     true
                               :full-join                      true
                               :native-parameters              true
+                              :native-pivot-tables            true
                               :nested-field-columns           false
                               :nested-queries                 true
                               :now                            true

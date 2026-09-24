@@ -513,6 +513,7 @@ const POSTGRES_FUNCTIONS: &[&str] = &[
     "regr_syy",
     "regr_sxy",
     "percentile_cont",
+    "grouping",
     udfs::MB_CAST,
     udfs::MB_BYTES_TO_TEXT,
     udfs::MB_AT_TIME_ZONE,

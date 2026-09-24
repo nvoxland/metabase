@@ -328,6 +328,16 @@ fn build_state(catalog: Arc<SnapshotCatalog>, context: &SessionContext) -> Sessi
         .with_config(config)
         .with_default_features()
         .with_catalog_list(catalog)
+        // DataFusion's defaults minus the rule that rewrites `grouping(...)` into bit operations over an
+        // internal grouping-id column: the warehouse has `GROUPING(...)` itself, and the rewritten plan
+        // can't be unparsed back to it.
+        .with_analyzer_rules(
+            datafusion::optimizer::Analyzer::default()
+                .rules
+                .into_iter()
+                .filter(|rule| rule.name() != "resolve_grouping_function")
+                .collect(),
+        )
         .with_analyzer_rule(Arc::new(PolicyInjectionRule::new(context.clone())))
         .with_optimizer_rules(vec![])
         .with_physical_optimizer_rules(vec![])
@@ -642,6 +652,34 @@ mod tests {
                 .starts_with(r#"SELECT "__mb_c0" AS "id", "__mb_c1" AS "title" FROM ("#),
             "{}",
             plain.warehouse_sql
+        );
+    }
+
+    #[tokio::test]
+    async fn grouping_sets_and_grouping_unparse_for_pivots() {
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT "Title", grouping("Title") AS "pivot-grouping", count(*) AS "count" FROM "public"."Products" GROUP BY GROUPING SETS (("Title"), ()) ORDER BY grouping("Title") ASC"#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.warehouse_sql.contains("GROUPING SETS"),
+            "{}",
+            result.warehouse_sql
+        );
+        assert!(
+            result
+                .warehouse_sql
+                .contains(r#"grouping("Products"."Title")"#),
+            "{}",
+            result.warehouse_sql
+        );
+        assert!(
+            !result.warehouse_sql.contains("__grouping_id"),
+            "{}",
+            result.warehouse_sql
         );
     }
 
