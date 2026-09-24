@@ -963,7 +963,6 @@
    :model-imports #{:model/Card :model/Dashboard}
    :model-exports #{:model/EmbeddingTheme}}
 
-
   embedding.rest
   {:team "Embedding"
    :ns-prefix "metabase.embedding-rest"
@@ -985,6 +984,12 @@
            tiles
            util}
    :model-imports #{:model/Card :model/Dashboard :model/DashboardCard :model/EmbeddingTheme}}
+
+  ;; The native query engine (see dev/notes/datafusion-engine.md).
+  engine
+  {:team "Querying Platform"
+   :api  #{metabase.engine.init}
+   :uses #{settings util util.config}}
 
   events
   {:team "DevEx"

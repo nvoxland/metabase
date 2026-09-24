@@ -32,6 +32,7 @@
    [metabase.driver.init]
    [metabase.eid-translation.init]
    [metabase.embedding.init]
+   [metabase.engine.init]
    [metabase.events.init]
    [metabase.explorations.init]
    [metabase.geojson.init]

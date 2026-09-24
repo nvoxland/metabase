@@ -474,6 +474,7 @@
 
  :lint-as
  {cljs.cache/defcache                                                                   clojure.core/deftype
+  metabase.engine.core/with-session                                                     clojure.core/let
   clojure.core.cache/defcache                                                           clojure.core/deftype
   clojure.test.check.clojure-test/defspec                                               clojure.test/deftest
   clojure.test.check.properties/for-all                                                 clojure.core/let

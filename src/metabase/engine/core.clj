@@ -1,0 +1,120 @@
+(ns metabase.engine.core
+  "Public API of the native query engine module. See dev/notes/datafusion-engine.md.
+
+  Requests are maps that serialize to the engine's JSON envelope (`{:op \"...\" ...}`) and results
+  come back as the `result` of an `ok` envelope. Engine errors are thrown as `ex-info` whose
+  `:type` is the matching `metabase.query-processor.error-type` keyword."
+  (:require
+   [metabase.engine.ffi :as engine.ffi]
+   [metabase.engine.protocol :as protocol]
+   [metabase.engine.settings :as engine.settings]
+   [metabase.util.i18n :refer [tru]]
+   [metabase.util.json :as json]
+   [metabase.util.log :as log]))
+
+(set! *warn-on-reflection* true)
+
+(defonce ^:private transport* (atom nil))
+
+(defn- make-transport []
+  (case (engine.settings/engine-transport)
+    :ffi     (engine.ffi/transport (engine.settings/engine-native-library-path) nil)
+    :sidecar (throw (ex-info (tru "The sidecar transport is not available yet.") {:transport :sidecar}))))
+
+(defn transport
+  "The active transport, started on first use."
+  []
+  (or @transport*
+      (locking transport*
+        (or @transport*
+            (let [t (make-transport)]
+              (log/infof "Native query engine started over %s" (name (engine.settings/engine-transport)))
+              (reset! transport* t))))))
+
+(defn stop!
+  "Shut the engine down. The next call starts it again."
+  []
+  (locking transport*
+    (when-let [t @transport*]
+      (protocol/-close t)
+      (reset! transport* nil))))
+
+(defn- error->exception [{:keys [error_type message] :as error}]
+  (ex-info (or message (tru "The query engine reported an error."))
+           (assoc error
+                  :type (keyword (or error_type "qp"))
+                  :engine/error error)))
+
+(defn call!
+  "Send `request` (a map with an `:op`) to the engine and return its result, throwing on an `err`
+  envelope."
+  [request]
+  (let [response (json/decode+kw (protocol/-call (transport) (json/encode request)))]
+    (case (:status response)
+      "ok"  (:result response)
+      "err" (throw (error->exception (:error response)))
+      (throw (ex-info (tru "Unexpected response from the query engine.") {:response response})))))
+
+(defn healthy?
+  "Whether the engine can be reached."
+  []
+  (try
+    (boolean (:version (call! {:op "version"})))
+    (catch Throwable e
+      (log/debug e "Native query engine is not available")
+      false)))
+
+(defn version
+  "The engine's version string."
+  []
+  (:version (call! {:op "version"})))
+
+(defn register-catalog!
+  "Give the engine a database's tables and columns. `snapshot` matches the engine's
+  `CatalogSnapshot`: `{:database_id :catalog_version :connector :default_schema :tables [...]}`."
+  [snapshot]
+  (call! {:op "register_catalog" :snapshot snapshot}))
+
+(defn register-database!
+  "Give the engine a database's connection details and pool settings."
+  [registration]
+  (call! {:op "register_database" :registration registration}))
+
+(defn invalidate-database!
+  "Drop the engine's catalog and pools for a database, e.g. after its details change."
+  [database-id]
+  (call! {:op "invalidate_database" :database_id database-id}))
+
+(defn create-session!
+  "Open a session for `context` (`{:database_id ...}` plus user, timezone, remark, ...). Returns the
+  session id; close it with [[destroy-session!]]."
+  [context]
+  (:session_id (call! {:op "create_session" :context context})))
+
+(defn destroy-session!
+  "Close a session opened with [[create-session!]]."
+  [session-id]
+  (call! {:op "destroy_session" :session_id session-id}))
+
+(defmacro with-session
+  "Evaluate `body` with `binding` bound to a session for `context`, destroying it afterwards."
+  [[binding context] & body]
+  `(let [~binding (create-session! ~context)]
+     (try
+       ~@body
+       (finally
+         (destroy-session! ~binding)))))
+
+(defn plan-and-unparse
+  "Plan engine-dialect `sql` in `session-id` and return the warehouse SQL with its schema:
+  `{:warehouse_sql :warehouse :schema [{:name :type :nullable}] :warnings}`."
+  ([session-id sql]
+   (plan-and-unparse session-id sql []))
+  ([session-id sql params]
+   (call! {:op "plan_and_unparse" :session_id session-id :sql sql :params params})))
+
+(defn pool-stats
+  "Connection pool statistics, for all databases or one."
+  ([] (pool-stats nil))
+  ([database-id]
+   (call! (cond-> {:op "pool_stats"} database-id (assoc :database_id database-id)))))
