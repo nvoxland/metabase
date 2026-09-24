@@ -231,12 +231,13 @@ fn merge_nested_projections(plan: LogicalPlan) -> Result<LogicalPlan> {
     Ok(merged.data)
 }
 
-/// `Projection(Sort(Projection))` whose sort key is an expression over a column the outer
-/// projection drops. The unparser can't flatten that (plain-column keys it can), so it wraps the
-/// sort in a `derived_sort` subquery but leaves the outer columns qualified by their base table,
-/// which the warehouse can't resolve from outside the subquery. Giving the inner projection
-/// uniquely named copies of the columns the outer one wants, and referring to those by name,
-/// makes the wrapped SQL valid. Sort keys keep referring to the inner projection's own columns.
+/// `Projection(Sort(Projection))` where the outer projection drops columns the sort needs (an
+/// `ORDER BY` on something not selected). The unparser flattens only the simplest of these and
+/// otherwise wraps the sort in a `derived_sort` subquery while leaving the outer columns
+/// qualified by their base table, which the warehouse can't resolve from outside the subquery.
+/// Giving the inner projection uniquely named copies of the columns the outer one wants, and
+/// referring to those by name, makes the wrapped SQL valid. Sort keys keep referring to the
+/// inner projection's own columns.
 fn alias_columns_over_derived_sort(plan: LogicalPlan) -> Result<LogicalPlan> {
     let rewritten = plan.transform_up(|node| {
         let LogicalPlan::Projection(outer) = &node else {
@@ -248,7 +249,9 @@ fn alias_columns_over_derived_sort(plan: LogicalPlan) -> Result<LogicalPlan> {
         let LogicalPlan::Projection(inner) = sort.input.as_ref() else {
             return Ok(Transformed::no(node));
         };
-        if sort.expr.iter().all(|e| matches!(e.expr, Expr::Column(_))) {
+        // The unparser also wraps plain-column sorts when a join or aggregate sits below, so any
+        // projection that drops inner columns gets the treatment; the result is valid either way.
+        if outer.expr.len() >= inner.expr.len() {
             return Ok(Transformed::no(node));
         }
         let mut inner_exprs = inner.expr.clone();
@@ -625,8 +628,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["ID", "title"]
         );
-        // a plain-column key still flattens
-        let flat = planner()
+        // a plain-column key over a join gets the same shape, and no base-table qualifier survives outside
+        let plain = planner()
             .plan_and_unparse(
                 r#"SELECT o."ID" AS "id", p."Title" AS "title" FROM "public"."Orders" o LEFT JOIN "public"."Products" p ON o."Product ID" = p."ID" ORDER BY o."Created At" DESC LIMIT 2"#,
                 &[],
@@ -634,9 +637,11 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            !flat.warehouse_sql.contains("derived_sort"),
+            plain
+                .warehouse_sql
+                .starts_with(r#"SELECT "__mb_c0" AS "id", "__mb_c1" AS "title" FROM ("#),
             "{}",
-            flat.warehouse_sql
+            plain.warehouse_sql
         );
     }
 
