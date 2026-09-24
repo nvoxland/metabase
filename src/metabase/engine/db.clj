@@ -24,3 +24,19 @@
                :parent_id nil
                {:from     [(warehouse-schema-overlay/field-query)]
                 :order-by [[:table_id :asc] [:position :asc] [:name :asc]]})))
+
+(defn catalog-stamp
+  "Counts and latest update times of a database's active tables and fields: two aggregate queries
+  instead of loading every row."
+  [database-id]
+  (let [tables (t2/select-one [:model/Table [:%count.* :n] [:%max.updated_at :latest]]
+                              :db_id database-id
+                              :active true
+                              {:from [(warehouse-schema-overlay/table-query)]})
+        fields (t2/select-one [:model/Field [:%count.* :n] [:%max.updated_at :latest]]
+                              :active true
+                              {:from  [(warehouse-schema-overlay/field-query)]
+                               :where [:in :table_id ^:allow-subquery {:select [:id]
+                                                                       :from   [(warehouse-schema-overlay/table-query)]
+                                                                       :where  [:and [:= :db_id database-id] [:= :active true]]}]})]
+    [(:n tables) (:latest tables) (:n fields) (:latest fields)]))

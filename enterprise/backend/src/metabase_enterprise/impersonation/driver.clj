@@ -129,6 +129,18 @@
   ourselves with `connection-impersonation-role`."
   nil)
 
+(defenterprise impersonation-role
+  "The role a query routed through the native query engine must run as: the role bound by the
+  impersonation middleware, else the current user's impersonation role, or nil when impersonation
+  doesn't apply. Mirrors [[set-role-if-supported!]] without a JDBC connection; the engine resets the
+  role after each statement, so the database's default role is never set explicitly."
+  :feature :advanced-permissions
+  [database]
+  (let [driver (driver.u/database->driver database)]
+    (when (driver.u/supports? driver :connection-impersonation database)
+      (or *impersonation-role*
+          (connection-impersonation-role database)))))
+
 (defenterprise set-role-if-supported!
   "Executes a `USE ROLE` or similar statement on the given connection, if connection impersonation is enabled for the
   given driver. For these drivers, the role is set to either the default role, or to a specific role configured for

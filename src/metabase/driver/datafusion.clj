@@ -13,9 +13,12 @@
    [metabase.driver.datafusion.query-processor]
    [metabase.driver.settings :as driver.settings]
    [metabase.driver.sql.query-processor.like-escape-char-built-in :as-alias like-escape-char-built-in]
+   [metabase.driver.util :as driver.u]
    [metabase.engine.arrow :as engine.arrow]
    [metabase.engine.catalog :as engine.catalog]
    [metabase.engine.core :as engine]
+   [metabase.premium-features.core :refer [defenterprise]]
+   [metabase.util :as u]
    [metabase.util.log :as log]
    [metabase.util.performance :as perf])
   (:import
@@ -85,19 +88,27 @@
    :connect_timeout_ms  (driver.settings/db-connection-timeout-ms)})
 
 (defn- ensure-registered!
-  "Make sure the engine has the database's connection details and current catalog."
+  "Make sure the engine has the database's connection details and current catalog. Checks a cheap
+  metadata stamp on every query and only builds the full snapshot when it changed."
   [database]
-  (let [details  (driver.conn/effective-details database)
-        snapshot (engine.catalog/snapshot database)
-        stamp    [(:catalog_version snapshot) (hash details)]]
+  (let [details (driver.conn/effective-details database)
+        stamp   [(engine.catalog/stamp database) (hash details)]]
     (when (not= (get @registered (:id database)) {:stamp stamp :transport (engine/transport)})
-      (log/infof "Registering database %d with the native query engine (%s)" (:id database) (:catalog_version snapshot))
-      (engine/register-database! {:database_id (:id database)
-                                  :connector   (name (:engine database))
-                                  :details     details
-                                  :pool        (pool-config)})
-      (engine/register-catalog! snapshot)
-      (swap! registered assoc (:id database) {:stamp stamp :transport (engine/transport)}))))
+      (let [snapshot (engine.catalog/snapshot database)]
+        (log/infof "Registering database %d with the native query engine (%s)" (:id database) (:catalog_version snapshot))
+        (engine/register-database! {:database_id (:id database)
+                                    :connector   (name (:engine database))
+                                    :details     details
+                                    :pool        (pool-config)})
+        (engine/register-catalog! snapshot)
+        (swap! registered assoc (:id database) {:stamp stamp :transport (engine/transport)})))))
+
+(defenterprise impersonation-role
+  "The warehouse role a routed query must run as: the current user's impersonation role, else the
+  database's default role, when connection impersonation applies. OSS has no impersonation."
+  metabase-enterprise.impersonation.driver
+  [_database]
+  nil)
 
 (defn forget-database!
   "Drop what the engine knows about a database (after its details or metadata change)."
@@ -128,6 +139,12 @@
 
 (defn- session-context [driver database outer-query]
   {:database_id          (:id database)
+   ;; Only an impersonation role is set; the engine resets the role after every statement, so the warehouse's
+   ;; default role (which Postgres reports as the special `NONE`) never needs setting.
+   :role                 (when (driver.u/supports? (warehouse-driver) :connection-impersonation database)
+                           (let [role (impersonation-role database)]
+                             (when-not (or (nil? role) (= (u/lower-case-en role) "none"))
+                               role)))
    :user_id              (-> outer-query :info :executed-by)
    :report_timezone      (driver-api/report-timezone-id-if-supported driver database)
    :row_limit            (driver-api/determine-query-max-rows outer-query)
@@ -151,7 +168,7 @@
                 (catch Throwable e
                   (log/warn e "Couldn't cancel engine query"))))))
         (try
-          (respond {:cols (engine.arrow/reader->cols reader)}
+          (respond {:cols (engine.arrow/cols reader)}
                    (driver-api/reducible-rows (engine.arrow/row-thunk reader) canceled-chan))
           (finally
             (close!)))))))

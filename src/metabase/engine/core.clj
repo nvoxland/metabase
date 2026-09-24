@@ -5,6 +5,7 @@
   come back as the `result` of an `ok` envelope. Engine errors are thrown as `ex-info` whose
   `:type` is the matching `metabase.query-processor.error-type` keyword."
   (:require
+   [metabase.engine.client :as engine.client]
    [metabase.engine.ffi :as engine.ffi]
    [metabase.engine.protocol :as protocol]
    [metabase.engine.settings :as engine.settings]
@@ -19,7 +20,8 @@
 (defn- make-transport []
   (case (engine.settings/engine-transport)
     :ffi     (engine.ffi/transport (engine.settings/engine-native-library-path) nil)
-    :sidecar (throw (ex-info (tru "The sidecar transport is not available yet.") {:transport :sidecar}))))
+    :sidecar (engine.client/transport (or (engine.settings/engine-sidecar-url)
+                                          (throw (ex-info (tru "engine-sidecar-url is not set.") {}))))))
 
 (defn transport
   "The active transport, started on first use."

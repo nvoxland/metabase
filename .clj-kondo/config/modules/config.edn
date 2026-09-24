@@ -993,8 +993,10 @@
            metabase.engine.catalog
            metabase.engine.core
            metabase.engine.init
-           metabase.engine.routing}
-   :uses #{settings
+           metabase.engine.routing
+           metabase.engine.shadow}
+   :uses #{lib.metadata
+           settings
            util
            util.config
            warehouse-schema-overlay}

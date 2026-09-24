@@ -32,7 +32,9 @@
 
 (defmethod sql.qp/use-ctes-for-stages? :datafusion
   [_driver]
-  true)
+  ;; Stage CTEs reuse the same names in nested scopes (each source query gets its own `__mb_stage_0`), which
+  ;; Postgres allows and DataFusion rejects ("WITH query name specified more than once"). Nested subqueries plan fine.
+  false)
 
 (defmethod sql.qp/float-dbtype :datafusion
   [_driver]

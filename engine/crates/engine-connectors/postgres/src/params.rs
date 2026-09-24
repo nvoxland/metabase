@@ -48,7 +48,24 @@ fn parse_timestamp(s: &str) -> Option<NaiveDateTime> {
 pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
     let v = &param.value;
     if v.is_null() {
-        return Ok(Box::new(None::<String>) as BoundParam);
+        // A NULL must still carry the type Postgres inferred for the placeholder.
+        let null: BoundParam = match *ty {
+            Type::BOOL => Box::new(None::<bool>),
+            Type::INT2 => Box::new(None::<i16>),
+            Type::INT4 => Box::new(None::<i32>),
+            Type::INT8 => Box::new(None::<i64>),
+            Type::FLOAT4 => Box::new(None::<f32>),
+            Type::FLOAT8 => Box::new(None::<f64>),
+            Type::NUMERIC => Box::new(None::<rust_decimal::Decimal>),
+            Type::DATE => Box::new(None::<NaiveDate>),
+            Type::TIMESTAMP => Box::new(None::<NaiveDateTime>),
+            Type::TIMESTAMPTZ => Box::new(None::<DateTime<Utc>>),
+            Type::TIME => Box::new(None::<NaiveTime>),
+            Type::UUID => Box::new(None::<uuid::Uuid>),
+            Type::JSON | Type::JSONB => Box::new(None::<Value>),
+            _ => Box::new(None::<String>),
+        };
+        return Ok(null);
     }
     let bound: BoundParam = match *ty {
         Type::BOOL => Box::new(v.as_bool().ok_or_else(|| invalid(index, ty, v))?),
@@ -131,6 +148,7 @@ mod tests {
         )
         .is_ok());
         assert!(bind(0, &param(Value::Null), &Type::INT8).is_ok());
+        assert!(bind(0, &param(Value::Null), &Type::TIMESTAMPTZ).is_ok());
     }
 
     #[test]

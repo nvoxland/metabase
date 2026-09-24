@@ -179,8 +179,9 @@
                      warehouse-driver))
         ;; Databases routed to the native query engine compile and execute with the `:datafusion` driver instead of
         ;; their own; see `metabase.engine.routing`.
-        (let [database (lib.metadata/database (qp.store/metadata-provider))
-              driver   (engine.routing/effective-driver query database (or bound warehouse-driver) warehouse-driver)]
+        (let [mp       (qp.store/metadata-provider)
+              database (lib.metadata/database mp)
+              driver   (engine.routing/effective-driver query mp database (or bound warehouse-driver) warehouse-driver)]
           (if (= driver bound)
             (f query)
             (driver/with-driver driver

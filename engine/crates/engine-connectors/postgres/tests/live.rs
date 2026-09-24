@@ -226,3 +226,27 @@ async fn describe_lists_tables_and_columns() {
     assert!(!tables.is_empty());
     assert!(tables.iter().all(|t| !t.columns.is_empty()));
 }
+
+#[tokio::test]
+async fn dropping_a_running_stream_from_a_plain_thread_is_safe() {
+    let Some(pool) = pool().await else { return };
+    let connector = PostgresConnector;
+    let handle = connector
+        .execute(
+            pool.as_ref(),
+            query("SELECT n FROM generate_series(1, 1000000) AS n", vec![]),
+        )
+        .await
+        .unwrap();
+    let mut stream = handle.stream;
+    let first = stream.try_next().await.unwrap();
+    assert!(first.is_some());
+    // The JVM releases Arrow streams from its own threads, which have no tokio context.
+    std::thread::spawn(move || drop(stream)).join().unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert_eq!(
+        pool.stats().available,
+        pool.stats().size,
+        "connection returned to the pool"
+    );
+}

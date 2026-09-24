@@ -97,7 +97,7 @@ unsafe fn write_out_string(out: *mut *mut c_char, s: String) -> Result<(), Engin
 
 /// # Safety
 /// `e` must be a handle returned by `mb_engine_init` that has not been shut down.
-unsafe fn engine<'a>(e: *const MbEngine) -> Result<&'a Engine, EngineError> {
+unsafe fn engine<'a>(e: *const MbEngine) -> Result<&'a Arc<Engine>, EngineError> {
     if e.is_null() {
         return Err(EngineError::invalid_request("engine handle is null"));
     }
@@ -358,9 +358,7 @@ pub unsafe extern "C" fn mb_engine_execute(
         } else {
             serde_json::from_str(borrow_str(params_json, "params_json")?)?
         };
-        let id = engine
-            .runtime()
-            .block_on(engine.execute(session_id, &sql, params))?;
+        let id = engine.execute_blocking(session_id, sql, params)?;
         *out_stream_id = id;
         Ok(())
     })

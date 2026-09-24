@@ -12,7 +12,7 @@ use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaResult, Ticket,
 };
-use engine_core::api::{ParamValue, SessionContext};
+use engine_core::api::ParamValue;
 use engine_core::connector::Connector;
 use engine_core::Engine;
 use futures::stream::{self, Stream, StreamExt};
@@ -28,10 +28,11 @@ pub fn connectors() -> Vec<Arc<dyn Connector>> {
     vec![Arc::new(engine_connector_postgres::PostgresConnector)]
 }
 
-/// What a `DoGet` ticket carries: a session context, the SQL, and bound parameters.
+/// What a `DoGet` ticket carries: the session (created through the `call` action), the SQL, and
+/// bound parameters. Mirrors `mb_engine_execute`.
 #[derive(Debug, Deserialize)]
 pub struct ExecuteTicket {
-    pub context: SessionContext,
+    pub session_id: u64,
     pub sql: String,
     #[serde(default)]
     pub params: Vec<ParamValue>,
@@ -52,18 +53,16 @@ fn status_for(error: engine_core::EngineError) -> Status {
     }
 }
 
-/// Releases a `DoGet` session and stream when the response stream is dropped, which also covers
-/// a client that disconnects mid-result.
+/// Releases a `DoGet` stream when the response stream is dropped, which also covers a client that
+/// disconnects mid-result. The session belongs to the client, which destroys it through `call`.
 struct Cleanup {
     engine: Arc<Engine>,
     stream_id: u64,
-    session_id: u64,
 }
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
         self.engine.close_stream(self.stream_id);
-        self.engine.destroy_session(self.session_id);
     }
 }
 
@@ -123,7 +122,7 @@ impl FlightService for EngineFlightService {
         Err(Status::unimplemented("get_schema"))
     }
 
-    /// Execute the ticket's SQL in a fresh session and stream the batches back.
+    /// Execute the ticket's SQL in its session and stream the batches back.
     async fn do_get(
         &self,
         request: Request<Ticket>,
@@ -133,27 +132,18 @@ impl FlightService for EngineFlightService {
                 Status::invalid_argument(format!("ticket is not an execute request: {e}"))
             })?;
         let engine = Arc::clone(&self.engine);
-        let session_id = engine.create_session(ticket.context).map_err(status_for)?;
-        let stream_id = match engine.execute(session_id, &ticket.sql, ticket.params).await {
-            Ok(id) => id,
-            Err(e) => {
-                engine.destroy_session(session_id);
-                return Err(status_for(e));
-            }
-        };
+        let stream_id = engine
+            .execute(ticket.session_id, &ticket.sql, ticket.params)
+            .await
+            .map_err(status_for)?;
         let (entry, batches) = match engine.take_stream(stream_id) {
             Ok(taken) => taken,
             Err(e) => {
                 engine.close_stream(stream_id);
-                engine.destroy_session(session_id);
                 return Err(status_for(e));
             }
         };
-        let guard = Cleanup {
-            engine,
-            stream_id,
-            session_id,
-        };
+        let guard = Cleanup { engine, stream_id };
         let schema = entry.schema.clone();
         let batches = batches.map(move |item| {
             let _held_until_the_stream_drops = &guard;

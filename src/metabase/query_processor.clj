@@ -10,6 +10,11 @@
   (:refer-clojure :exclude [select-keys])
   (:require
    [medley.core :as m]
+   [metabase.driver.util :as driver.u]
+   [metabase.engine.routing :as engine.routing]
+   [metabase.engine.shadow :as engine.shadow]
+   [metabase.lib-be.core :as lib-be]
+   [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.schema.info :as lib.schema.info]
    [metabase.query-processor.compile :as qp.compile]
    [metabase.query-processor.debug :as qp.debug]
@@ -27,6 +32,32 @@
    [metabase.util.malli :as mu]
    [metabase.util.performance :refer [select-keys]]))
 
+(declare process-query)
+
+(defn- shadow-rerun
+  "Run `query` again from scratch through one path, on the calling (fresh) thread."
+  [query force-mode]
+  (binding [engine.routing/*force* force-mode]
+    (process-query (dissoc query :info))))
+
+(defn- engine-shadow-middleware
+  "For databases in `shadow` query-engine mode: answer the query normally, then compare the JDBC
+  and engine paths in the background. See `metabase.engine.shadow`."
+  [qp]
+  (fn [query rff]
+    (let [result (qp query rff)]
+      (when (and (not= (:type query) :internal)
+                 (integer? (:database query))
+                 (not (:lib/type query)))
+        (let [mp       (lib-be/application-database-metadata-provider (:database query))
+              database (lib.metadata/database mp)]
+          (when (engine.routing/shadow? query mp database (driver.u/database->driver (:database query)))
+            (engine.shadow/run-in-background!
+             query
+             (fn []
+               (engine.shadow/compare-results (shadow-rerun query :jdbc) (shadow-rerun query :datafusion)))))))
+      result)))
+
 (def around-middleware
   "Middleware that goes AROUND [[process-query]]. Does extra stuff like handling `:internal` Audit v1 queries or saving
   QueryExecutions (userland queries only)
@@ -42,6 +73,7 @@
   ;;
   ;; ↓↓↓ POST-PROCESSING ↓↓↓ happens from TOP TO BOTTOM
   [#'qp.middleware.enterprise/handle-audit-app-internal-queries-middleware
+   #'engine-shadow-middleware
    #'qp.process-userland-query/process-userland-query-middleware
    ;; userland queries only: catch Exceptions and return a special error response
    #'qp.catch-exceptions/catch-exceptions])

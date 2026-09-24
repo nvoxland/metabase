@@ -139,7 +139,12 @@ fn session_setup_sql(settings: &SessionSettings) -> String {
         sql.push_str(&format!("SET statement_timeout = {ms};\n"));
     }
     if let Some(role) = &settings.role {
-        sql.push_str(&format!("SET ROLE {};\n", quote_ident(role)));
+        // `NONE` is Postgres' keyword for "the session user", not a role name.
+        if role.eq_ignore_ascii_case("none") {
+            sql.push_str("SET ROLE NONE;\n");
+        } else {
+            sql.push_str(&format!("SET ROLE {};\n", quote_ident(role)));
+        }
     }
     sql
 }
@@ -175,12 +180,23 @@ struct RowBatches {
     client: Option<Object>,
     cancel: CancellationToken,
     done: bool,
+    /// The engine runtime, so cleanup can be scheduled from a thread that isn't inside it (the JVM
+    /// releases streams from its own threads).
+    runtime: tokio::runtime::Handle,
+    /// Waits for the cancel token and sends the protocol-level cancel; aborted when the statement
+    /// finishes on its own so it doesn't outlive the query.
+    cancel_watcher: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl RowBatches {
     fn release(&mut self) {
+        if let Some(watcher) = self.cancel_watcher.take() {
+            if !self.cancel.is_cancelled() {
+                watcher.abort();
+            }
+        }
         if let Some(client) = self.client.take() {
-            tokio::spawn(async move {
+            self.runtime.spawn(async move {
                 if let Err(e) = client.batch_execute(SESSION_RESET_SQL).await {
                     tracing::debug!(error = %e, "resetting Postgres session after statement");
                 }
@@ -249,6 +265,97 @@ impl Stream for RowBatches {
 
 const BATCH_SIZE: usize = 8192;
 
+/// Apply session settings, prepare, bind, and start streaming rows on a checked-out connection.
+/// On failure the connection comes back with the error so the caller can reset it.
+async fn start_statement(
+    pg: &PgPool,
+    client: Object,
+    query: Query,
+) -> std::result::Result<ExecuteHandle, (Object, EngineError)> {
+    macro_rules! fail {
+        ($e:expr) => {
+            return Err((client, $e))
+        };
+    }
+    let setup = session_setup_sql(&query.settings);
+    if !setup.is_empty() {
+        if let Err(e) = client.batch_execute(&setup).await {
+            fail!(warehouse_error(e, false));
+        }
+    }
+    let mut statement = match client.prepare(&query.sql).await {
+        Ok(s) => s,
+        Err(e) => fail!(warehouse_error(e, false)),
+    };
+    let mut sql = query.sql.clone();
+    if statement
+        .columns()
+        .iter()
+        .any(|c| decode::arrow_type_for(c.type_()).is_none())
+    {
+        sql = text_cast_wrapper(&sql, &statement);
+        statement = match client.prepare(&sql).await {
+            Ok(s) => s,
+            Err(e) => fail!(warehouse_error(e, false)),
+        };
+    }
+    if query.params.len() != statement.params().len() {
+        fail!(EngineError::new(
+            ErrorKind::InvalidRequest,
+            format!(
+                "statement expects {} parameters, got {}",
+                statement.params().len(),
+                query.params.len()
+            ),
+        ));
+    }
+    let mut params: Vec<params::BoundParam> = Vec::with_capacity(query.params.len());
+    for (i, (p, ty)) in query.params.iter().zip(statement.params()).enumerate() {
+        match params::bind(i, p, ty) {
+            Ok(bound) => params.push(bound),
+            Err(e) => fail!(e),
+        }
+    }
+    let decoder = match RowDecoder::new(statement.columns(), BATCH_SIZE) {
+        Ok(d) => d,
+        Err(e) => fail!(e),
+    };
+    let schema = decoder.schema();
+    let rows = match client.query_raw(&statement, params).await {
+        Ok(rows) => rows,
+        Err(e) => fail!(warehouse_error(e, false)),
+    };
+
+    let cancel = CancellationToken::new();
+    let cancel_token = client.cancel_token();
+    let tls = pg.tls.connector();
+    let watcher = cancel.clone();
+    let cancel_watcher = tokio::spawn(async move {
+        watcher.cancelled().await;
+        let result = match tls {
+            None => cancel_token.cancel_query(NoTls).await,
+            Some(tls) => cancel_token.cancel_query(tls).await,
+        };
+        if let Err(e) = result {
+            tracing::debug!(error = %e, "sending Postgres cancel request");
+        }
+    });
+
+    let batches = RowBatches {
+        rows: Box::pin(rows),
+        decoder,
+        client: Some(client),
+        cancel: cancel.clone(),
+        done: false,
+        runtime: tokio::runtime::Handle::current(),
+        cancel_watcher: Some(cancel_watcher),
+    };
+    Ok(ExecuteHandle {
+        stream: Box::pin(RecordBatchStreamAdapter::new(schema, batches)),
+        cancel,
+    })
+}
+
 #[async_trait]
 impl Connector for PostgresConnector {
     fn kind(&self) -> &'static str {
@@ -281,79 +388,14 @@ impl Connector for PostgresConnector {
     async fn execute(&self, pool: &dyn Pool, query: Query) -> Result<ExecuteHandle> {
         let pg = pg_pool(pool)?;
         let client = pg.pool.get().await.map_err(pool_error)?;
-        let setup = session_setup_sql(&query.settings);
-        if !setup.is_empty() {
-            client
-                .batch_execute(&setup)
-                .await
-                .map_err(|e| warehouse_error(e, false))?;
-        }
-        let mut statement = client
-            .prepare(&query.sql)
-            .await
-            .map_err(|e| warehouse_error(e, false))?;
-        let mut sql = query.sql.clone();
-        if statement
-            .columns()
-            .iter()
-            .any(|c| decode::arrow_type_for(c.type_()).is_none())
-        {
-            sql = text_cast_wrapper(&sql, &statement);
-            statement = client
-                .prepare(&sql)
-                .await
-                .map_err(|e| warehouse_error(e, false))?;
-        }
-        let params: Vec<params::BoundParam> = query
-            .params
-            .iter()
-            .zip(statement.params())
-            .enumerate()
-            .map(|(i, (p, ty))| params::bind(i, p, ty))
-            .collect::<Result<_>>()?;
-        if params.len() != statement.params().len() {
-            return Err(EngineError::new(
-                ErrorKind::InvalidRequest,
-                format!(
-                    "statement expects {} parameters, got {}",
-                    statement.params().len(),
-                    params.len()
-                ),
-            ));
-        }
-        let decoder = RowDecoder::new(statement.columns(), BATCH_SIZE)?;
-        let schema = decoder.schema();
-        let rows = client
-            .query_raw(&statement, params)
-            .await
-            .map_err(|e| warehouse_error(e, false))?;
-
-        let cancel = CancellationToken::new();
-        let cancel_token = client.cancel_token();
-        let tls = pg.tls.connector();
-        let watcher = cancel.clone();
-        tokio::spawn(async move {
-            watcher.cancelled().await;
-            let result = match tls {
-                None => cancel_token.cancel_query(NoTls).await,
-                Some(tls) => cancel_token.cancel_query(tls).await,
-            };
-            if let Err(e) = result {
-                tracing::debug!(error = %e, "sending Postgres cancel request");
+        // Anything that fails after checkout must reset the session before the connection goes back.
+        match start_statement(pg, client, query).await {
+            Ok(handle) => Ok(handle),
+            Err((client, e)) => {
+                let _ = client.batch_execute(SESSION_RESET_SQL).await;
+                Err(e)
             }
-        });
-
-        let batches = RowBatches {
-            rows: Box::pin(rows),
-            decoder,
-            client: Some(client),
-            cancel: cancel.clone(),
-            done: false,
-        };
-        Ok(ExecuteHandle {
-            stream: Box::pin(RecordBatchStreamAdapter::new(schema, batches)),
-            cancel,
-        })
+        }
     }
 
     async fn execute_statement(&self, pool: &dyn Pool, query: Query) -> Result<u64> {
@@ -460,5 +502,9 @@ mod tests {
             "SET default_transaction_read_only = on;\nSET TIME ZONE 'America/New_York';\nSET statement_timeout = 1500;\nSET ROLE \"analyst\"\"; DROP\";\n"
         );
         assert_eq!(session_setup_sql(&SessionSettings::default()), "");
+        assert_eq!(
+            session_setup_sql(&SessionSettings { role: Some("NONE".into()), ..Default::default() }),
+            "SET ROLE NONE;\n"
+        );
     }
 }

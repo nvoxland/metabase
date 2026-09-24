@@ -61,7 +61,12 @@ impl Engine {
         connectors: Vec<Arc<dyn Connector>>,
     ) -> Result<Arc<Engine>> {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.enable_all().thread_name("metabase-engine");
+        // Planning and unparsing recurse deeply on nested plans; JVM threads have small stacks, so all
+        // engine work runs on these workers (see `run_on_runtime`) and they get room to recurse.
+        builder
+            .enable_all()
+            .thread_name("metabase-engine")
+            .thread_stack_size(16 * 1024 * 1024);
         if let Some(n) = config.worker_threads {
             builder.worker_threads(n.max(1));
         }
@@ -88,17 +93,47 @@ impl Engine {
         VERSION
     }
 
-    /// Handle a request from a thread that is not a runtime worker (the C ABI path).
-    /// Panics if called from inside the runtime; use `handle_async` there.
-    pub fn handle(&self, request: Request) -> Response {
-        self.runtime.block_on(self.handle_async(request))
+    /// Run a future on the engine's worker threads and wait for it from the calling (non-runtime)
+    /// thread. `block_on` alone would poll the future on the caller's own stack, which for a JVM
+    /// thread is far too small for the planner's recursion.
+    pub fn run_on_runtime<F, T>(self: &Arc<Self>, make: F) -> T
+    where
+        F: FnOnce(Arc<Engine>) -> std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>
+            + Send
+            + 'static,
+        T: Send + 'static,
+    {
+        let engine = Arc::clone(self);
+        let task = self.runtime.spawn(async move { make(engine).await });
+        self.runtime
+            .block_on(async move { task.await.expect("engine task panicked or was cancelled") })
     }
 
-    pub fn handle_json(&self, request_json: &str) -> Response {
+    /// Handle a request from a thread that is not a runtime worker (the C ABI path).
+    /// Panics if called from inside the runtime; use `handle_async` there.
+    pub fn handle(self: &Arc<Self>, request: Request) -> Response {
+        self.run_on_runtime(move |engine| {
+            Box::pin(async move { engine.handle_async(request).await })
+        })
+    }
+
+    pub fn handle_json(self: &Arc<Self>, request_json: &str) -> Response {
         match serde_json::from_str::<Request>(request_json) {
             Ok(request) => self.handle(request),
             Err(e) => Response::err(e.into()),
         }
+    }
+
+    /// [`Engine::execute`] for a non-runtime thread: plans on a worker thread and waits.
+    pub fn execute_blocking(
+        self: &Arc<Self>,
+        session_id: u64,
+        sql: String,
+        params: Vec<ParamValue>,
+    ) -> Result<u64> {
+        self.run_on_runtime(move |engine| {
+            Box::pin(async move { engine.execute(session_id, &sql, params).await })
+        })
     }
 
     pub async fn handle_json_async(&self, request_json: &str) -> Response {
@@ -142,8 +177,21 @@ impl Engine {
                     ));
                 }
                 let id = registration.database_id;
+                let details_changed = self
+                    .databases
+                    .get(&id)
+                    .map(|old| {
+                        old.details != registration.details
+                            || old.pool.max_size != registration.pool.max_size
+                    })
+                    .unwrap_or(false);
                 self.databases.insert(id, Arc::new(registration));
-                Ok(json!({ "database_id": id }))
+                let closed = if details_changed {
+                    self.pools.invalidate(id).await
+                } else {
+                    0
+                };
+                Ok(json!({ "database_id": id, "pools_closed": closed }))
             }
             Request::CreateSession { context } => {
                 let id = self.create_session(context)?;
@@ -308,9 +356,10 @@ impl Engine {
     }
 
     /// A synchronous reader over a stream's batches for the C Data Interface. Only the first call succeeds.
+    /// The stream itself is driven on a worker thread; the reader only waits on a channel.
     pub fn blocking_reader(&self, id: u64) -> Result<BlockingReader> {
         let (entry, stream) = self.take_stream(id)?;
-        Ok(BlockingReader::new(
+        Ok(BlockingReader::spawn(
             self.runtime.handle().clone(),
             stream,
             entry.cancel.clone(),

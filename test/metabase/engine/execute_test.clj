@@ -4,8 +4,11 @@
   (:require
    [clojure.test :refer :all]
    [metabase.engine.core :as engine]
+   [metabase.engine.settings :as engine.settings]
+   [metabase.engine.shadow :as engine.shadow]
    [metabase.query-processor :as qp]
-   [metabase.test :as mt]))
+   [metabase.test :as mt]
+   [metabase.util.log :as log]))
 
 (defn- rows-via!
   "Run `query` with the given `query-engine` mode and return its rows."
@@ -102,3 +105,48 @@
                                (engine/plan-and-unparse session "SELECT arrow_cast(1, 'Utf8')")))]
             (is (= :unsupported-feature (:type (ex-data e))))
             (is (= "function arrow_cast" (:construct (ex-data e))))))))))
+
+(defn- sidecar-reachable!
+  "Whether an engine sidecar is listening at the configured URL."
+  []
+  (mt/with-temporary-setting-values [engine-transport :sidecar]
+    (try
+      (engine/stop!)
+      (boolean (engine/version))
+      (catch Throwable _ false)
+      (finally
+        (engine/stop!)))))
+
+(deftest ^:mb/engine-tests ^:mb/driver-tests sidecar-transport-test
+  (mt/test-drivers #{:postgres}
+    (if-not (sidecar-reachable!)
+      (log/infof "Skipping sidecar transport test: no engine sidecar at %s" (engine.settings/engine-sidecar-url))
+      (mt/with-temporary-setting-values [engine-transport :sidecar]
+        (try
+          (let [query (mt/mbql-query venues {:aggregation [[:count] [:sum $price]]
+                                             :breakout    [$category_id]
+                                             :order-by    [[:asc $category_id]]})]
+            (testing "rows over the sidecar match the JDBC path"
+              (is (same-rows? (rows-via! :jdbc query) (rows-via! :datafusion query))))
+            (testing "engine errors come back as QP error types over Flight"
+              (mt/with-temporary-setting-values [query-engine :datafusion]
+                (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1})))
+                (engine/with-session [session {:database_id (mt/id)}]
+                  (let [e (is (thrown? clojure.lang.ExceptionInfo
+                                       (engine/plan-and-unparse session "SELECT arrow_cast(1, 'Utf8')")))]
+                    (is (= :unsupported-feature (:type (ex-data e)))))))))
+          (finally
+            (engine/stop!)))))))
+
+(deftest ^:mb/engine-tests ^:mb/driver-tests shadow-mode-test
+  (mt/test-drivers #{:postgres}
+    (with-engine
+      (engine.shadow/clear!)
+      (mt/with-temporary-setting-values [query-engine :shadow]
+        (testing "the driver answers the query"
+          (is (= 3 (count (mt/rows (qp/process-query (mt/mbql-query venues {:order-by [[:asc $id]] :limit 3})))))))
+        (engine.shadow/await-pending!)
+        (testing "and the background comparison ran and matched"
+          (let [[entry] (engine.shadow/recent)]
+            (is (some? entry))
+            (is (true? (:match? entry)) (pr-str (dissoc entry :query)))))))))

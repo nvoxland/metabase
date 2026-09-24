@@ -27,7 +27,6 @@
     :type/Date           "Date32"
     :type/TimeWithTZ     "Utf8"
     :type/Time           "Time64(Microsecond)"
-    :type/Instant        timestamp-utc
     "Utf8"))
 
 (defn- db-type->arrow-type
@@ -66,6 +65,12 @@
                         {:schema  (:schema table)
                          :name    (:name table)
                          :columns (mapv field->column (get by-table (:id table)))})}))
+
+(defn stamp
+  "A cheap value that changes whenever the database's table or field metadata changes, so callers can
+  skip building a snapshot when nothing did."
+  [database]
+  (engine.db/catalog-stamp (:id database)))
 
 (defn register!
   "Register `database`'s catalog with the engine. Returns the engine's acknowledgement."

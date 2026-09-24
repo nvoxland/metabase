@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use arrow::array::ArrayRef;
-use arrow::compute::cast;
+use arrow::compute::{cast_with_options, CastOptions};
 use arrow::datatypes::{Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
@@ -62,7 +62,12 @@ impl SchemaCastStream {
                 if column.data_type() == field.data_type() {
                     Ok(Arc::clone(column))
                 } else {
-                    cast(column, field.data_type()).map_err(|e| {
+                    // `safe: false` so a value that doesn't fit the plan's type is an error, never a silent NULL.
+                    let options = CastOptions {
+                        safe: false,
+                        ..Default::default()
+                    };
+                    cast_with_options(column, field.data_type(), &options).map_err(|e| {
                         DataFusionError::Execution(format!(
                             "casting column {:?} from {} to {}: {e}",
                             field.name(),
@@ -125,6 +130,17 @@ mod tests {
         assert_eq!(out.schema().field(0).data_type(), &DataType::Int64);
         assert!(out.schema().field(0).is_nullable());
         assert_eq!(out.num_rows(), 2);
+    }
+
+    #[test]
+    fn values_that_do_not_fit_the_plan_type_fail_instead_of_becoming_null() {
+        let source = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("s", DataType::Utf8, true)])),
+            vec![Arc::new(StringArray::from(vec!["$1,234.00"]))],
+        )
+        .unwrap();
+        let plan = Schema::new(vec![Field::new("s", DataType::Float64, true)]);
+        assert!(SchemaCastStream::cast_batch(&source, &nullable_schema(&plan)).is_err());
     }
 
     #[test]

@@ -232,6 +232,16 @@ Milestones for the Postgres MVP, each with its gate:
 - Dialect port order: Postgres, MySQL, Snowflake, BigQuery exist upstream; SQL Server, Redshift, ClickHouse, Athena, Presto, Databricks, Spark, Vertica, Druid to write. Retire each HoneySQL compiler as its dialect lands.
 - Metabot on one dialect with planner-based validation; instance-analytics views written once; lineage and validation from the logical plan instead of sqlglot.
 
+## Status and lessons so far
+
+Milestones 0 through 3 are on the `hackathon-datafusion` branch: the Rust workspace, the Clojure module, the `:datafusion` driver, catalog snapshots, the Postgres connector, execution through the engine with Arrow results, routing by the `query-engine` database setting (`jdbc`, `datafusion`, or `shadow`), the sidecar transport, and shadow-mode comparisons. Routed MBQL questions return the same rows as the JDBC path in the live tests.
+
+Three lessons changed the design in small but important ways:
+
+- **Nothing engine-side runs on a JVM thread.** Polling a future with `block_on` runs it on the caller's stack, and the unparser's recursion on a nested plan overflowed a JVM thread's stack, which took the JVM down with an illegal-instruction signal. Every entry point now spawns the work on the engine's worker threads (16 MB stacks) and the JVM thread only waits. Result streams are driven by a worker task and handed to the C Data reader through a bounded channel, and anything reachable from an Arrow C-stream callback catches panics and never needs a tokio context.
+- **Stages compile as subqueries, not CTEs.** Metabase's per-stage CTEs reuse the same name in nested scopes. Postgres accepts that; DataFusion doesn't.
+- **Only the intersection dialect goes in.** The unparser emits DataFusion function names verbatim, so the `:datafusion` compiler uses forms valid in both DataFusion and Postgres, and rewrites for warehouse-specific spellings belong in the Rust dialect, not the Clojure compiler.
+
 ## Open questions
 
 - Should the SQL editor default to the engine dialect with passthrough as an opt-in, or the reverse during migration?

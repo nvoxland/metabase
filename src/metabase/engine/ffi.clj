@@ -30,6 +30,11 @@
 
 ;;; ------------------------------------------------ locating the library ------------------------------------------------
 
+(defonce ^:private library
+  ;; {:path <where the library was loaded from> :fns <bound functions>}, once loaded. The JVM can't unload native
+  ;; code, so this is set at most once per process.
+  (atom nil))
+
 (defn- os-name []
   (let [os (u/lower-case-en (System/getProperty "os.name" ""))]
     (cond
@@ -82,7 +87,8 @@
   "Find the engine library: an explicit path or `MB_ENGINE_NATIVE_LIBRARY_PATH`, then the copy
   bundled in the jar, then a development build under `engine/target`. Returns nil when none exists."
   [explicit-path]
-  (or (some (fn [path] (when (and (seq path) (.exists (io/file path))) path))
+  (or (:path @library)
+      (some (fn [path] (when (and (seq path) (.exists (io/file path))) path))
             [explicit-path (System/getenv "MB_ENGINE_NATIVE_LIBRARY_PATH")])
       (extract-bundled-library)
       (some (fn [path] (when (.exists (io/file path)) path)) (development-build-paths))))
@@ -103,8 +109,6 @@
    :stream-export (ffi/cfn "mb_engine_stream_export" [::mem/pointer ::mem/long ::mem/pointer] ::mem/int)
    :stream-cancel (ffi/cfn "mb_engine_stream_cancel" [::mem/pointer ::mem/long] ::mem/int)
    :stream-close  (ffi/cfn "mb_engine_stream_close" [::mem/pointer ::mem/long] ::mem/int)})
-
-(defonce ^:private library (atom nil))
 
 (defn load-library!
   "Load the shared library at `path` and bind its functions. Loading twice is a no-op for the same

@@ -80,31 +80,67 @@ impl StreamEntry {
 }
 
 /// Pulls batches synchronously from a thread that is not a runtime worker (a JVM thread), so it
-/// can back an Arrow C Data Interface stream. Dropping it cancels the statement.
+/// can back an Arrow C Data Interface stream. The batches are produced by a task on the engine's
+/// worker threads and handed over a small channel, so no engine code runs on the caller's stack.
+/// Dropping the reader stops the producer and cancels the statement.
 pub struct BlockingReader {
     handle: Handle,
-    stream: SendableRecordBatchStream,
+    receiver: Option<tokio::sync::mpsc::Receiver<Result<RecordBatch, ArrowError>>>,
+    producer: tokio::task::JoinHandle<()>,
     schema: SchemaRef,
     cancel: CancellationToken,
     stats: Arc<StreamStats>,
     finished: bool,
 }
 
+/// How many batches may be decoded ahead of the consumer.
+const PREFETCH_BATCHES: usize = 4;
+
 impl BlockingReader {
-    pub fn new(
+    pub fn spawn(
         handle: Handle,
-        stream: SendableRecordBatchStream,
+        mut stream: SendableRecordBatchStream,
         cancel: CancellationToken,
         stats: Arc<StreamStats>,
     ) -> BlockingReader {
+        let schema = stream.schema();
+        let (sender, receiver) = tokio::sync::mpsc::channel(PREFETCH_BATCHES);
+        let producer_stats = Arc::clone(&stats);
+        let producer = handle.spawn(async move {
+            while let Some(item) = stream.next().await {
+                let item = match item {
+                    Ok(batch) => {
+                        producer_stats
+                            .rows
+                            .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
+                        producer_stats.batches.fetch_add(1, Ordering::Relaxed);
+                        producer_stats
+                            .bytes
+                            .fetch_add(batch.get_array_memory_size() as u64, Ordering::Relaxed);
+                        Ok(batch)
+                    }
+                    Err(e) => Err(ArrowError::ExternalError(Box::new(e))),
+                };
+                let failed = item.is_err();
+                if sender.send(item).await.is_err() || failed {
+                    break;
+                }
+            }
+            // Dropping the stream here (on a worker) releases the warehouse connection.
+        });
         BlockingReader {
             handle,
-            schema: stream.schema(),
-            stream,
+            receiver: Some(receiver),
+            producer,
+            schema,
             cancel,
             stats,
             finished: false,
         }
+    }
+
+    pub fn stats(&self) -> &StreamStats {
+        &self.stats
     }
 }
 
@@ -115,25 +151,30 @@ impl Iterator for BlockingReader {
         if self.finished {
             return None;
         }
-        let next = self.handle.block_on(self.stream.next());
-        match next {
-            None => {
+        // Runs inside the Arrow C Data Interface `get_next` callback: nothing may unwind out of here.
+        let received = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let receiver = self.receiver.as_mut()?;
+            self.handle.block_on(receiver.recv())
+        }));
+        match received {
+            Ok(Some(item)) => {
+                if item.is_err() {
+                    self.finished = true;
+                }
+                Some(item)
+            }
+            Ok(None) => {
                 self.finished = true;
                 None
             }
-            Some(Ok(batch)) => {
-                self.stats
-                    .rows
-                    .fetch_add(batch.num_rows() as u64, Ordering::Relaxed);
-                self.stats.batches.fetch_add(1, Ordering::Relaxed);
-                self.stats
-                    .bytes
-                    .fetch_add(batch.get_array_memory_size() as u64, Ordering::Relaxed);
-                Some(Ok(batch))
-            }
-            Some(Err(e)) => {
+            Err(_) => {
                 self.finished = true;
-                Some(Err(ArrowError::ExternalError(Box::new(e))))
+                Some(Err(ArrowError::ExternalError(Box::new(
+                    crate::error::EngineError::new(
+                        crate::error::ErrorKind::InternalPanic,
+                        "engine panicked while reading results",
+                    ),
+                ))))
             }
         }
     }
@@ -147,8 +188,15 @@ impl RecordBatchReader for BlockingReader {
 
 impl Drop for BlockingReader {
     fn drop(&mut self) {
+        // Also reached from the C stream `release` callback: must never panic and must not run
+        // engine code on this thread. Closing the channel makes the producer stop and drop the
+        // stream on its own worker; cancelling stops the statement server-side.
         if !self.finished {
             self.cancel.cancel();
+        }
+        self.receiver.take();
+        if self.finished {
+            self.producer.abort();
         }
     }
 }
