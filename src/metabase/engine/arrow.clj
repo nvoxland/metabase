@@ -55,11 +55,18 @@
     :type/*))
 
 (defn field->column
-  "Result column metadata for an Arrow field."
+  "Result column metadata for an Arrow field. The warehouse's own type name, when the catalog
+  tagged the field with it, wins for types Arrow can't carry (`uuid`, `timetz`, `bytea`), so the
+  column reports the base type the JDBC driver would."
   [^Field field]
-  {:name          (.getName field)
-   :base_type     (arrow-type->base-type (.getType field))
-   :database_type (str (.getType field))})
+  (let [db-type (some-> field .getMetadata (.get "metabase.db_type"))]
+    {:name          (.getName field)
+     :base_type     (case db-type
+                      "uuid"   :type/UUID
+                      "timetz" :type/TimeWithTZ
+                      "bytea"  :type/*
+                      (arrow-type->base-type (.getType field)))
+     :database_type (or db-type (str (.getType field)))}))
 
 (defn cols
   "Result column metadata for every column `batches` will produce."

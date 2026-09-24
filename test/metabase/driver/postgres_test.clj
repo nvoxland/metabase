@@ -1063,7 +1063,7 @@
                                           "bird type")
              (sql.qp/->honeysql driver/*driver* [:value {:database-type "bird type", :base-type :type/PostgresEnum} "toucan"]))))))
 
-(deftest enums-test-2
+(deftest ^:mb/jdbc-only enums-test-2
   (mt/test-driver :postgres
     (do-with-enums-db!
      (fn [db]

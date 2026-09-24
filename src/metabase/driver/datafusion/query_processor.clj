@@ -108,7 +108,10 @@
     (h2x/cast "date" [:date_trunc (h2x/literal unit) expr])
 
     :else
-    (let [expr' (->timestamp expr)]
+    ;; a zoned timestamp stays zoned: `CAST(x AS TIMESTAMP)` would drop the zone, and `date_trunc` keeps its input's type
+    (let [expr' (if (h2x/database-or-effective-type-isa? expr "timestamptz" :type/DateTimeWithTZ)
+                  expr
+                  (->timestamp expr))]
       (cond-> [:date_trunc (h2x/literal unit) expr']
         (h2x/type-info expr') (h2x/with-type-info (h2x/type-info expr'))))))
 

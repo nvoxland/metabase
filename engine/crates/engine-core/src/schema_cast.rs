@@ -48,7 +48,9 @@ pub fn resolve_null_types(plan: &Schema, warehouse: &Schema) -> Schema {
                 _ => false,
             };
             match (take_warehouse_type, actual) {
-                (true, Some(actual)) => Field::new(field.name(), actual.clone(), true),
+                // keep the catalog's metadata (the warehouse type name) on the retyped field
+                (true, Some(actual)) => Field::new(field.name(), actual.clone(), true)
+                    .with_metadata(field.metadata().clone()),
                 _ => field.as_ref().clone(),
             }
         })
@@ -233,6 +235,26 @@ mod tests {
         assert_eq!(
             resolve_null_types(&plan, &warehouse).field(0).data_type(),
             &DataType::Float64
+        );
+    }
+
+    #[test]
+    fn a_retyped_field_keeps_its_metadata() {
+        let tagged =
+            Field::new("b", DataType::Utf8, true).with_metadata(std::collections::HashMap::from([
+                ("metabase.db_type".to_string(), "bytea".to_string()),
+            ]));
+        let plan = Schema::new(vec![tagged]);
+        let warehouse = Schema::new(vec![Field::new("b", DataType::Binary, true)]);
+        let resolved = resolve_null_types(&plan, &warehouse);
+        assert_eq!(resolved.field(0).data_type(), &DataType::Binary);
+        assert_eq!(
+            resolved
+                .field(0)
+                .metadata()
+                .get("metabase.db_type")
+                .map(String::as_str),
+            Some("bytea")
         );
     }
 
