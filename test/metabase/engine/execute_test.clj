@@ -5,6 +5,7 @@
    [clojure.test :refer :all]
    [metabase.driver.datafusion]
    [metabase.engine-bridge.core :as engine-bridge]
+   [metabase.engine.catalog :as engine.catalog]
    [metabase.engine.core :as engine]
    [metabase.engine.settings :as engine.settings]
    [metabase.engine.shadow :as engine.shadow]
@@ -94,8 +95,8 @@
   (mt/test-drivers #{:postgres}
     (engine.tu/with-engine
       (engine.tu/with-query-engine :datafusion
-        ;; run one routed query so the engine knows the database, then ask it to plan something Postgres can't run
-        (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1})))
+        ;; give the engine the database's catalog, then ask it to plan something Postgres can't run
+        (engine/register-catalog! (engine.catalog/snapshot (mt/db)))
         (engine/with-session [session {:database_id (mt/id)}]
           (let [e (is (thrown? clojure.lang.ExceptionInfo
                                (engine/plan-and-unparse session "SELECT arrow_cast(1, 'Utf8')")))]
@@ -125,8 +126,8 @@
             (testing "rows over the sidecar match the JDBC path"
               (is (same-rows? (rows-via! :jdbc query) (rows-via! :datafusion query))))
             (testing "engine errors come back as QP error types over Flight"
-              (mt/with-temporary-setting-values [query-engine :datafusion]
-                (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1})))
+              (engine.tu/with-query-engine :datafusion
+                (engine/register-catalog! (engine.catalog/snapshot (mt/db)))
                 (engine/with-session [session {:database_id (mt/id)}]
                   (let [e (is (thrown? clojure.lang.ExceptionInfo
                                        (engine/plan-and-unparse session "SELECT arrow_cast(1, 'Utf8')")))]
