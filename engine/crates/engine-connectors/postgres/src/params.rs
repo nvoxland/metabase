@@ -103,9 +103,10 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
         }
         Type::TIME => {
             let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
-            let t = NaiveTime::parse_from_str(s.trim(), "%H:%M:%S%.f")
-                .or_else(|_| NaiveTime::parse_from_str(s.trim(), "%H:%M:%S"))
-                .map_err(|_| invalid(index, ty, v))?;
+            let t = ["%H:%M:%S%.f", "%H:%M:%S", "%H:%M"]
+                .iter()
+                .find_map(|fmt| NaiveTime::parse_from_str(s.trim(), fmt).ok())
+                .ok_or_else(|| invalid(index, ty, v))?;
             Box::new(t)
         }
         Type::UUID => {

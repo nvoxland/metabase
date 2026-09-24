@@ -156,6 +156,89 @@ impl MetabasePostgresDialect {
     }
 }
 
+/// Translate a Chrono strftime pattern (what DataFusion's `to_timestamp` takes) into a Postgres
+/// `to_timestamp` template. Returns None for a specifier with no Postgres equivalent.
+pub fn chrono_to_postgres_format(chrono: &str) -> Option<String> {
+    let mut out = String::with_capacity(chrono.len() * 2);
+    let mut chars = chrono.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        let spec = chars.next()?;
+        out.push_str(match spec {
+            'Y' => "YYYY",
+            'y' => "YY",
+            'm' => "MM",
+            'd' => "DD",
+            'e' => "DD",
+            'H' => "HH24",
+            'I' => "HH12",
+            'M' => "MI",
+            'S' => "SS",
+            'j' => "DDD",
+            'b' | 'h' => "Mon",
+            'B' => "Month",
+            'a' => "Dy",
+            'A' => "Day",
+            'p' => "AM",
+            'z' => "TZHTZM",
+            'f' => "US",
+            '%' => "%",
+            '.' => match chars.next()? {
+                'f' => ".US",
+                _ => return None,
+            },
+            ':' => match chars.next()? {
+                'z' => "TZH:TZM",
+                _ => return None,
+            },
+            _ => return None,
+        });
+    }
+    Some(out)
+}
+
+impl MetabasePostgresDialect {
+    /// `to_timestamp(text, chrono_format)` with the pattern rewritten for Postgres; one-argument
+    /// `to_timestamp(epoch)` and patterns with no translation fall through to the default.
+    fn to_timestamp_with_postgres_format(
+        &self,
+        unparser: &Unparser,
+        args: &[Expr],
+    ) -> DFResult<Option<ast::Expr>> {
+        if args.len() != 2 {
+            return Ok(None);
+        }
+        let Expr::Literal(datafusion::common::ScalarValue::Utf8(Some(format)), _) = &args[1] else {
+            return Ok(None);
+        };
+        let Some(translated) = chrono_to_postgres_format(format) else {
+            return Ok(None);
+        };
+        let value = unparser.expr_to_sql(&args[0])?;
+        let format_literal = ast::Expr::Value(ast::Value::SingleQuotedString(translated).into());
+        Ok(Some(ast::Expr::Function(ast::Function {
+            name: ast::ObjectName::from(vec![ast::Ident::new("to_timestamp")]),
+            uses_odbc_syntax: false,
+            parameters: ast::FunctionArguments::None,
+            args: ast::FunctionArguments::List(ast::FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(value)),
+                    ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(format_literal)),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+        })))
+    }
+}
+
 impl Dialect for MetabasePostgresDialect {
     fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
         self.inner.identifier_quote_style(identifier)
@@ -210,6 +293,7 @@ impl Dialect for MetabasePostgresDialect {
         match func_name {
             "substr" | "substring" => self.substr_with_int_positions(unparser, args),
             "array_element" => self.parenthesized_subscript(unparser, args),
+            "to_timestamp" => self.to_timestamp_with_postgres_format(unparser, args),
             _ => self
                 .inner
                 .scalar_function_to_sql_overrides(unparser, func_name, args),
@@ -384,5 +468,27 @@ mod tests {
         assert_eq!(Warehouse::parse("postgresql"), Some(Warehouse::Postgres));
         assert_eq!(Warehouse::parse("snowflake"), None);
         assert_eq!(Warehouse::Postgres.name(), "postgres");
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::chrono_to_postgres_format;
+
+    #[test]
+    fn translates_common_specifiers() {
+        assert_eq!(
+            chrono_to_postgres_format("%Y%m%d%H%M%S").as_deref(),
+            Some("YYYYMMDDHH24MISS")
+        );
+        assert_eq!(
+            chrono_to_postgres_format("%Y-%m-%d %H:%M:%S%.f").as_deref(),
+            Some("YYYY-MM-DD HH24:MI:SS.US")
+        );
+        assert_eq!(
+            chrono_to_postgres_format("%d/%b/%Y %I:%M %p").as_deref(),
+            Some("DD/Mon/YYYY HH12:MI AM")
+        );
+        assert_eq!(chrono_to_postgres_format("%Q"), None);
     }
 }

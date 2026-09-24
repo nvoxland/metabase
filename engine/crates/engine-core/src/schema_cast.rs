@@ -20,20 +20,28 @@ pub struct SchemaCastStream {
 }
 
 /// A plan can leave a column typed `Null` when nothing pins it down (a bare `$1` in the select
-/// list). The warehouse knows better: take its type for those columns.
+/// list), and it types every `time` as nanoseconds where the warehouse sends microseconds. The
+/// warehouse knows better: take its type for those columns.
 pub fn resolve_null_types(plan: &Schema, warehouse: &Schema) -> Schema {
     let fields: Vec<Field> = plan
         .fields()
         .iter()
         .enumerate()
         .map(|(i, field)| {
-            if field.data_type() == &arrow::datatypes::DataType::Null {
-                match warehouse.fields().get(i) {
-                    Some(actual) => Field::new(field.name(), actual.data_type().clone(), true),
-                    None => field.as_ref().clone(),
-                }
-            } else {
-                field.as_ref().clone()
+            use arrow::datatypes::DataType;
+            let actual = warehouse.fields().get(i).map(|f| f.data_type());
+            let take_warehouse_type = match (field.data_type(), actual) {
+                (DataType::Null, Some(_)) => true,
+                // Arrow's cast kernel has no Time64 unit conversions; the unit means nothing to Metabase
+                (
+                    DataType::Time64(_) | DataType::Time32(_),
+                    Some(DataType::Time64(_) | DataType::Time32(_)),
+                ) => true,
+                _ => false,
+            };
+            match (take_warehouse_type, actual) {
+                (true, Some(actual)) => Field::new(field.name(), actual.clone(), true),
+                _ => field.as_ref().clone(),
             }
         })
         .collect();
@@ -178,6 +186,26 @@ mod tests {
         let resolved = resolve_null_types(&plan, &warehouse);
         assert_eq!(resolved.field(0).data_type(), &DataType::Utf8);
         assert_eq!(resolved.field(1).data_type(), &DataType::Int64);
+    }
+
+    #[test]
+    fn time_columns_keep_the_warehouse_unit() {
+        use arrow::datatypes::TimeUnit;
+        let plan = Schema::new(vec![Field::new(
+            "t",
+            DataType::Time64(TimeUnit::Nanosecond),
+            true,
+        )]);
+        let warehouse = Schema::new(vec![Field::new(
+            "t",
+            DataType::Time64(TimeUnit::Microsecond),
+            true,
+        )]);
+        let resolved = resolve_null_types(&plan, &warehouse);
+        assert_eq!(
+            resolved.field(0).data_type(),
+            &DataType::Time64(TimeUnit::Microsecond)
+        );
     }
 
     #[test]

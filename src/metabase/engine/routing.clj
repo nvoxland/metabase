@@ -94,6 +94,12 @@
   (setting/with-database database
     (engine.settings/query-engine)))
 
+(def ^:dynamic *standalone-compile*
+  "Bound while a query is compiled without being executed (`qp.compile/compile`, the native
+  endpoint, 'convert to SQL'). The result is meant to be run as native SQL by the warehouse
+  driver, so it must be in the warehouse's dialect: the engine is not routed to for it."
+  false)
+
 (def ^:dynamic *force*
   "When bound to `:jdbc` or `:datafusion`, overrides the database's `query-engine` setting. Shadow
   mode uses it to run the same query through both paths."
@@ -125,6 +131,7 @@
     ;; In shadow mode the driver answers the query; the engine run happens in the background with `*force*` bound.
     (if (and (= candidate warehouse-driver)
              (= mode :datafusion)
+             (not *standalone-compile*)
              (routable? query metadata-provider database warehouse-driver))
       :datafusion
       candidate)))

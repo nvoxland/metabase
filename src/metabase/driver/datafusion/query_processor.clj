@@ -61,10 +61,29 @@
 (defn- ->timestamp [expr]
   (h2x/->pg-timestamp expr))
 
+(defn- two-digits
+  "A time-of-day part as a two-character string, in both dialects."
+  [part expr]
+  [:lpad (h2x/cast "varchar" (h2x/->integer (extract part expr))) [:inline 2] (h2x/literal "0")])
+
+(defn- time-trunc
+  "Truncate a `time` column. Neither dialect has a `date_trunc` for times that both agree on (DataFusion has none;
+  Postgres returns an interval), so the parts are reassembled as text and cast back."
+  [unit expr]
+  (let [hour   (two-digits :hour expr)
+        minute (if (#{:minute :second} unit) (two-digits :minute expr) (h2x/literal "00"))
+        second (if (= unit :second) (two-digits :second expr) (h2x/literal "00"))]
+    (h2x/with-database-type-info
+     (h2x/cast "time" [:concat hour (h2x/literal ":") minute (h2x/literal ":") second])
+     "time")))
+
 (mu/defn- date-trunc
   [unit :- driver-api/schema.temporal-bucketing.unit.date-time.truncate
    expr :- ::h2x/expr]
   (cond
+    (h2x/database-or-effective-type-isa? expr "time" :type/Time)
+    (time-trunc unit expr)
+
     ;; `date_trunc` returns a timestamp; keep date columns as dates.
     (h2x/database-or-effective-type-isa? expr "date" :type/Date)
     (h2x/cast "date" [:date_trunc (h2x/literal unit) expr])
@@ -75,7 +94,9 @@
         (h2x/type-info expr') (h2x/with-type-info (h2x/type-info expr'))))))
 
 (defn- extract-integer [unit expr]
-  (h2x/->integer (extract unit (->timestamp expr))))
+  (h2x/->integer (extract unit (if (h2x/database-or-effective-type-isa? expr "time" :type/Time)
+                                 expr
+                                 (->timestamp expr)))))
 
 (defmethod sql.qp/date [:datafusion :default]          [_ _ expr] expr)
 (defmethod sql.qp/date [:datafusion :second-of-minute] [_ _ expr] (extract-integer :second expr))
@@ -197,8 +218,27 @@
 
 (defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/YYYYMMDDHHMMSSString->Temporal]
   [_driver _coercion-strategy expr]
-  ;; DataFusion uses Chrono format strings. Warehouse dialects translate them (a known gap for Postgres).
+  ;; DataFusion uses Chrono format strings; the Rust Postgres dialect translates them to `to_timestamp` patterns.
   (h2x/with-database-type-info [:to_timestamp expr (h2x/literal "%Y%m%d%H%M%S")] "timestamp"))
+
+;;; ISO 8601 strings cast directly in both dialects.
+(defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/ISO8601->DateTime]
+  [_driver _coercion-strategy expr]
+  (h2x/cast "timestamp" expr))
+
+(defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/ISO8601->Date]
+  [_driver _coercion-strategy expr]
+  (h2x/cast "date" expr))
+
+(defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/ISO8601->Time]
+  [_driver _coercion-strategy expr]
+  (h2x/cast "time" expr))
+
+;;; DataFusion's one-argument `log` is base 10, like Postgres'. The two-argument form Postgres only has for
+;;; `numeric`, which a double column can't satisfy.
+(defmethod sql.qp/->honeysql [:datafusion :log]
+  [driver [_ _opts arg]]
+  [:log (sql.qp/->honeysql driver arg)])
 
 ;;; DataFusion has `median`, but Postgres doesn't; both have `percentile_cont(p) WITHIN GROUP (ORDER BY x)`, which
 ;;; DataFusion plans as an ordered-set aggregate and unparses in that form.

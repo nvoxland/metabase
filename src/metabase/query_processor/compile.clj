@@ -3,6 +3,7 @@
   (:require
    [clojure.set :as set]
    [metabase.driver :as driver]
+   [metabase.engine.routing :as engine.routing]
    [metabase.lib.core :as lib]
    [metabase.lib.schema :as lib.schema]
    [metabase.query-processor.debug :as qp.debug]
@@ -50,22 +51,27 @@
 
 (mu/defn compile-preprocessed :- ::compiled
   "Compile an already-preprocessed query, if needed. Returns just the resulting 'inner' native query.
-  `:native` key in a legacy query."
+  `:native` key in a legacy query.
+
+  Called on its own (not from [[attach-compiled-query]] inside a query run) the result is native SQL for the
+  warehouse driver, so the native query engine is not routed to: see `engine.routing/*standalone-compile*`."
   [preprocessed-query :- ::lib.schema/query]
-  (qp.setup/with-qp-setup [preprocessed-query preprocessed-query]
+  (binding [engine.routing/*standalone-compile* true]
+    (qp.setup/with-qp-setup [preprocessed-query preprocessed-query]
     (try
       (u/prog1 (compile* preprocessed-query)
         (qp.debug/debug> (list `compile-preprocessed <>)))
       (catch Throwable e
         (throw (ex-info (i18n/tru "Error compiling query: {0}" (ex-message e))
                         {:query preprocessed-query, :type qp.error-type/driver}
-                        e))))))
+                        e)))))))
 
 (mu/defn compile :- ::compiled
   "Preprocess and compile a query, if needed. Returns just the resulting 'inner' native query."
   [query :- ::qp.schema/any-query]
-  (qp.setup/with-qp-setup [query query]
-    (compile-preprocessed (qp.preprocess/preprocess query))))
+  (binding [engine.routing/*standalone-compile* true]
+    (qp.setup/with-qp-setup [query query]
+      (compile-preprocessed (qp.preprocess/preprocess query)))))
 
 (mu/defn attach-compiled-query :- ::query-with-compiled-query
   "If this is an MBQL query, compile it and attach it to the query under the `:qp/compiled` key. Previously, we attached

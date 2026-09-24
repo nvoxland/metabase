@@ -449,6 +449,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn to_timestamp_formats_are_translated_for_postgres() {
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT to_timestamp("Title", '%Y%m%d%H%M%S') AS "t" FROM "public"."Products""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.warehouse_sql,
+            r#"SELECT to_timestamp("Products"."Title", 'YYYYMMDDHH24MISS') AS "t" FROM "public"."Products""#
+        );
+    }
+
+    #[tokio::test]
     async fn remark_is_prepended_as_a_single_line_comment() {
         let snapshot: CatalogSnapshot = serde_json::from_value(serde_json::json!({
             "database_id": 1, "catalog_version": "v1", "connector": "postgres",

@@ -42,3 +42,10 @@
                                                         :filters [[:= {} [:field {} 1000] 5]]}]}))))
     (testing "ordinary fields are fine"
       (is (false? (nfc? {:type :query :query {:source-table (meta/id :venues) :fields [[:field (meta/id :venues :name) nil]]}}))))))
+
+(deftest ^:parallel standalone-compile-stays-on-the-warehouse-test
+  (let [db    {:id 1 :engine :postgres :details {:host "localhost"} :settings {:query-engine "datafusion"}}
+        query {:type :query :database 1 :query {:source-table 1}}]
+    (is (= :datafusion (engine.routing/effective-driver query nil db :postgres :postgres)))
+    (binding [engine.routing/*standalone-compile* true]
+      (is (= :postgres (engine.routing/effective-driver query nil db :postgres :postgres))))))
