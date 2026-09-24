@@ -474,11 +474,7 @@ pub fn chrono_to_mysql_format(chrono: &str) -> Option<String> {
     let mut chars = chrono.chars().peekable();
     while let Some(c) = chars.next() {
         if c != '%' {
-            if c == '%' {
-                out.push_str("%%");
-            } else {
-                out.push(c);
-            }
+            out.push(c);
             continue;
         }
         let spec = match chars.next()? {

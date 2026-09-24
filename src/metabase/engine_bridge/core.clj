@@ -72,6 +72,8 @@
     (isa? base_type :type/DateTimeWithTZ)      (ArrowType$Timestamp. TimeUnit/MICROSECOND "UTC")
     (isa? base_type :type/DateTime)            (ArrowType$Timestamp. TimeUnit/MICROSECOND nil)
     (isa? base_type :type/Date)                (ArrowType$Date. DateUnit/DAY)
+    ;; the catalog types a time with zone as text (Arrow has no such type); ordered before plain time, its parent
+    (isa? base_type :type/TimeWithTZ)          (ArrowType$Utf8.)
     (isa? base_type :type/Time)                (ArrowType$Time. TimeUnit/MICROSECOND 64)
     :else                                      (ArrowType$Utf8.)))
 

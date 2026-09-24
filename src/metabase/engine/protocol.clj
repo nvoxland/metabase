@@ -22,8 +22,10 @@
 (defn engine-error->exception
   "An `ex-info` for an engine error map (`{:kind :error_type :message ...}`) whose `:type` is the
   matching `metabase.query-processor.error-type` keyword."
-  [{:keys [error_type message] :as error}]
+  [{:keys [kind error_type message] :as error}]
   (ex-info (or message (tru "The query engine reported an error."))
-           (assoc error
-                  :type (keyword (or error_type "qp"))
-                  :engine/error error)))
+           (cond-> (assoc error
+                          :type (keyword (or error_type "qp"))
+                          :engine/error error)
+             ;; the query processor reports a cancelled query quietly, as the JDBC path does
+             (= kind "cancelled") (assoc :query/query-canceled? true))))

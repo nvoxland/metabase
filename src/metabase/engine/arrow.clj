@@ -13,7 +13,7 @@
                             IntVector SmallIntVector TimeMicroVector TimeMilliVector TimeNanoVector TimeSecVector
                             TimeStampVector TimeStampMicroTZVector TimeStampMicroVector TimeStampMilliTZVector
                             TimeStampMilliVector TimeStampNanoTZVector TimeStampNanoVector TimeStampSecTZVector
-                            TimeStampSecVector TinyIntVector UInt4Vector VarBinaryVector VarCharVector VectorSchemaRoot)
+                            TimeStampSecVector TinyIntVector UInt4Vector UInt8Vector VarBinaryVector VarCharVector VectorSchemaRoot)
    (org.apache.arrow.vector.ipc ArrowReader)
    (org.apache.arrow.vector.types.pojo ArrowType ArrowType$Binary ArrowType$Bool ArrowType$Date ArrowType$Decimal
                                        ArrowType$FloatingPoint ArrowType$Int ArrowType$LargeUtf8 ArrowType$Time
@@ -123,6 +123,10 @@
       SmallIntVector        (fn [i] (when-not (null? i) (.get ^SmallIntVector vector (int i))))
       TinyIntVector         (fn [i] (when-not (null? i) (.get ^TinyIntVector vector (int i))))
       UInt4Vector           (fn [i] (when-not (null? i) (.getValueAsLong ^UInt4Vector vector (int i))))
+      ;; a MySQL `bigint unsigned`: a BigInteger past Long/MAX_VALUE, as the JDBC driver reads it
+      UInt8Vector           (fn [i] (when-not (null? i)
+                                      (let [v (.getObjectNoOverflow ^UInt8Vector vector (int i))]
+                                        (if (<= (.bitLength ^java.math.BigInteger v) 63) (.longValue ^java.math.BigInteger v) v))))
       Float8Vector          (fn [i] (when-not (null? i) (.get ^Float8Vector vector (int i))))
       Float4Vector          (fn [i] (when-not (null? i) (double (.get ^Float4Vector vector (int i)))))
       DecimalVector         (fn [i] (when-not (null? i) (strip-zeros (.getObject ^DecimalVector vector (int i)))))

@@ -18,6 +18,7 @@ pub struct SessionContext {
     pub workspace_id: Option<String>,
     #[serde(default)]
     pub report_timezone: Option<String>,
+    /// Reserved: not enforced by the planner yet (the MBQL limit middleware caps rows today).
     #[serde(default)]
     pub row_limit: Option<u64>,
     #[serde(default)]

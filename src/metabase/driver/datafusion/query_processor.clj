@@ -242,7 +242,15 @@
 
 (defmethod sql.qp/->honeysql [:datafusion :integer]
   [driver [_ _opts value]]
-  (named-cast "BIGINT" "bigint" (sql.qp/->honeysql driver value)))
+  ;; Metabase's `integer()` rounds a number (the JDBC path's cast does on every warehouse, and inline values go through
+  ;; `Math/round`); a plain engine cast truncates, so a number is rounded first. Text is parsed as it is.
+  (let [expr (sql.qp/->honeysql driver value)]
+    (named-cast "BIGINT" "bigint"
+                (if (or (h2x/database-or-effective-type-isa? expr "double precision" :type/Float)
+                        (h2x/database-or-effective-type-isa? expr "numeric" :type/Decimal)
+                        (and (number? expr) (not (integer? expr))))
+                  [:round expr]
+                  expr))))
 
 (defmethod sql.qp/->honeysql [:datafusion :float]
   [driver [_ _opts value]]
@@ -299,8 +307,6 @@
                          (h2x/is-of-type? expr "timestamptz")
                          (h2x/is-of-type? expr "timestamp with time zone"))
         _            (sql.u/validate-convert-timezone-args timestamptz? target-timezone source-timezone)
-        ;; a date has no clock to shift; make it a timestamp first so the source zone applies to midnight. A literal
-        ;; is bound as a parameter, so it gets an explicit type too (neither planner would infer one under the UDF).
         ;; a literal is bound as a parameter, which neither planner types on its own under the UDF: cast it. Dates
         ;; have no clock to shift and become timestamps so the source zone applies to midnight.
         expr         (cond

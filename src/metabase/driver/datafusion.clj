@@ -64,23 +64,15 @@
                               :left-join                      true
                               :right-join                     true
                               :inner-join                     true
-                              :full-join                      true
                               :native-parameters              true
-                              :native-pivot-tables            true
-                              :nested-field-columns           false
                               :nested-queries                 true
                               :now                            true
-                              :percentile-aggregations        true
                               ;; persisted model tables live outside the synced catalog; the model's own query runs instead
                               :persist-models                 false
-                              :regex                          true
-                              :schemas                        true
-                              :set-timezone                   true
                               :split-part                     true
                               :standard-deviation-aggregations true
                               :uuid-type                      false
-                              :window-functions/cumulative    true
-                              :window-functions/offset        true}]
+                              :window-functions/cumulative    true}]
   (defmethod driver/database-supports? [:datafusion feature] [_driver _feature _db] supported?))
 
 ;;; Features that depend on the warehouse behind the engine rather than the engine: what the plan can say is one
@@ -91,7 +83,10 @@
                  :native-pivot-tables
                  :window-functions/offset
                  :set-timezone
-                 :regex]]
+                 :regex
+                 ;; JSON-path columns are the warehouse driver's to find (below) and to query (routing keeps their
+                 ;; queries on JDBC); a routed database must not lose them at sync
+                 :nested-field-columns]]
   (defmethod driver/database-supports? [:datafusion feature]
     [_driver feature database]
     (if-let [warehouse (some-> database :engine keyword)]
@@ -100,11 +95,13 @@
 
 (defmethod driver/db-start-of-week :datafusion
   [_driver]
-  (driver/db-start-of-week (warehouse-driver)))
+  ;; the SQL is DataFusion's, whose `date_trunc('week', ...)` starts weeks on Monday whatever the warehouse does
+  :monday)
 
 (defmethod driver/db-default-timezone :datafusion
   [_driver database]
-  (driver/db-default-timezone (warehouse-driver) database))
+  ;; sync calls this outside any query, so the warehouse comes from the database, not the query's metadata
+  (driver/db-default-timezone (keyword (:engine database)) database))
 
 ;;; ------------------------------------------------ engine registration -------------------------------------------------
 
@@ -218,7 +215,6 @@
                                role)))
    :user_id              (-> outer-query :info :executed-by)
    :report_timezone      (driver-api/report-timezone-id-if-supported driver database)
-   :row_limit            (driver-api/determine-query-max-rows outer-query)
    :remark               (driver-api/query->remark driver outer-query)
    :statement_timeout_ms (* 60000 (driver.settings/db-query-timeout-minutes))
    :query_origin         (when-let [context (-> outer-query :info :context)]
@@ -258,7 +254,7 @@
                            (catch clojure.lang.ExceptionInfo e
                              (if (stale-registration-error? e database)
                                ;; register again from a fresh snapshot and try once more
-                               (do (swap! stamps dissoc (:id database))
+                               (do (swap! stamps dissoc (:id (metadata-database database)))
                                    (engine/forget-registration! (:id database))
                                    (start-statement! driver database outer-query sql params))
                                (throw e))))
@@ -483,6 +479,10 @@
 (defmethod driver/table-exists? :datafusion
   [_driver database table]
   (driver/table-exists? (warehouse-driver-of database) database table))
+
+(defmethod sql-jdbc.sync/describe-nested-field-columns :datafusion
+  [_driver database table]
+  (sql-jdbc.sync/describe-nested-field-columns (warehouse-driver-of database) database table))
 
 (defmethod driver.sql/default-schema :datafusion
   [_driver database]
