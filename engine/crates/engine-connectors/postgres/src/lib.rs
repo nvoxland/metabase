@@ -55,6 +55,18 @@ impl Pool for PgPool {
         }
     }
 
+    fn reap_idle(&self, idle_for: std::time::Duration) {
+        let removed = self
+            .pool
+            .retain(|_, metrics| metrics.last_used() < idle_for);
+        if !removed.removed.is_empty() {
+            tracing::debug!(
+                closed = removed.removed.len(),
+                "closed idle Postgres connections"
+            );
+        }
+    }
+
     async fn close(&self) {
         self.pool.close();
     }
@@ -197,11 +209,22 @@ impl RowBatches {
             }
         }
         if let Some(client) = self.client.take() {
+            let cancelled = self.cancel.is_cancelled();
             self.runtime.spawn(async move {
-                if let Err(e) = client.batch_execute(SESSION_RESET_SQL).await {
-                    tracing::debug!(error = %e, "resetting Postgres session after statement");
+                // A cancelled statement's connection is discarded rather than reset: the protocol-level
+                // cancel races anything else run on it, and a `RESET ROLE` it killed would hand the
+                // next checkout the previous user's role. A reset that fails is discarded the same way.
+                if cancelled {
+                    drop(Object::take(client));
+                    return;
                 }
-                drop(client);
+                match client.batch_execute(SESSION_RESET_SQL).await {
+                    Ok(()) => drop(client),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not reset the Postgres session; discarding the connection");
+                        drop(Object::take(client));
+                    }
+                }
             });
         }
     }

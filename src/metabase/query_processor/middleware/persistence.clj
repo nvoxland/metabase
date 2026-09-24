@@ -1,6 +1,8 @@
 (ns metabase.query-processor.middleware.persistence
   (:require
    [metabase.api.common :as api]
+   [metabase.driver :as driver]
+   [metabase.driver.util :as driver.u]
    [metabase.permissions.core :as perms]
    [metabase.util.match :as match]))
 
@@ -13,9 +15,12 @@
   It may be be possible to use the persistence cache with sandboxing and/or impersonation at a later date with further
   work, but for now we skip the cache in these cases."
   [query]
-  (if (and api/*current-user-id*
-           (or (match/match-one query {:query-permissions/sandboxed-table &truthy} true)
-               (perms/impersonation-enforced-for-db? (:database query))))
+  (if (or ;; the driver bound for this run may not be the one that persisted the model: the native query engine's
+          ;; driver has no persisted tables in its catalog, so it reads the model's own query instead
+          (not (driver.u/supports? driver/*driver* :persist-models nil))
+          (and api/*current-user-id*
+               (or (match/match-one query {:query-permissions/sandboxed-table &truthy} true)
+                   (perms/impersonation-enforced-for-db? (:database query)))))
     (match/replace query
       {:persisted-info/native &truthy}
       ;; Signal to the SQL QP's independent persisted-cache lookup that it should not use the cache for this

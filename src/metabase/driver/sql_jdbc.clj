@@ -19,7 +19,9 @@
    [metabase.driver.sql-jdbc.sync.describe-database :as sql-jdbc.describe-database]
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.sync :as driver.s]
+   [metabase.engine.core :as engine]
    [metabase.lib.schema.metadata :as lib.schema.metadata]
+   [metabase.util :as u]
    [metabase.util.honey-sql-2 :as h2x]
    [metabase.util.malli :as mu]
    [metabase.util.performance :refer [mapv not-empty select-keys]]
@@ -107,6 +109,8 @@
 (defmethod driver/notify-database-updated :sql-jdbc
   [_ database]
   (sql-jdbc.conn/invalidate-pool-for-db! database)
+  ;; the native query engine's pool and catalog for this database go too (a deleted or re-pointed database)
+  (engine/forget-database! (u/the-id database))
   (memoize/memo-clear! driver-api/secret-value-as-file!))
 
 (defmethod driver/dbms-version :sql-jdbc

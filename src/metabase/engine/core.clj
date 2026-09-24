@@ -45,7 +45,7 @@
   falls back to its driver instead of failing every query."
   []
   (case (engine.settings/engine-transport)
-    :ffi     (some? (engine.ffi/resolve-library-path (engine.settings/engine-native-library-path)))
+    :ffi     (engine.ffi/library-available? (engine.settings/engine-native-library-path))
     :sidecar (some? (engine.settings/engine-sidecar-url))
     false))
 
@@ -112,6 +112,12 @@
   "Record that `database-id` is registered with the engine under `stamp`."
   [database-id stamp]
   (swap! registrations assoc database-id stamp))
+
+(defn forget-registration!
+  "Drop only the registration memo for a database, so the next query registers it again
+  (a restarted sidecar starts empty; the catalog may have moved on)."
+  [database-id]
+  (swap! registrations dissoc database-id))
 
 (defn forget-database!
   "Drop what the engine knows about a database: its registration memo and, when the engine is

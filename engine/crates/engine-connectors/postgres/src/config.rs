@@ -87,6 +87,8 @@ pub fn from_details(details: &Value, connect_timeout: Duration) -> Result<PgConf
     config.connect_timeout(connect_timeout);
 
     let tls = if detail_bool(details, "ssl") {
+        // Never fall back to plaintext when the details ask for TLS (tokio-postgres defaults to `Prefer`).
+        config.ssl_mode(tokio_postgres::config::SslMode::Require);
         let mode = detail_str(details, &["ssl-mode"]).unwrap_or("require");
         match mode {
             "verify-ca" | "verify-full" => {
@@ -181,6 +183,20 @@ mod tests {
         assert_eq!(cfg.config.get_dbname(), Some("warehouse"));
         assert_eq!(cfg.config.get_user(), Some("mb"));
         assert!(matches!(cfg.tls, Tls::None));
+        assert!(matches!(
+            cfg.config.get_ssl_mode(),
+            tokio_postgres::config::SslMode::Prefer
+        ));
+        let secure = from_details(
+            &serde_json::json!({"host": "h", "port": 5432, "dbname": "d", "user": "mb", "password": "s3cret", "ssl": true}),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert!(matches!(secure.tls, Tls::Unverified(_)));
+        assert!(matches!(
+            secure.config.get_ssl_mode(),
+            tokio_postgres::config::SslMode::Require
+        ));
     }
 
     #[test]

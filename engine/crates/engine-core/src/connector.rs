@@ -49,6 +49,9 @@ pub struct PoolStats {
 pub trait Pool: Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn stats(&self) -> PoolStats;
+    /// Close connections that have sat unused for longer than `idle_for` (the engine calls this
+    /// periodically). Pools that hold no connections of their own do nothing.
+    fn reap_idle(&self, _idle_for: std::time::Duration) {}
     async fn close(&self);
 }
 

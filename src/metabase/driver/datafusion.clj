@@ -68,6 +68,8 @@
                               :nested-queries                 true
                               :now                            true
                               :percentile-aggregations        true
+                              ;; persisted model tables live outside the synced catalog; the model's own query runs instead
+                              :persist-models                 false
                               :regex                          true
                               :schemas                        true
                               :set-timezone                   true
@@ -188,12 +190,14 @@
    :query_origin         (when-let [context (-> outer-query :info :context)]
                            {:type (name context)})})
 
-(defn- stale-catalog-error?
-  "Whether the engine failed to plan because its catalog doesn't know a table: the snapshot it holds
-  predates a sync (the catalog stamp is cached briefly) or a schema change."
+(defn- stale-registration-error?
+  "Whether the engine failed because what it holds for the database is behind: its catalog doesn't
+  know a table (the snapshot predates a sync, or a schema change), or it has no registration at all
+  (a restarted sidecar starts empty while this process still remembers registering)."
   [e]
   (let [{:keys [kind message]} (:engine/error (ex-data e))]
-    (boolean (and (= kind "plan") (re-find #"not found" (str message))))))
+    (boolean (or (= kind "catalog_missing")
+                 (and (= kind "plan") (re-find #"table '[^']*' not found" (str message)))))))
 
 (defn- start-statement!
   "Register the database if needed, open a session, and start `sql`: `[session-id handle]`. The
@@ -214,9 +218,10 @@
         [session handle] (try
                            (start-statement! driver database outer-query sql params)
                            (catch clojure.lang.ExceptionInfo e
-                             (if (stale-catalog-error? e)
-                               ;; re-snapshot the catalog and try once more
+                             (if (stale-registration-error? e)
+                               ;; register again from a fresh snapshot and try once more
                                (do (swap! stamps dissoc (:id database))
+                                   (engine/forget-registration! (:id database))
                                    (start-statement! driver database outer-query sql params))
                                (throw e))))
         {:keys [reader cancel! close!]} handle

@@ -138,6 +138,13 @@ impl PoolRegistry {
         closed
     }
 
+    /// Close connections idle for longer than `idle_for` in every pool.
+    pub fn reap_idle(&self, idle_for: std::time::Duration) {
+        for entry in self.pools.iter() {
+            entry.value().pool.reap_idle(idle_for);
+        }
+    }
+
     pub fn stats(&self, database_id: Option<i64>) -> Vec<PoolStatsEntry> {
         self.pools
             .iter()

@@ -12,6 +12,7 @@ workspace = true
 engine-core = { path = "../../engine-core" }
 engine-dialects = { path = "../../engine-dialects" }
 async-trait.workspace = true
+bytes.workspace = true
 arrow.workspace = true
 datafusion.workspace = true
 tokio.workspace = true

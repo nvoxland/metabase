@@ -18,10 +18,6 @@
 (def ^:private no-options
   (into-array CallOption []))
 
-(def ^:private ^:dynamic *raw*
-  "Whether the statement being started skips planning (see the engine's `execute_raw`)."
-  false)
-
 (defn- location ^Location [url]
   (let [uri (URI. url)]
     (Location/forGrpcInsecure (.getHost uri) (if (neg? (.getPort uri)) 50051 (.getPort uri)))))
@@ -51,6 +47,18 @@
         (catch FlightRuntimeException e
           (throw (flight-error->exception e)))))))
 
+(defn- start-stream!
+  "`DoGet` a statement in `session-id`; `raw?` skips planning (see the engine's `execute_raw`)."
+  [^FlightClient client session-id sql params raw?]
+  (let [ticket (json/encode {:session_id session-id :sql sql :params (or params []) :raw raw?})
+        stream (try
+                 (.getStream client (Ticket. (.getBytes ^String ticket StandardCharsets/UTF_8)) no-options)
+                 (catch FlightRuntimeException e
+                   (throw (flight-error->exception e))))]
+    {:reader  (flight-batches stream)
+     :cancel! (fn [] (.cancel ^FlightStream stream "cancelled by Metabase" nil))
+     :close!  (fn [] (.close ^FlightStream stream))}))
+
 (deftype FlightTransport [^FlightClient client ^RootAllocator allocator ^:volatile-mutable closed?]
   protocol/Transport
   (-call [_ request-json]
@@ -63,21 +71,14 @@
           (throw (ex-info (tru "The engine sidecar returned no response.") {}))))
       (catch FlightRuntimeException e
         (throw (flight-error->exception e)))))
-  (-execute [this session-id sql params]
-    (binding [*raw* false]
-      (protocol/-execute-raw this session-id sql params)))
+  (-execute [_ session-id sql params]
+    (when closed?
+      (throw (ex-info (tru "The engine sidecar connection has been closed.") {})))
+    (start-stream! client session-id sql params false))
   (-execute-raw [_ session-id sql params]
     (when closed?
       (throw (ex-info (tru "The engine sidecar connection has been closed.") {})))
-    (let [raw?   (if (thread-bound? #'*raw*) *raw* true)
-          ticket (json/encode {:session_id session-id :sql sql :params (or params []) :raw raw?})
-          stream (try
-                   (.getStream client (Ticket. (.getBytes ^String ticket StandardCharsets/UTF_8)) no-options)
-                   (catch FlightRuntimeException e
-                     (throw (flight-error->exception e))))]
-      {:reader  (flight-batches stream)
-       :cancel! (fn [] (.cancel ^FlightStream stream "cancelled by Metabase" nil))
-       :close!  (fn [] (.close ^FlightStream stream))}))
+    (start-stream! client session-id sql params true))
   (-close [_]
     (when-not closed?
       (set! closed? true)

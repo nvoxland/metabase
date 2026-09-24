@@ -43,6 +43,7 @@
   "An engine parameter (`{:type arrow-type :value v}`) as the Java value the JDBC driver binds."
   [{:keys [type value]}]
   (when (some? value)
+    ;; matched by prefix, so `Timestamp` must come before `Time`
     (condp #(str/starts-with? %2 %1) (str type)
       "Int8"      (long value)
       "Int16"     (long value)
@@ -52,10 +53,10 @@
       "Decimal"   (BigDecimal. (str value))
       "Boolean"   (boolean value)
       "Date32"    (LocalDate/parse (str value))
-      "Time"      (LocalTime/parse (str value))
       "Timestamp" (if (str/includes? (str type) "Some(")
                     (.atOffset (Instant/parse (str value)) ZoneOffset/UTC)
                     (LocalDateTime/parse (str value)))
+      "Time"      (LocalTime/parse (str value))
       (str value))))
 
 ;;; ---------------------------------------------- Arrow column writers ------------------------------------------------

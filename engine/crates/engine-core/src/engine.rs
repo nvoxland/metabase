@@ -39,6 +39,10 @@ pub struct Session {
     pub planner: Planner,
 }
 
+/// How often idle warehouse connections are looked for, and how long one may sit unused.
+const IDLE_REAP_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const IDLE_CONNECTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
 pub struct Engine {
     runtime: Runtime,
     config: EngineConfig,
@@ -73,7 +77,7 @@ impl Engine {
         let runtime = builder.build().map_err(|e| {
             EngineError::new(ErrorKind::InvalidRequest, format!("starting runtime: {e}"))
         })?;
-        Ok(Arc::new(Engine {
+        let engine = Arc::new(Engine {
             runtime,
             config,
             catalogs: DashMap::new(),
@@ -82,7 +86,22 @@ impl Engine {
             streams: DashMap::new(),
             pools: PoolRegistry::new(connectors),
             next_id: AtomicU64::new(1),
-        }))
+        });
+        // Warehouse connections are closed after sitting idle, as the JDBC pools do; a pool that is
+        // never used again (a database gone quiet, or gone) doesn't hold its connections forever.
+        let weak = Arc::downgrade(&engine);
+        engine.runtime.spawn(async move {
+            let mut ticker = tokio::time::interval(IDLE_REAP_INTERVAL);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                match weak.upgrade() {
+                    Some(engine) => engine.pools.reap_idle(IDLE_CONNECTION_TIMEOUT),
+                    None => break,
+                }
+            }
+        });
+        Ok(engine)
     }
 
     pub fn runtime(&self) -> &Runtime {

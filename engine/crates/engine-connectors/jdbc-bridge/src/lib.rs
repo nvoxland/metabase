@@ -44,7 +44,16 @@ pub struct BridgePool {
     channel: Channel,
     details: BridgeDetails,
     max_size: usize,
-    in_flight: AtomicUsize,
+    in_flight: Arc<AtomicUsize>,
+}
+
+/// Counts a statement as in flight for as long as its stream lives.
+struct InFlight(Arc<AtomicUsize>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 #[async_trait]
@@ -166,7 +175,7 @@ impl Connector for JdbcBridgeConnector {
             channel,
             details,
             max_size: config.max_size,
-            in_flight: AtomicUsize::new(0),
+            in_flight: Arc::new(AtomicUsize::new(0)),
         }))
     }
 
@@ -191,6 +200,8 @@ impl Connector for JdbcBridgeConnector {
             .await
             .map_err(flight_error)?;
         let (schema, decoder) = schema_and_batches(stream.into_inner()).await?;
+        bridge.in_flight.fetch_add(1, Ordering::Relaxed);
+        let in_flight = InFlight(Arc::clone(&bridge.in_flight));
         let cancel = CancellationToken::new();
         let batches = decoder
             .try_filter_map(|message| async move {
@@ -200,7 +211,11 @@ impl Connector for JdbcBridgeConnector {
                 })
             })
             .map_err(|e| DataFusionError::External(Box::new(flight_error(e))))
-            .take_until(cancel.clone().cancelled_owned());
+            .take_until(cancel.clone().cancelled_owned())
+            .inspect(move |_| {
+                // keeps the counter alive until the stream is dropped
+                let _ = &in_flight;
+            });
         let batches: Pin<
             Box<
                 dyn Stream<Item = datafusion::error::Result<arrow::record_batch::RecordBatch>>

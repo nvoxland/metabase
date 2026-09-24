@@ -1,10 +1,11 @@
 //! Bind parameter values to the types Postgres inferred for the prepared statement.
 
+use bytes::BytesMut;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use engine_core::api::ParamValue;
 use engine_core::error::{EngineError, ErrorKind, Result};
 use serde_json::Value;
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::types::{IsNull, Kind, ToSql, Type};
 
 pub type BoundParam = Box<dyn ToSql + Sync + Send>;
 
@@ -119,12 +120,43 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN => {
             Box::new(as_string(v).ok_or_else(|| invalid(index, ty, v))?)
         }
-        _ => {
-            // Anything else goes through text; Postgres coerces `unknown` literals by context.
-            Box::new(as_string(v).ok_or_else(|| invalid(index, ty, v))?)
-        }
+        // text types, enums, domains, and anything else this binder doesn't know: send the text form
+        _ => match ty.kind() {
+            Kind::Simple
+                if matches!(
+                    *ty,
+                    Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::UNKNOWN
+                ) =>
+            {
+                Box::new(as_string(v).ok_or_else(|| invalid(index, ty, v))?)
+            }
+            _ => Box::new(AsText(as_string(v).ok_or_else(|| invalid(index, ty, v))?)),
+        },
     };
     Ok(bound)
+}
+
+/// A value sent as its text form for a type this binder has no native encoding for (enums,
+/// domains, extension types): Postgres accepts the text representation of any type as a binary
+/// parameter for those.
+#[derive(Debug)]
+struct AsText(String);
+
+impl ToSql for AsText {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(IsNull::No)
+    }
+
+    fn accepts(_ty: &Type) -> bool {
+        true
+    }
+
+    tokio_postgres::types::to_sql_checked!();
 }
 
 fn as_i64(v: &Value) -> Option<i64> {

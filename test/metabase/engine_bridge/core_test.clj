@@ -50,6 +50,16 @@
                                   :sql         "SELECT id, name FROM venues WHERE id <= ? ORDER BY id"
                                   :params      [{:type "Int64" :value 2}]
                                   :settings    {:time_zone "UTC" :read_only true}}))))
+       (testing "temporal parameters bind as their java.time types"
+         (is (= {:cols ["id"]
+                 :rows [[1]]}
+                (fetch-rows! url {:token       token
+                                  :database_id (mt/id)
+                                  :sql         "SELECT id FROM users WHERE last_login = ? AND CAST(last_login AS date) = ? AND CAST(last_login AS time) = ? ORDER BY id"
+                                  :params      [{:type "Timestamp(Microsecond, None)" :value "2014-04-01T08:30:00"}
+                                                {:type "Date32" :value "2014-04-01"}
+                                                {:type "Time64(Microsecond)" :value "08:30:00"}]
+                                  :settings    {:time_zone "UTC" :read_only true}}))))
        (testing "a bad token is refused with the engine's error envelope"
          (let [e (try (fetch-rows! url {:token "nope" :database_id (mt/id) :sql "SELECT 1" :params []})
                       nil

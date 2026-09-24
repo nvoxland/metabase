@@ -67,8 +67,7 @@
 (defn- bundled-resource-path []
   (str "native/metabase-engine/" (platform-dir) "/" (library-file-name)))
 
-(defn- extract-bundled-library
-  "Copy the library out of the jar into a temp file. Returns its path, or nil when not bundled."
+(defn- extract-bundled-library!
   []
   (when-let [resource (io/resource (bundled-resource-path))]
     (let [dir  (Files/createTempDirectory "metabase-engine-" (make-array java.nio.file.attribute.FileAttribute 0))
@@ -79,12 +78,35 @@
       (.deleteOnExit (.toFile dir))
       (.getAbsolutePath file))))
 
+(defonce ^:private extracted
+  ;; the bundled library's extracted path, so it is copied out of the jar once per process
+  (atom nil))
+
+(defn- extract-bundled-library
+  "Copy the library out of the jar into a temp file (once). Returns its path, or nil when not bundled."
+  []
+  (or @extracted
+      (when-let [path (extract-bundled-library!)]
+        (reset! extracted path)
+        path)))
+
 (defn- development-build-paths []
   (for [profile ["debug" "release"]]
     (.getAbsolutePath (io/file "engine" "target" profile (library-file-name)))))
 
 (defn- development-build []
   (some (fn [path] (when (.exists (io/file path)) path)) (development-build-paths)))
+
+(defn library-available?
+  "Whether a library could be loaded, without extracting or loading anything: an explicit path, the
+  bundled resource, or a development build."
+  [explicit-path]
+  (boolean
+   (or (:path @library)
+       (some (fn [path] (when (and (seq path) (.exists (io/file path))) path))
+             [explicit-path (System/getenv "MB_ENGINE_NATIVE_LIBRARY_PATH")])
+       (io/resource (bundled-resource-path))
+       (development-build))))
 
 (defn resolve-library-path
   "Find the engine library: an explicit path or `MB_ENGINE_NATIVE_LIBRARY_PATH`; in a source
