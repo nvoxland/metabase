@@ -505,7 +505,7 @@
 
   ([database    :- i/DatabaseInstance
     db-metadata :- i/DatabaseMetadata]
-   (let [driver               (driver.u/database->driver database)
+   (let [driver               (sync-util/database->driver database)
          db-name              (sync-util/name-for-logging database)
          multi-level-support? (driver.u/supports? driver :multi-level-schema database)
          schemas-to-update    (when multi-level-support?

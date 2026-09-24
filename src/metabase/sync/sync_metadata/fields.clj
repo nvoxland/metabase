@@ -120,7 +120,7 @@
   and OOM."
   [database :- i/DatabaseInstance]
   (sync-util/with-error-handling (format "Error syncing Fields for Database ''%s''" (sync-util/name-for-logging database))
-    (let [driver          (driver.u/database->driver database)
+    (let [driver          (sync-util/database->driver database)
           schemas?        (driver.u/supports? driver :schemas database)]
       (letfn [(sync! [fields-metadata]
                 (transduce (comp

@@ -170,9 +170,12 @@
 
 (defn sync-driver
   "The driver sync should use for `database`: `:datafusion` when the database is routed to the
-  engine (not in shadow mode, which keeps the driver as the source of truth), else its own driver."
+  engine's own connector (not in shadow mode, which keeps the driver as the source of truth), else
+  its own driver. A database reached through the JDBC bridge syncs through its own driver: the
+  bridge is that driver's pool, so that already is the single connection stack."
   [database warehouse-driver]
   (if (and (contains? (engine-warehouses) warehouse-driver)
+           (not (contains? (engine.settings/bridge-warehouses) warehouse-driver))
            (engine/available?)
            (details-supported? (:details database))
            (= :datafusion (engine-mode database)))

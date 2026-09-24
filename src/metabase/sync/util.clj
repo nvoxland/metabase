@@ -9,6 +9,7 @@
    [metabase.analytics-interface.core :as analytics]
    [metabase.driver :as driver]
    [metabase.driver.util :as driver.u]
+   [metabase.engine.routing :as engine.routing]
    [metabase.events.core :as events]
    [metabase.lib.schema.id :as lib.schema.id]
    [metabase.models.interface :as mi]
@@ -194,13 +195,21 @@
     (binding [qp.i/*disable-qp-logging* true]
       (f))))
 
+(defn database->driver
+  "The driver sync runs `database` through: its own driver, or the native query engine's driver
+  (`:datafusion`) when the database is routed to the engine, so that every sync step reads
+  metadata over the same connection stack queries use. Every sync step resolves its driver here
+  and nowhere else."
+  [database]
+  (engine.routing/sync-driver database (driver.u/database->driver database)))
+
 (defn- sync-in-context
   "Pass the sync operation defined by `body` to the `database`'s driver's implementation of `sync-in-context`.
   This method is used to do things like establish a connection or other driver-specific steps needed for sync
   operations."
   [database f]
   (fn []
-    (driver/sync-in-context (driver.u/database->driver database) database
+    (driver/sync-in-context (database->driver database) database
                             f)))
 
 (defonce ^:private transient-exception-hierarchy

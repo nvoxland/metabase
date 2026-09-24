@@ -27,7 +27,7 @@
 (defn maybe-sync-indexes-for-table!
   "Sync the indexes for `table` if the driver supports storing index info."
   [database table]
-  (if (driver.u/supports? (driver.u/database->driver database) :index-info database)
+  (if (driver.u/supports? (sync-util/database->driver database) :index-info database)
     (sync-util/with-error-handling (format "Error syncing Indexes for %s" (sync-util/name-for-logging table))
       (let [indexes                    (fetch-metadata/index-metadata database table)
             indexed-field-ids          (indexes->field-ids (:id table) indexes)
@@ -73,7 +73,7 @@
   (sync-util/with-error-handling "Error syncing Indexes"
     (let [indexes (fetch-metadata/log-if-error
                    "index-metadata"
-                    (driver/describe-indexes (driver.u/database->driver database) database))
+                    (driver/describe-indexes (sync-util/database->driver database) database))
           database-id (:id database)
           indexed-field-ids (all-indexes->field-ids database-id indexes)
           existing-indexed-field-ids (sync.db/indexed-top-level-field-ids-for-database database-id)
@@ -103,8 +103,8 @@
 (defn maybe-sync-indexes!
   "Sync the indexes for all tables in `database` if the driver supports storing index info."
   [database]
-  (if (driver.u/supports? (driver.u/database->driver database) :index-info database)
-    (if (driver.u/supports? (driver.u/database->driver database) :describe-indexes database)
+  (if (driver.u/supports? (sync-util/database->driver database) :index-info database)
+    (if (driver.u/supports? (sync-util/database->driver database) :describe-indexes database)
       (sync-all-indexes! database)
       (transduce (map #(maybe-sync-indexes-for-table! database %))
                  (partial merge-with +)

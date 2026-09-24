@@ -2,11 +2,11 @@
   (:require
    [java-time.api :as t]
    [metabase.driver :as driver]
-   [metabase.driver.util :as driver.u]
    [metabase.lib.schema.expression.temporal
     :as lib.schema.expression.temporal]
    [metabase.sync.db :as sync.db]
    [metabase.sync.interface :as i]
+   [metabase.sync.util :as sync-util]
    [metabase.util.i18n :refer [trs]]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]))
@@ -37,7 +37,7 @@
   "Query `database` for its current time to determine its timezone. The results of this function are used by the sync
   process to update the timezone if it's different."
   [database :- i/DatabaseInstance]
-  (let [driver  (driver.u/database->driver database)
+  (let [driver  (sync-util/database->driver database)
         zone-id (driver/db-default-timezone driver database)]
     (validate-zone-id driver zone-id)
     (let [zone-id (some-> zone-id str)

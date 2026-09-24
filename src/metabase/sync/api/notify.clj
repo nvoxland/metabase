@@ -5,7 +5,6 @@
    [metabase.api.common :as api]
    [metabase.api.macros :as api.macros]
    [metabase.driver :as driver]
-   [metabase.driver.util :as driver.u]
    [metabase.sync.core :as sync]
    [metabase.sync.db :as sync.db]
    [metabase.sync.sync-metadata :as sync-metadata]
@@ -54,7 +53,7 @@
 
 (defn- find-and-sync-new-table
   [database table-name schema-name]
-  (let [driver (driver.u/database->driver database)
+  (let [driver (sync-util/database->driver database)
         table  {:name   table-name
                 :schema schema-name}]
     (if (driver/table-exists? driver database table)

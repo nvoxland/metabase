@@ -13,6 +13,7 @@
    [metabase.driver.connection :as driver.conn]
    [metabase.driver.datafusion.query-processor]
    [metabase.driver.settings :as driver.settings]
+   [metabase.driver.sql :as driver.sql]
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
    [metabase.driver.sql-jdbc.sync.describe-table :as sql-jdbc.describe-table]
    [metabase.driver.sql.query-processor.like-escape-char-built-in :as-alias like-escape-char-built-in]
@@ -49,7 +50,8 @@
                               :datetime-diff                  true
                               ;; sync: the warehouse driver's metadata SQL runs through the engine (see below)
                               :describe-fields                true
-                              :describe-indexes               false
+                              :describe-indexes               true
+                              :index-info                     true
                               :metadata/key-constraints       true
                               :expression-literals            true
                               :expressions                    true
@@ -343,3 +345,27 @@
     []
     (metadata-query! database (sql-jdbc.sync/describe-fks-sql (warehouse-driver-of database)
                                                               (assoc opts :details (driver.conn/effective-details database))))))
+
+(defmethod driver/describe-indexes :datafusion
+  [_driver database & {:keys [schema-names table-names] :as opts}]
+  (if (or (and schema-names (perf/empty? schema-names))
+          (and table-names (perf/empty? table-names)))
+    []
+    (eduction (map #(perf/select-keys % [:table-schema :table-name :field-name]))
+              (metadata-query! database (sql-jdbc.sync/describe-indexes-sql (warehouse-driver-of database)
+                                                                            (assoc opts :details (driver.conn/effective-details database)))))))
+
+(defmethod driver/describe-table-indexes :datafusion
+  [driver database table]
+  (into #{}
+        (map (fn [{:keys [field-name]}] {:type :normal-column-index :value field-name}))
+        (driver/describe-indexes driver database :schema-names [(:schema table)] :table-names [(:name table)])))
+
+;;; Sync steps with no engine equivalent yet defer to the warehouse driver.
+(defmethod driver/table-exists? :datafusion
+  [_driver database table]
+  (driver/table-exists? (warehouse-driver-of database) database table))
+
+(defmethod driver.sql/default-schema :datafusion
+  [_driver database]
+  (driver.sql/default-schema (warehouse-driver-of database) database))

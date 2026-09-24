@@ -8,7 +8,6 @@
   (:require
    [clojure.string :as str]
    [metabase.driver :as driver]
-   [metabase.driver.util :as driver.u]
    [metabase.sync.db :as sync.db]
    [metabase.sync.fetch-metadata :as fetch-metadata]
    [metabase.sync.interface :as i]
@@ -101,7 +100,7 @@
     db-metadata :- i/DatabaseMetadata]
    (sync-util/with-error-handling (format "Error syncing _metabase_metadata table for %s"
                                           (sync-util/name-for-logging database))
-     (let [driver (driver.u/database->driver database)]
+     (let [driver (sync-util/database->driver database)]
        ;; `sync-metabase-metadata-table!` relies on `driver/table-rows-seq` being defined
        (when (get-method driver/table-rows-seq driver)
          ;; The `sync-tables` step captured any `_metabase_metadata` table(s) while streaming `:tables`,
