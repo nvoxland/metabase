@@ -173,3 +173,11 @@
            (= :datafusion (engine-mode database)))
     :datafusion
     warehouse-driver))
+
+(defn reported-driver
+  "The driver to report a query under (metrics, logs): the warehouse's own driver, from the
+  metadata provider's database, when the query processor bound the engine driver for the run."
+  [bound-driver metadata-provider]
+  (if (and (= bound-driver :datafusion) metadata-provider)
+    (keyword (:engine (lib.metadata/database metadata-provider)))
+    bound-driver))

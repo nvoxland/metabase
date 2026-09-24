@@ -316,11 +316,3 @@
     ~query
     (^:once fn* [~query-binding]
       ~@body)))
-
-(defn reported-driver
-  "The driver to report the current query under (metrics, logs): the warehouse's own driver when
-  the query processor bound the native query engine's driver for it."
-  []
-  (if (and (= driver/*driver* :datafusion) (qp.store/initialized?))
-    (driver.u/database->driver (:id (lib.metadata/database (qp.store/metadata-provider))))
-    driver/*driver*))
