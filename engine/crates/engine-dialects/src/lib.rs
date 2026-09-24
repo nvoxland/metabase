@@ -149,6 +149,7 @@ const POSTGRES_FUNCTIONS: &[&str] = &[
     "sha256",
     "translate",
     "overlay",
+    "array_element",
     "regexp_match",
     "regexp_replace",
     "regexp_count",

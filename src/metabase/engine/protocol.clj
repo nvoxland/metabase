@@ -2,11 +2,25 @@
   "The transport between Metabase and the native query engine. In production the engine is
   loaded in-process and called through the Foreign Function API; in development it runs as a
   sidecar. Both carry the same JSON request and response envelopes, so callers never know which
-  one they are talking to.")
+  one they are talking to."
+  (:require
+   [metabase.util.i18n :refer [tru]]))
 
 (defprotocol Transport
   (-call [this request-json]
     "Send one JSON request envelope and return the JSON response envelope as a string. Never throws
     for engine-reported errors: those come back as an `err` envelope.")
+  (-execute [this session-id sql params]
+    "Plan and start `sql` in a session. Returns `{:reader ArrowReader, :cancel! fn, :close! fn}`.
+    Throws for engine-reported errors. The caller must call `:close!` exactly once.")
   (-close [this]
     "Release whatever the transport holds (native handles, connections)."))
+
+(defn engine-error->exception
+  "An `ex-info` for an engine error map (`{:kind :error_type :message ...}`) whose `:type` is the
+  matching `metabase.query-processor.error-type` keyword."
+  [{:keys [error_type message] :as error}]
+  (ex-info (or message (tru "The query engine reported an error."))
+           (assoc error
+                  :type (keyword (or error_type "qp"))
+                  :engine/error error)))

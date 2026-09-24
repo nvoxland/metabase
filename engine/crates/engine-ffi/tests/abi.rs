@@ -195,7 +195,7 @@ fn null_and_bad_inputs_are_errors_not_crashes() {
 }
 
 #[test]
-fn unimplemented_streaming_entry_points_say_so() {
+fn execute_needs_a_session_and_stream_calls_need_a_stream() {
     unsafe {
         let e = init("{}");
         let mut stream_id = 0u64;
@@ -203,8 +203,17 @@ fn unimplemented_streaming_entry_points_say_so() {
             mb_engine_execute(e, 1, c("SELECT 1").as_ptr(), ptr::null(), &mut stream_id),
             MB_ERROR
         );
-        assert_eq!(last_error()["kind"], "not_implemented");
-        assert_eq!(last_error()["error_type"], "unsupported-feature");
+        assert_eq!(last_error()["kind"], "session_missing");
+        assert_eq!(mb_engine_stream_cancel(e, 7), MB_ERROR);
+        assert_eq!(last_error()["kind"], "invalid_request");
+        let mut out: *mut c_char = ptr::null_mut();
+        assert_eq!(mb_engine_stream_stats(e, 7, &mut out), MB_ERROR);
+        assert!(out.is_null());
+        assert_eq!(
+            mb_engine_stream_close(e, 7),
+            MB_OK,
+            "closing an unknown stream is harmless"
+        );
         assert_eq!(mb_engine_shutdown(e, 1000), MB_OK);
     }
 }

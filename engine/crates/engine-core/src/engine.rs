@@ -1,5 +1,6 @@
-//! The engine: one tokio runtime, catalog snapshots per database, sessions per request.
-//! Both front-ends call `handle` / `handle_async` with the same messages.
+//! The engine: one tokio runtime, catalog snapshots per database, connection pools per database
+//! and role, sessions per request, and the statements currently streaming. Both front-ends call
+//! `handle` / `handle_async` with the same messages and `execute` / `take_stream` for data.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -10,10 +11,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::runtime::Runtime;
 
-use crate::api::{DatabaseRegistration, Request, Response, SessionContext};
+use crate::api::{DatabaseRegistration, ParamValue, Request, Response, SessionContext};
 use crate::catalog::SnapshotCatalog;
+use crate::connector::{Connector, Query, SessionSettings};
 use crate::error::{EngineError, ErrorKind, Result};
 use crate::planner::Planner;
+use crate::pools::PoolRegistry;
+use crate::schema_cast::SchemaCastStream;
+use crate::stream::{BlockingReader, StreamEntry, StreamStatsSnapshot};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -40,11 +45,21 @@ pub struct Engine {
     catalogs: DashMap<i64, Arc<SnapshotCatalog>>,
     databases: DashMap<i64, Arc<DatabaseRegistration>>,
     sessions: DashMap<u64, Arc<Session>>,
+    streams: DashMap<u64, Arc<StreamEntry>>,
+    pools: PoolRegistry,
     next_id: AtomicU64,
 }
 
 impl Engine {
+    /// An engine with no warehouse connectors: it can plan and unparse but not execute.
     pub fn new(config: EngineConfig) -> Result<Arc<Engine>> {
+        Engine::with_connectors(config, vec![])
+    }
+
+    pub fn with_connectors(
+        config: EngineConfig,
+        connectors: Vec<Arc<dyn Connector>>,
+    ) -> Result<Arc<Engine>> {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
         builder.enable_all().thread_name("metabase-engine");
         if let Some(n) = config.worker_threads {
@@ -59,6 +74,8 @@ impl Engine {
             catalogs: DashMap::new(),
             databases: DashMap::new(),
             sessions: DashMap::new(),
+            streams: DashMap::new(),
+            pools: PoolRegistry::new(connectors),
             next_id: AtomicU64::new(1),
         }))
     }
@@ -111,9 +128,19 @@ impl Engine {
             Request::InvalidateDatabase { database_id } => {
                 let had_catalog = self.catalogs.remove(&database_id).is_some();
                 let had_database = self.databases.remove(&database_id).is_some();
-                Ok(json!({ "catalog": had_catalog, "database": had_database }))
+                let pools = self.pools.invalidate(database_id).await;
+                Ok(json!({ "catalog": had_catalog, "database": had_database, "pools": pools }))
             }
             Request::RegisterDatabase { registration } => {
+                if !self.pools.has_connector(&registration.connector) {
+                    return Err(EngineError::new(
+                        ErrorKind::CatalogMissing,
+                        format!(
+                            "no connector for {:?} in this engine build",
+                            registration.connector
+                        ),
+                    ));
+                }
                 let id = registration.database_id;
                 self.databases.insert(id, Arc::new(registration));
                 Ok(json!({ "database_id": id }))
@@ -134,8 +161,12 @@ impl Engine {
                 let result = session.planner.plan_and_unparse(&sql, &params).await?;
                 Ok(serde_json::to_value(result)?)
             }
-            Request::Cancel { .. } => Err(EngineError::not_implemented("cancel")),
-            Request::PoolStats { .. } => Ok(json!({ "pools": [] })),
+            Request::Cancel { stream_id } => {
+                Ok(json!({ "cancelled": self.cancel_stream(stream_id) }))
+            }
+            Request::PoolStats { database_id } => {
+                Ok(json!({ "pools": self.pools.stats(database_id) }))
+            }
             Request::DebugPanic => {
                 if self.config.allow_debug_ops {
                     panic!("debug_panic requested");
@@ -177,12 +208,153 @@ impl Engine {
             .ok_or_else(|| EngineError::new(ErrorKind::SessionMissing, format!("no session {id}")))
     }
 
+    pub fn destroy_session(&self, id: u64) -> bool {
+        self.sessions.remove(&id).is_some()
+    }
+
     pub fn session_count(&self) -> usize {
         self.sessions.len()
     }
 
+    /// Plan `sql` in the session and start it on the warehouse. Returns a stream id; batches are
+    /// pulled through [`Engine::take_stream`] or [`Engine::blocking_reader`].
+    pub async fn execute(
+        &self,
+        session_id: u64,
+        sql: &str,
+        params: Vec<ParamValue>,
+    ) -> Result<u64> {
+        let session = self.session(session_id)?;
+        let planned = session.planner.plan(sql).await?;
+        let registration = self
+            .databases
+            .get(&session.context.database_id)
+            .map(|r| Arc::clone(r.value()))
+            .ok_or_else(|| {
+                EngineError::new(
+                    ErrorKind::CatalogMissing,
+                    format!(
+                        "database {} is not registered with the engine",
+                        session.context.database_id
+                    ),
+                )
+            })?;
+        if registration.connector != session.catalog.connector {
+            return Err(EngineError::new(
+                ErrorKind::CatalogMissing,
+                format!(
+                    "database {} is registered as {:?} but its catalog says {:?}",
+                    registration.database_id, registration.connector, session.catalog.connector
+                ),
+            ));
+        }
+        let (connector, pool) = self
+            .pools
+            .pool_for(&registration, session.context.role.as_deref())
+            .await?;
+        let settings = SessionSettings {
+            time_zone: session.context.report_timezone.clone(),
+            statement_timeout_ms: session.context.statement_timeout_ms,
+            role: session.context.role.clone(),
+            read_only: true,
+            application_name: "metabase".into(),
+        };
+        let handle = connector
+            .execute(
+                pool.as_ref(),
+                Query {
+                    sql: planned.warehouse_sql,
+                    params,
+                    settings,
+                },
+            )
+            .await?;
+        let stream = SchemaCastStream::new(handle.stream, &planned.schema);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.streams.insert(
+            id,
+            Arc::new(StreamEntry::new(
+                session_id,
+                Box::pin(stream),
+                handle.cancel,
+            )),
+        );
+        Ok(id)
+    }
+
+    pub fn stream(&self, id: u64) -> Result<Arc<StreamEntry>> {
+        self.streams
+            .get(&id)
+            .map(|s| Arc::clone(s.value()))
+            .ok_or_else(|| EngineError::new(ErrorKind::InvalidRequest, format!("no stream {id}")))
+    }
+
+    /// Take a stream's batches for the Flight path. Only the first call succeeds.
+    pub fn take_stream(
+        &self,
+        id: u64,
+    ) -> Result<(
+        Arc<StreamEntry>,
+        datafusion::physical_plan::SendableRecordBatchStream,
+    )> {
+        let entry = self.stream(id)?;
+        let stream = entry.take().ok_or_else(|| {
+            EngineError::new(
+                ErrorKind::InvalidRequest,
+                format!("stream {id} was already exported"),
+            )
+        })?;
+        Ok((entry, stream))
+    }
+
+    /// A synchronous reader over a stream's batches for the C Data Interface. Only the first call succeeds.
+    pub fn blocking_reader(&self, id: u64) -> Result<BlockingReader> {
+        let (entry, stream) = self.take_stream(id)?;
+        Ok(BlockingReader::new(
+            self.runtime.handle().clone(),
+            stream,
+            entry.cancel.clone(),
+            Arc::clone(&entry.stats),
+        ))
+    }
+
+    pub fn cancel_stream(&self, id: u64) -> bool {
+        match self.streams.get(&id) {
+            Some(entry) => {
+                entry.cancel.cancel();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forget a stream. Cancels it if it is still running.
+    pub fn close_stream(&self, id: u64) -> bool {
+        match self.streams.remove(&id) {
+            Some((_, entry)) => {
+                if !entry.exported() {
+                    entry.cancel.cancel();
+                }
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn stream_stats(&self, id: u64) -> Result<StreamStatsSnapshot> {
+        Ok(self.stream(id)?.snapshot())
+    }
+
+    pub fn stream_count(&self) -> usize {
+        self.streams.len()
+    }
+
     /// Stop accepting work and wait for the runtime to drain, bounded by `timeout`.
     pub fn shutdown(self: Arc<Engine>, timeout: Duration) {
+        for entry in self.streams.iter() {
+            entry.cancel.cancel();
+        }
+        self.streams.clear();
         self.sessions.clear();
         match Arc::try_unwrap(self) {
             Ok(engine) => engine.runtime.shutdown_timeout(timeout),
@@ -278,6 +450,36 @@ mod tests {
     }
 
     #[test]
+    fn execute_without_a_registered_database_is_a_configuration_error() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        engine.handle_json(&snapshot_json().to_string());
+        let session_id = engine
+            .create_session(SessionContext {
+                database_id: 42,
+                ..Default::default()
+            })
+            .unwrap();
+        let err = engine
+            .runtime()
+            .block_on(engine.execute(session_id, r#"SELECT "ID" FROM "public"."Orders""#, vec![]))
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::CatalogMissing);
+        assert!(err.message.contains("not registered"), "{}", err.message);
+    }
+
+    #[test]
+    fn registering_a_database_needs_a_connector_in_the_build() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        let response = engine.handle_json(
+            r#"{"op":"register_database","registration":{"database_id":42,"connector":"postgres","details":{}}}"#,
+        );
+        match response {
+            Response::Err { error } => assert_eq!(error.kind, ErrorKind::CatalogMissing),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn invalidate_drops_catalog_and_database() {
         let engine = Engine::new(EngineConfig::default()).unwrap();
         engine.handle_json(&snapshot_json().to_string());
@@ -286,6 +488,7 @@ mod tests {
             Response::Ok { result } => {
                 assert_eq!(result["catalog"], true);
                 assert_eq!(result["database"], false);
+                assert_eq!(result["pools"], 0);
             }
             other => panic!("{other:?}"),
         }
@@ -307,5 +510,16 @@ mod tests {
             Response::Err { error } => assert_eq!(error.kind, ErrorKind::InvalidRequest),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn unknown_streams_are_invalid_requests() {
+        let engine = Engine::new(EngineConfig::default()).unwrap();
+        assert!(!engine.cancel_stream(99));
+        assert!(!engine.close_stream(99));
+        assert_eq!(
+            engine.stream_stats(99).unwrap_err().kind,
+            ErrorKind::InvalidRequest
+        );
     }
 }

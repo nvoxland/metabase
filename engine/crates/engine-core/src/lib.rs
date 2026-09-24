@@ -8,6 +8,9 @@ pub mod engine;
 pub mod error;
 pub mod planner;
 pub mod policy;
+pub mod pools;
+pub mod schema_cast;
+pub mod stream;
 
 pub use api::{Request, Response, SessionContext};
 pub use engine::{Engine, EngineConfig, VERSION};

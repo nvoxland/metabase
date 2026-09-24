@@ -180,6 +180,13 @@
   org.postgresql/postgresql                 {:mvn/version "42.7.12"}            ; Postgres driver
   org.semver4j/semver4j                     {:mvn/version "6.0.0"}              ; Semantic versioning parsing & comparison
   org.suskalo/coffi                         {:mvn/version "1.0.615"}            ; Panama FFI bindings for the native query engine (see dev/notes/datafusion-engine.md)
+  ;; Apache Arrow: results from the native query engine. Pinned to the version the BigQuery driver bundles. Uses the
+  ;; unsafe allocator rather than Netty so no Netty lands in the core uberjar.
+  org.apache.arrow/arrow-c-data             {:mvn/version "18.3.0"}            ; Arrow C Data Interface (zero-copy streams from the engine)
+  org.apache.arrow/arrow-format             {:mvn/version "18.3.0"}
+  org.apache.arrow/arrow-memory-core        {:mvn/version "18.3.0"}
+  org.apache.arrow/arrow-memory-unsafe      {:mvn/version "18.3.0"}
+  org.apache.arrow/arrow-vector             {:mvn/version "18.3.0"}
   org.slf4j/slf4j-api                       {:mvn/version "2.0.17"}             ; abstraction for logging frameworks -- allows end user to plug in desired logging framework at deployment time
   org.tcrawley/dynapath                     {:mvn/version "1.1.0"}              ; Dynamically add Jars (e.g. Oracle or Vertica) to classpath
   org.threeten/threeten-extra               {:mvn/version "1.8.0"}              ; extra Java 8 java.time classes like DayOfMonth and Quarter

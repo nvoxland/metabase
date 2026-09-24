@@ -26,7 +26,9 @@ async fn call(client: &mut FlightClient, json: &str) -> serde_json::Value {
 fn call_action_carries_the_same_envelope_as_the_c_abi() {
     let engine = Engine::new(EngineConfig::default()).unwrap();
     let test_engine = Arc::clone(&engine);
-    engine.runtime().block_on(async move { run(test_engine).await });
+    engine
+        .runtime()
+        .block_on(async move { run(test_engine).await });
 }
 
 async fn run(engine: Arc<Engine>) {

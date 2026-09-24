@@ -35,7 +35,7 @@ fn parse_args() -> (SocketAddr, String) {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (listen, log) = parse_args();
     tracing_subscriber::fmt().with_env_filter(log).init();
-    let engine = Engine::new(EngineConfig::default())?;
+    let engine = Engine::with_connectors(EngineConfig::default(), engine_server::connectors())?;
     tracing::info!(%listen, version = Engine::version(), "engine sidecar listening");
     let runtime_engine = Arc::clone(&engine);
     runtime_engine.runtime().block_on(async move {

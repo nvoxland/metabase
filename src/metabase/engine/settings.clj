@@ -31,3 +31,13 @@
   :export?    false
   :doc        false
   :encryption :no)
+
+(defsetting query-engine
+  (deferred-tru "Which execution path runs queries for a database: jdbc (the database driver), datafusion (the native query engine), or shadow (both, comparing results).")
+  :type           :keyword
+  :default        :jdbc
+  :visibility     :internal
+  :export?        false
+  :doc            false
+  :encryption     :no
+  :database-local :allowed)

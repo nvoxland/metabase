@@ -6,7 +6,8 @@
   The C ABI (engine/include/metabase_engine.h) returns 0 on success, 1 on an engine error, and 2 on
   a contained panic. Errors are JSON on a thread-local slot read with `mb_engine_last_error`, so
   every read happens on the thread that made the call. Strings the engine returns through `char**`
-  are freed with `mb_engine_free_string`, never by the JVM."
+  are freed with `mb_engine_free_string`, never by the JVM. Query results arrive as an Arrow C Data
+  Interface stream that Arrow Java imports; releasing the reader releases the native side."
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
@@ -20,7 +21,10 @@
   (:import
    (java.io File)
    (java.lang.foreign MemorySegment)
-   (java.nio.file Files StandardCopyOption)))
+   (java.nio.file Files StandardCopyOption)
+   (org.apache.arrow.c ArrowArrayStream Data)
+   (org.apache.arrow.memory BufferAllocator RootAllocator)
+   (org.apache.arrow.vector.ipc ArrowReader)))
 
 (set! *warn-on-reflection* true)
 
@@ -89,12 +93,16 @@
   "Resolve the C ABI. Must run after the library is loaded, which is why nothing binds at namespace
   load time."
   []
-  {:version     (ffi/cfn "mb_engine_version" [] ::mem/c-string)
-   :init        (ffi/cfn "mb_engine_init" [::mem/c-string ::mem/pointer] ::mem/int)
-   :shutdown    (ffi/cfn "mb_engine_shutdown" [::mem/pointer ::mem/int] ::mem/int)
-   :call        (ffi/cfn "mb_engine_call" [::mem/pointer ::mem/c-string ::mem/pointer] ::mem/int)
-   :last-error  (ffi/cfn "mb_engine_last_error" [] ::mem/c-string)
-   :free-string (ffi/cfn "mb_engine_free_string" [::mem/pointer] ::mem/void)})
+  {:version       (ffi/cfn "mb_engine_version" [] ::mem/c-string)
+   :init          (ffi/cfn "mb_engine_init" [::mem/c-string ::mem/pointer] ::mem/int)
+   :shutdown      (ffi/cfn "mb_engine_shutdown" [::mem/pointer ::mem/int] ::mem/int)
+   :call          (ffi/cfn "mb_engine_call" [::mem/pointer ::mem/c-string ::mem/pointer] ::mem/int)
+   :last-error    (ffi/cfn "mb_engine_last_error" [] ::mem/c-string)
+   :free-string   (ffi/cfn "mb_engine_free_string" [::mem/pointer] ::mem/void)
+   :execute       (ffi/cfn "mb_engine_execute" [::mem/pointer ::mem/long ::mem/c-string ::mem/c-string ::mem/pointer] ::mem/int)
+   :stream-export (ffi/cfn "mb_engine_stream_export" [::mem/pointer ::mem/long ::mem/pointer] ::mem/int)
+   :stream-cancel (ffi/cfn "mb_engine_stream_cancel" [::mem/pointer ::mem/long] ::mem/int)
+   :stream-close  (ffi/cfn "mb_engine_stream_close" [::mem/pointer ::mem/long] ::mem/int)})
 
 (defonce ^:private library (atom nil))
 
@@ -124,6 +132,14 @@
   []
   (:path @library))
 
+;;; ---------------------------------------------------- memory ---------------------------------------------------------
+
+(defonce ^:private root-allocator
+  (delay (RootAllocator.)))
+
+(defn- child-allocator ^BufferAllocator [^String name]
+  (.newChildAllocator ^RootAllocator @root-allocator name 0 Long/MAX_VALUE))
+
 ;;; --------------------------------------------------- transport --------------------------------------------------------
 
 (defn- take-string!
@@ -137,8 +153,33 @@
   (or ((:last-error fns))
       (json/encode {:kind "internal_panic" :error_type "qp" :message "engine returned an error without details"})))
 
+(defn- last-error-exception [fns]
+  (protocol/engine-error->exception (json/decode+kw (last-error-json fns))))
+
 (defn- err-envelope [error-json]
   (str "{\"status\":\"err\",\"error\":" error-json "}"))
+
+(defn- export-stream!
+  "Export a started stream as an Arrow reader. On failure the native stream is closed."
+  [fns handle stream-id]
+  (let [allocator (child-allocator (str "engine-stream-" stream-id))
+        stream    (ArrowArrayStream/allocateNew allocator)
+        code      (long ((:stream-export fns) handle stream-id (mem/as-segment (.memoryAddress stream))))]
+    (if (zero? code)
+      (let [reader (Data/importArrayStream allocator stream)]
+        {:reader  reader
+         :cancel! (fn [] ((:stream-cancel fns) handle stream-id))
+         :close!  (fn []
+                    (try
+                      (.close ^ArrowReader reader)
+                      (finally
+                        ((:stream-close fns) handle stream-id)
+                        (.close allocator))))})
+      (let [e (last-error-exception fns)]
+        (.close stream)
+        (.close allocator)
+        ((:stream-close fns) handle stream-id)
+        (throw e)))))
 
 (deftype FfiTransport [fns ^MemorySegment handle ^:volatile-mutable closed?]
   protocol/Transport
@@ -153,6 +194,16 @@
           (not (mem/null? ptr)) (take-string! fns ptr)
           (= code 0)            (throw (ex-info (tru "The native query engine returned no response.") {:code code}))
           :else                 (err-envelope (last-error-json fns))))))
+  (-execute [_ session-id sql params]
+    (when closed?
+      (throw (ex-info (tru "The native query engine has been shut down.") {})))
+    (let [stream-id (with-open [arena (mem/confined-arena)]
+                      (let [out  (mem/alloc-instance ::mem/long arena)
+                            code (long ((:execute fns) handle (long session-id) sql (json/encode (or params [])) out))]
+                        (when-not (zero? code)
+                          (throw (last-error-exception fns)))
+                        (mem/read-long out)))]
+      (export-stream! fns handle stream-id)))
   (-close [_]
     (when-not closed?
       (set! closed? true)

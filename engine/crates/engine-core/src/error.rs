@@ -106,14 +106,34 @@ impl EngineError {
 impl From<datafusion::error::DataFusionError> for EngineError {
     fn from(e: datafusion::error::DataFusionError) -> Self {
         use datafusion::error::DataFusionError as DF;
+        if let DF::External(inner) = &e {
+            if let Some(engine_error) = inner.downcast_ref::<EngineError>() {
+                return engine_error.clone();
+            }
+        }
+        if let DF::ArrowError(inner, _) = &e {
+            if let arrow::error::ArrowError::ExternalError(external) = inner.as_ref() {
+                if let Some(engine_error) = external.downcast_ref::<EngineError>() {
+                    return engine_error.clone();
+                }
+            }
+        }
         let kind = match &e {
             DF::SQL(_, _) => ErrorKind::Parse,
             DF::Plan(_) | DF::SchemaError(_, _) => ErrorKind::Plan,
             DF::NotImplemented(_) => ErrorKind::Unsupported,
+            DF::Execution(_) | DF::ArrowError(_, _) | DF::External(_) => ErrorKind::Warehouse,
+            DF::ResourcesExhausted(_) => ErrorKind::Warehouse,
             _ => ErrorKind::Plan,
         };
         // `strip_backtrace` keeps the message readable for people.
         EngineError::new(kind, e.strip_backtrace())
+    }
+}
+
+impl From<EngineError> for datafusion::error::DataFusionError {
+    fn from(e: EngineError) -> Self {
+        datafusion::error::DataFusionError::External(Box::new(e))
     }
 }
 

@@ -925,6 +925,7 @@
            appearance
            audit-app
            auth-provider
+           engine
            events
            lib
            lib.be
@@ -988,8 +989,16 @@
   ;; The native query engine (see dev/notes/datafusion-engine.md).
   engine
   {:team "Querying Platform"
-   :api  #{metabase.engine.init}
-   :uses #{settings util util.config}}
+   :api  #{metabase.engine.arrow
+           metabase.engine.catalog
+           metabase.engine.core
+           metabase.engine.init
+           metabase.engine.routing}
+   :uses #{settings
+           util
+           util.config
+           warehouse-schema-overlay}
+   :model-imports #{:model/Field :model/Table}}
 
   events
   {:team "DevEx"
@@ -2219,6 +2228,7 @@
            dashboards
            database-routing
            driver
+           engine
            events
            formatter
            lib

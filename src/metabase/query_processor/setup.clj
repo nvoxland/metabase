@@ -8,6 +8,7 @@
    [metabase.driver :as driver]
    [metabase.driver.settings :as driver.settings]
    [metabase.driver.util :as driver.u]
+   [metabase.engine.routing :as engine.routing]
    [metabase.lib.computed :as lib.computed]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.metadata.protocols :as lib.metadata.protocols]
@@ -162,27 +163,28 @@
 (mu/defn- do-with-driver :- fn?
   [f :- fn?]
   (fn [query]
-    (cond
-      driver/*driver*
-      (do
+    (if (= (query-type query) :internal)
+      (f query)
+      (let [warehouse-driver (driver.u/database->driver (:database query))
+            bound            driver/*driver*]
         ;; dev mode: check that we're not doing something crazy like binding `driver/*driver*` to `:h2` and the
         ;; running tests against the Audit App DB with a Postgres app DB. (This was a real test I had to fix.)
-        (when (or config/is-dev? config/is-test?)
-          (let [expected-driver (driver.u/database->driver (:database query))]
-            (when-not (= driver/*driver* expected-driver)
-              (log/warnf "driver/*driver* is bound to %s, but Database %d has engine %s. Query may not work as expected."
-                         driver/*driver*
-                         (:database query)
-                         expected-driver))))
-        (f query))
-
-      (= (query-type query) :internal)
-      (f query)
-
-      :else
-      (let [driver (driver.u/database->driver (:database query))]
-        (driver/with-driver driver
-          (f query))))))
+        (when (and bound
+                   (not= bound warehouse-driver)
+                   (not= bound :datafusion)
+                   (or config/is-dev? config/is-test?))
+          (log/warnf "driver/*driver* is bound to %s, but Database %d has engine %s. Query may not work as expected."
+                     bound
+                     (:database query)
+                     warehouse-driver))
+        ;; Databases routed to the native query engine compile and execute with the `:datafusion` driver instead of
+        ;; their own; see `metabase.engine.routing`.
+        (let [database (lib.metadata/database (qp.store/metadata-provider))
+              driver   (engine.routing/effective-driver query database (or bound warehouse-driver) warehouse-driver)]
+          (if (= driver bound)
+            (f query)
+            (driver/with-driver driver
+              (f query))))))))
 
 (mu/defn- do-with-database-local-settings :- fn?
   [f :- fn?]

@@ -60,8 +60,9 @@ impl Planner {
         Ok(plan)
     }
 
-    /// Analyze, reject unsupported constructs, and unparse to the warehouse dialect.
-    pub async fn plan_and_unparse(&self, sql: &str, _params: &[ParamValue]) -> Result<PlanResult> {
+    /// Analyze, reject unsupported constructs, and unparse to the warehouse dialect, keeping the
+    /// plan's Arrow schema for execution.
+    pub async fn plan(&self, sql: &str) -> Result<Planned> {
         let plan = self.analyze(sql).await?;
         self.reject_unsupported(&plan)?;
         let statement = Unparser::new(self.policy.dialect()).plan_to_sql(&plan)?;
@@ -69,10 +70,29 @@ impl Planner {
         if let Some(remark) = &self.context.remark {
             warehouse_sql = format!("-- {}\n{}", single_line(remark), warehouse_sql);
         }
-        Ok(PlanResult {
+        Ok(Planned {
             warehouse_sql,
-            warehouse: self.policy.warehouse().name().to_string(),
-            schema: schema_info(&plan),
+            warehouse: self.policy.warehouse(),
+            schema: Arc::new(plan.schema().as_arrow().clone()),
+        })
+    }
+
+    /// [`Planner::plan`] in the JSON-friendly shape.
+    pub async fn plan_and_unparse(&self, sql: &str, _params: &[ParamValue]) -> Result<PlanResult> {
+        let planned = self.plan(sql).await?;
+        Ok(PlanResult {
+            warehouse_sql: planned.warehouse_sql,
+            warehouse: planned.warehouse.name().to_string(),
+            schema: planned
+                .schema
+                .fields()
+                .iter()
+                .map(|f| FieldInfo {
+                    name: f.name().clone(),
+                    arrow_type: f.data_type().to_string(),
+                    nullable: f.is_nullable(),
+                })
+                .collect(),
             warnings: vec![],
         })
     }
@@ -144,16 +164,11 @@ fn single_line(s: &str) -> String {
     s.replace(['\r', '\n'], " ")
 }
 
-fn schema_info(plan: &LogicalPlan) -> Vec<FieldInfo> {
-    plan.schema()
-        .fields()
-        .iter()
-        .map(|f| FieldInfo {
-            name: f.name().clone(),
-            arrow_type: f.data_type().to_string(),
-            nullable: f.is_nullable(),
-        })
-        .collect()
+/// What execution needs from planning.
+pub struct Planned {
+    pub warehouse_sql: String,
+    pub warehouse: Warehouse,
+    pub schema: arrow::datatypes::SchemaRef,
 }
 
 fn build_state(catalog: Arc<SnapshotCatalog>, context: &SessionContext) -> SessionState {
@@ -278,6 +293,21 @@ mod tests {
         assert_eq!(result.schema.len(), 3);
         assert_eq!(result.schema[2].name, "count");
         assert_eq!(result.schema[2].arrow_type, "Int64");
+    }
+
+    #[tokio::test]
+    async fn array_subscript_round_trips_for_regex_capture_groups() {
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT regexp_match("Title", '^(\w+)')[1] AS "m" FROM "public"."Products" LIMIT 2"#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.warehouse_sql,
+            r#"SELECT regexp_match("Products"."Title", '^(\w+)')[1] AS "m" FROM "public"."Products" LIMIT 2"#
+        );
     }
 
     #[tokio::test]

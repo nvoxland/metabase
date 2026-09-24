@@ -39,12 +39,6 @@
       (protocol/-close t)
       (reset! transport* nil))))
 
-(defn- error->exception [{:keys [error_type message] :as error}]
-  (ex-info (or message (tru "The query engine reported an error."))
-           (assoc error
-                  :type (keyword (or error_type "qp"))
-                  :engine/error error)))
-
 (defn call!
   "Send `request` (a map with an `:op`) to the engine and return its result, throwing on an `err`
   envelope."
@@ -52,7 +46,7 @@
   (let [response (json/decode+kw (protocol/-call (transport) (json/encode request)))]
     (case (:status response)
       "ok"  (:result response)
-      "err" (throw (error->exception (:error response)))
+      "err" (throw (protocol/engine-error->exception (:error response)))
       (throw (ex-info (tru "Unexpected response from the query engine.") {:response response})))))
 
 (defn healthy?
@@ -112,6 +106,13 @@
    (plan-and-unparse session-id sql []))
   ([session-id sql params]
    (call! {:op "plan_and_unparse" :session_id session-id :sql sql :params params})))
+
+(defn execute!
+  "Plan and start engine-dialect `sql` in `session-id`. Returns `{:reader ArrowReader, :cancel! fn,
+  :close! fn}`; call `:close!` exactly once, which also stops the statement if it is still running.
+  `params` are `{:type <Arrow type> :value <JSON value>}` maps bound to `$1`, `$2`, ..."
+  [session-id sql params]
+  (protocol/-execute (transport) session-id sql params))
 
 (defn pool-stats
   "Connection pool statistics, for all databases or one."

@@ -14,8 +14,15 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use arrow::ffi_stream::FFI_ArrowArrayStream;
 use engine_core::api::{Request, Response, SessionContext};
+use engine_core::connector::Connector;
 use engine_core::{Engine, EngineConfig, EngineError, ErrorKind};
+
+/// The warehouse connectors compiled into this library.
+pub fn connectors() -> Vec<Arc<dyn Connector>> {
+    vec![Arc::new(engine_connector_postgres::PostgresConnector)]
+}
 
 pub const MB_OK: i32 = 0;
 pub const MB_ERROR: i32 = 1;
@@ -136,7 +143,7 @@ pub unsafe extern "C" fn mb_engine_init(
                 serde_json::from_str(s)?
             }
         };
-        let inner = Engine::new(config)?;
+        let inner = Engine::with_connectors(config, connectors())?;
         *out = Box::into_raw(Box::new(MbEngine { inner }));
         Ok(())
     })
@@ -328,71 +335,105 @@ pub unsafe extern "C" fn mb_engine_pool_stats(
     })
 }
 
-/// Start executing `sql`; rows arrive through `mb_engine_stream_export`. Not implemented yet.
+/// Plan and start `sql` in the session; rows arrive through `mb_engine_stream_export`.
 ///
 /// # Safety
-/// See crate docs.
+/// `out_stream_id` must point to a writable u64.
 #[no_mangle]
 pub unsafe extern "C" fn mb_engine_execute(
     e: *const MbEngine,
-    _session_id: u64,
-    _sql: *const c_char,
-    _params_json: *const c_char,
-    _out_stream_id: *mut u64,
+    session_id: u64,
+    sql: *const c_char,
+    params_json: *const c_char,
+    out_stream_id: *mut u64,
 ) -> i32 {
     guarded(|| {
-        engine(e)?;
-        Err(EngineError::not_implemented("execute"))
+        if out_stream_id.is_null() {
+            return Err(EngineError::invalid_request("output pointer is null"));
+        }
+        let engine = engine(e)?;
+        let sql = borrow_str(sql, "sql")?.to_string();
+        let params = if params_json.is_null() {
+            vec![]
+        } else {
+            serde_json::from_str(borrow_str(params_json, "params_json")?)?
+        };
+        let id = engine
+            .runtime()
+            .block_on(engine.execute(session_id, &sql, params))?;
+        *out_stream_id = id;
+        Ok(())
     })
 }
 
-/// Export a stream as an `ArrowArrayStream` into caller-allocated memory (40 bytes).
-/// The caller must call the stream's `release` exactly once. Not implemented yet.
+/// Export a stream as an `ArrowArrayStream` into caller-allocated memory (40 bytes, zeroed).
+/// The caller pulls batches through the struct's callbacks and must call its `release` exactly
+/// once; releasing before the end cancels the statement. Only the first export of a stream succeeds.
 ///
 /// # Safety
-/// See crate docs.
+/// `out_stream` must point to at least 40 writable, 8-byte-aligned bytes that stay valid until released.
 #[no_mangle]
 pub unsafe extern "C" fn mb_engine_stream_export(
     e: *const MbEngine,
-    _stream_id: u64,
-    _out_stream: *mut c_void,
+    stream_id: u64,
+    out_stream: *mut c_void,
 ) -> i32 {
     guarded(|| {
-        engine(e)?;
-        Err(EngineError::not_implemented("stream_export"))
+        if out_stream.is_null() {
+            return Err(EngineError::invalid_request("output pointer is null"));
+        }
+        let engine = engine(e)?;
+        let reader = engine.blocking_reader(stream_id)?;
+        let exported = FFI_ArrowArrayStream::new(Box::new(reader));
+        std::ptr::write(out_stream as *mut FFI_ArrowArrayStream, exported);
+        Ok(())
     })
 }
 
+/// Stop a running statement. Safe from any thread.
+///
 /// # Safety
 /// See crate docs.
 #[no_mangle]
 pub unsafe extern "C" fn mb_engine_stream_cancel(e: *const MbEngine, stream_id: u64) -> i32 {
     guarded(|| {
         let engine = engine(e)?;
-        response_to_result(engine.handle(Request::Cancel { stream_id })).map(|_| ())
+        if engine.cancel_stream(stream_id) {
+            Ok(())
+        } else {
+            Err(EngineError::invalid_request(format!(
+                "no stream {stream_id}"
+            )))
+        }
     })
 }
 
+/// Forget a stream handle (after the exported stream was released). Cancels it if still running.
+///
 /// # Safety
 /// See crate docs.
 #[no_mangle]
-pub unsafe extern "C" fn mb_engine_stream_close(e: *const MbEngine, _stream_id: u64) -> i32 {
+pub unsafe extern "C" fn mb_engine_stream_close(e: *const MbEngine, stream_id: u64) -> i32 {
     guarded(|| {
-        engine(e)?;
-        Err(EngineError::not_implemented("stream_close"))
+        let engine = engine(e)?;
+        engine.close_stream(stream_id);
+        Ok(())
     })
 }
 
+/// `{"rows", "batches", "bytes", "elapsed_ms", "exported", "cancelled"}` for a stream.
+///
 /// # Safety
 /// See crate docs.
 #[no_mangle]
 pub unsafe extern "C" fn mb_engine_stream_stats(
     e: *const MbEngine,
-    _stream_id: u64,
-    _out_json: *mut *mut c_char,
+    stream_id: u64,
+    out_json: *mut *mut c_char,
 ) -> i32 {
     guarded(|| {
-        engine(e)?;
-        Err(EngineError::not_implemented("stream_stats"))
+        let engine = engine(e)?;
+        let stats = engine.stream_stats(stream_id)?;
+        write_out_string(out_json, serde_json::to_string(&stats)?)
     })
 }

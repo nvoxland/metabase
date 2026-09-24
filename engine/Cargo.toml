@@ -54,6 +54,10 @@ deadpool-postgres = "0.14.2"
 tokio-postgres-rustls = "0.14.0"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 chrono = "0.4"
+rust_decimal = { version = "1", features = ["db-postgres"] }
+uuid = { version = "1", features = ["v4"] }
+rustls-native-certs = "0.8"
+bytes = "1"
 
 # build / test
 cbindgen = "0.29.4"
