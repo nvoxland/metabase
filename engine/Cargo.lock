@@ -1567,8 +1567,19 @@ checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 name = "engine-connector-jdbc-bridge"
 version = "0.1.0"
 dependencies = [
+ "arrow",
+ "arrow-flight",
  "async-trait",
+ "datafusion",
  "engine-core",
+ "engine-dialects",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]
@@ -1634,6 +1645,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "cbindgen",
+ "engine-connector-jdbc-bridge",
  "engine-connector-postgres",
  "engine-core",
  "libloading",
@@ -1647,6 +1659,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "arrow-flight",
+ "engine-connector-jdbc-bridge",
  "engine-connector-postgres",
  "engine-core",
  "futures",

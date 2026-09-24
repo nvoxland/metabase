@@ -25,7 +25,10 @@ type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'stati
 
 /// The warehouse connectors compiled into the sidecar.
 pub fn connectors() -> Vec<Arc<dyn Connector>> {
-    vec![Arc::new(engine_connector_postgres::PostgresConnector)]
+    vec![
+        Arc::new(engine_connector_postgres::PostgresConnector),
+        Arc::new(engine_connector_jdbc_bridge::JdbcBridgeConnector),
+    ]
 }
 
 /// What a `DoGet` ticket carries: the session (created through the `call` action), the SQL, and

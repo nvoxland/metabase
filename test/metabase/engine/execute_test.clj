@@ -3,6 +3,8 @@
   JDBC path. Needs the engine library built and the Postgres test dataset (`DRIVERS=postgres`)."
   (:require
    [clojure.test :refer :all]
+   [metabase.driver.datafusion]
+   [metabase.engine-bridge.core :as engine-bridge]
    [metabase.engine.core :as engine]
    [metabase.engine.settings :as engine.settings]
    [metabase.engine.shadow :as engine.shadow]
@@ -144,3 +146,21 @@
           (let [[entry] (engine.shadow/recent)]
             (is (some? entry))
             (is (true? (:match? entry)) (pr-str (dissoc entry :query)))))))))
+
+(deftest ^:mb/engine-tests ^:mb/driver-tests bridged-queries-match-jdbc-test
+  (testing "a warehouse routed through the JDBC bridge answers like JDBC: the engine plans, Metabase's own pool executes"
+    (mt/test-drivers #{:postgres}
+      (engine.tu/with-engine
+        (engine-bridge/stop!)
+        (engine-bridge/start! 0 nil)
+        (try
+          (mt/with-temporary-setting-values [engine-bridge-warehouses "postgres"]
+            (metabase.driver.datafusion/forget-database! (mt/id))
+            (let [query    (mt/mbql-query venues {:aggregation [[:count] [:sum $price]] :breakout [$category_id] :limit 5})
+                  expected (mt/rows (qp/process-query query))]
+              (mt/with-temporary-setting-values [query-engine :datafusion]
+                (is (same-rows? expected (mt/rows (qp/process-query query))))
+                (is (= "jdbc-bridge" (-> (engine/pool-stats (mt/id)) :pools first :connector))))))
+          (finally
+            (engine-bridge/stop!)
+            (metabase.driver.datafusion/forget-database! (mt/id))))))))

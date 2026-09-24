@@ -8,9 +8,15 @@
    [metabase.lib.metadata :as lib.metadata]
    [metabase.settings.core :as setting]))
 
-(def ^:private engine-warehouses
-  "Warehouses the engine has a dialect and a connector for."
+(def ^:private native-warehouses
+  "Warehouses the engine has a dialect and a Rust connector for."
   #{:postgres})
+
+(defn engine-warehouses
+  "Warehouses the engine can run queries against: those with a Rust connector, plus the ones the
+  JDBC bridge is configured for (their dialect must still exist in the engine)."
+  []
+  (into native-warehouses (engine.settings/bridge-warehouses)))
 
 (defn- source-card-ids
   "Every card the query draws from, in any stage or join (`:source-card` in MBQL 5, `card__N` legacy)."
@@ -108,7 +114,7 @@
 (defn- routable?
   "Whether `query` against `warehouse-driver` could run through the engine at all."
   [query metadata-provider database warehouse-driver]
-  (and (contains? engine-warehouses warehouse-driver)
+  (and (contains? (engine-warehouses) warehouse-driver)
        (details-supported? (:details database))
        (not (native-query? query metadata-provider))
        (not (nested-field-column-query? query metadata-provider))))
@@ -140,7 +146,7 @@
   "The driver sync should use for `database`: `:datafusion` when the database is routed to the
   engine (not in shadow mode, which keeps the driver as the source of truth), else its own driver."
   [database warehouse-driver]
-  (if (and (contains? engine-warehouses warehouse-driver)
+  (if (and (contains? (engine-warehouses) warehouse-driver)
            (details-supported? (:details database))
            (= :datafusion (engine-mode database)))
     :datafusion

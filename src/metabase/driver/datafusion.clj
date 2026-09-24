@@ -21,8 +21,10 @@
    [metabase.engine.arrow :as engine.arrow]
    [metabase.engine.catalog :as engine.catalog]
    [metabase.engine.core :as engine]
+   [metabase.engine.settings :as engine.settings]
    [metabase.premium-features.core :refer [defenterprise]]
    [metabase.util :as u]
+   [metabase.util.i18n :refer [tru]]
    [metabase.util.log :as log]
    [metabase.util.performance :as perf])
   (:import
@@ -100,10 +102,20 @@
     (when (not= (engine/registration (:id database)) stamp)
       (let [snapshot (engine.catalog/snapshot database)]
         (log/infof "Registering database %d with the native query engine (%s)" (:id database) (:catalog_version snapshot))
-        (engine/register-database! {:database_id (:id database)
-                                    :connector   (name (:engine database))
-                                    :details     details
-                                    :pool        (pool-config)})
+        (engine/register-database! (if (contains? (engine.settings/bridge-warehouses) (:engine database))
+                                     ;; the engine reaches this warehouse through Metabase's own JDBC pool
+                                     {:database_id (:id database)
+                                      :connector   "jdbc-bridge"
+                                      :details     {:url         (or (engine.settings/bridge-url)
+                                                                     (throw (ex-info (tru "The JDBC bridge is not running.") {})))
+                                                    :token       (engine.settings/bridge-token)
+                                                    :database_id (:id database)
+                                                    :warehouse   (name (:engine database))}
+                                      :pool        (pool-config)}
+                                     {:database_id (:id database)
+                                      :connector   (name (:engine database))
+                                      :details     details
+                                      :pool        (pool-config)}))
         (engine/register-catalog! snapshot)
         (engine/remember-registration! (:id database) stamp)))))
 

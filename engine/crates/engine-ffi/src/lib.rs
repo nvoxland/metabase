@@ -21,7 +21,10 @@ use engine_core::{Engine, EngineConfig, EngineError, ErrorKind};
 
 /// The warehouse connectors compiled into this library.
 pub fn connectors() -> Vec<Arc<dyn Connector>> {
-    vec![Arc::new(engine_connector_postgres::PostgresConnector)]
+    vec![
+        Arc::new(engine_connector_postgres::PostgresConnector),
+        Arc::new(engine_connector_jdbc_bridge::JdbcBridgeConnector),
+    ]
 }
 
 pub const MB_OK: i32 = 0;

@@ -17,6 +17,8 @@ use datafusion::sql::unparser::dialect::{
 };
 use datafusion::sql::unparser::Unparser;
 
+pub mod udfs;
+
 /// A warehouse we can unparse to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Warehouse {
@@ -239,6 +241,27 @@ impl MetabasePostgresDialect {
     }
 }
 
+impl MetabasePostgresDialect {
+    /// Render a one-argument engine UDF as `CAST(arg AS type)`.
+    fn cast_to(
+        &self,
+        unparser: &Unparser,
+        args: &[Expr],
+        data_type: ast::DataType,
+    ) -> DFResult<Option<ast::Expr>> {
+        if args.len() != 1 {
+            return Ok(None);
+        }
+        Ok(Some(ast::Expr::Cast {
+            kind: ast::CastKind::Cast,
+            expr: Box::new(unparser.expr_to_sql(&args[0])?),
+            data_type,
+            format: None,
+            array: false,
+        }))
+    }
+}
+
 impl Dialect for MetabasePostgresDialect {
     fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
         self.inner.identifier_quote_style(identifier)
@@ -294,6 +317,11 @@ impl Dialect for MetabasePostgresDialect {
             "substr" | "substring" => self.substr_with_int_positions(unparser, args),
             "array_element" => self.parenthesized_subscript(unparser, args),
             "to_timestamp" => self.to_timestamp_with_postgres_format(unparser, args),
+            udfs::MB_TO_TIME => self.cast_to(
+                unparser,
+                args,
+                ast::DataType::Time(None, ast::TimezoneInfo::None),
+            ),
             _ => self
                 .inner
                 .scalar_function_to_sql_overrides(unparser, func_name, args),
@@ -432,6 +460,7 @@ const POSTGRES_FUNCTIONS: &[&str] = &[
     "regr_syy",
     "regr_sxy",
     "percentile_cont",
+    udfs::MB_TO_TIME,
     "percentile_disc",
     // window
     "row_number",

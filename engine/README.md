@@ -76,6 +76,17 @@ per-platform builds from `.github/workflows/engine.yml` there before building th
 The Alpine image needs `libgcc` (added to `bin/docker/Dockerfile`) because a musl build without
 `crt-static` links `libgcc_s` dynamically.
 
+## The JDBC bridge
+
+Warehouses without a good Rust driver are reached through `crates/engine-connectors/jdbc-bridge`: a
+Flight client for a small service Metabase hosts over its own JDBC pools
+(`metabase.engine-bridge.core`, loopback only, token in every ticket). The engine still plans and
+unparses; the bridge only executes the warehouse SQL and streams Arrow batches back. Turn it on with
+`MB_ENGINE_BRIDGE_ENABLED=true` and list the engines it serves in `MB_ENGINE_BRIDGE_WAREHOUSES`
+(comma separated); a database whose engine is listed registers with the `jdbc-bridge` connector
+instead of a native one. The dialect still comes from the catalog snapshot, so only warehouses the
+engine has a dialect for can be bridged.
+
 ## Conventions
 
 - Nothing runs on the caller's thread. The C ABI hands every request to the engine's worker

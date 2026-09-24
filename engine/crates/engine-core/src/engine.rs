@@ -287,15 +287,7 @@ impl Engine {
                     ),
                 )
             })?;
-        if registration.connector != session.catalog.connector {
-            return Err(EngineError::new(
-                ErrorKind::CatalogMissing,
-                format!(
-                    "database {} is registered as {:?} but its catalog says {:?}",
-                    registration.database_id, registration.connector, session.catalog.connector
-                ),
-            ));
-        }
+        ensure_registration_matches_catalog(&registration, &session.catalog.connector)?;
         let (connector, pool) = self.pools.pool_for(&registration).await?;
         let settings = SessionSettings {
             time_zone: session.context.report_timezone.clone(),
@@ -627,5 +619,70 @@ mod tests {
             engine.stream_stats(99).unwrap_err().kind,
             ErrorKind::InvalidRequest
         );
+    }
+}
+
+/// A catalog snapshot names the warehouse (its dialect); a registration names the connector that
+/// reaches it. They must agree: the native connector of that warehouse, or the JDBC bridge
+/// carrying that warehouse's SQL.
+fn ensure_registration_matches_catalog(
+    registration: &DatabaseRegistration,
+    catalog_warehouse: &str,
+) -> Result<()> {
+    let bridged_warehouse = registration
+        .details
+        .get("warehouse")
+        .and_then(serde_json::Value::as_str);
+    let matches = registration.connector == catalog_warehouse
+        || (registration.connector == "jdbc-bridge"
+            && bridged_warehouse == Some(catalog_warehouse));
+    if matches {
+        Ok(())
+    } else {
+        Err(EngineError::new(
+            ErrorKind::CatalogMissing,
+            format!(
+                "database {} is registered with connector {:?} (warehouse {:?}) but its catalog says {:?}",
+                registration.database_id, registration.connector, bridged_warehouse, catalog_warehouse
+            ),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod registration_tests {
+    use super::*;
+    use crate::api::PoolConfig;
+
+    fn registration(connector: &str, details: serde_json::Value) -> DatabaseRegistration {
+        DatabaseRegistration {
+            database_id: 1,
+            connector: connector.into(),
+            details,
+            pool: PoolConfig::default(),
+        }
+    }
+
+    #[test]
+    fn native_connector_must_match_the_catalog_warehouse() {
+        assert!(ensure_registration_matches_catalog(
+            &registration("postgres", serde_json::json!({})),
+            "postgres"
+        )
+        .is_ok());
+        assert!(ensure_registration_matches_catalog(
+            &registration("mysql", serde_json::json!({})),
+            "postgres"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn the_bridge_matches_when_its_warehouse_does() {
+        let bridged = registration("jdbc-bridge", serde_json::json!({"warehouse": "postgres"}));
+        assert!(ensure_registration_matches_catalog(&bridged, "postgres").is_ok());
+        assert!(ensure_registration_matches_catalog(&bridged, "mysql").is_err());
+        let unnamed = registration("jdbc-bridge", serde_json::json!({}));
+        assert!(ensure_registration_matches_catalog(&unnamed, "postgres").is_err());
     }
 }

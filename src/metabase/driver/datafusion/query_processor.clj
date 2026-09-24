@@ -14,6 +14,7 @@
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.sql.query-processor.format :as sql.qp.format]
    [metabase.util.honey-sql-2 :as h2x]
+   [metabase.util.i18n :refer [tru]]
    [metabase.util.malli :as mu]))
 
 (set! *warn-on-reflection* true)
@@ -61,6 +62,12 @@
 (defn- ->timestamp [expr]
   (h2x/->pg-timestamp expr))
 
+(defn- ->time
+  "Cast to `time`. `CAST(x AS TIME)` plans as a nanosecond time the engine's unparser can't spell, so the engine's
+  `mb_to_time` stands in for it and each dialect renders the cast."
+  [expr]
+  (h2x/with-database-type-info [:mb_to_time expr] "time"))
+
 (defn- two-digits
   "A time-of-day part as a two-character string, in both dialects."
   [part expr]
@@ -73,9 +80,7 @@
   (let [hour   (two-digits :hour expr)
         minute (if (#{:minute :second} unit) (two-digits :minute expr) (h2x/literal "00"))
         second (if (= unit :second) (two-digits :second expr) (h2x/literal "00"))]
-    (h2x/with-database-type-info
-     (h2x/cast "time" [:concat hour (h2x/literal ":") minute (h2x/literal ":") second])
-     "time")))
+    (->time [:concat hour (h2x/literal ":") minute (h2x/literal ":") second])))
 
 (mu/defn- date-trunc
   [unit :- driver-api/schema.temporal-bucketing.unit.date-time.truncate
@@ -232,7 +237,7 @@
 
 (defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/ISO8601->Time]
   [_driver _coercion-strategy expr]
-  (h2x/cast "time" expr))
+  (->time expr))
 
 ;;; DataFusion's one-argument `log` is base 10, like Postgres'. The two-argument form Postgres only has for
 ;;; `numeric`, which a double column can't satisfy.
@@ -245,3 +250,10 @@
 (defmethod sql.qp/->honeysql [:datafusion :median]
   [driver [_ _opts arg]]
   (sql.qp/->honeysql driver [:percentile {} arg 0.5]))
+
+;;; `:convert-timezone` is declared unsupported (`database-supports?`), but a query built for the warehouse driver can
+;;; still carry one; say so plainly instead of failing deep in the compiler.
+(defmethod sql.qp/->honeysql [:datafusion :convert-timezone]
+  [_driver _clause]
+  (throw (ex-info (tru "The native query engine does not support convertTimezone yet.")
+                  {:type driver-api/qp.error-type.unsupported-feature})))

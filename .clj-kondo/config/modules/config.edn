@@ -994,6 +994,7 @@
            metabase.engine.core
            metabase.engine.init
            metabase.engine.routing
+           metabase.engine.settings
            metabase.engine.shadow}
    :uses #{events
            lib.metadata
@@ -1002,6 +1003,17 @@
            util.config
            warehouse-schema-overlay}
    :model-imports #{:model/Field :model/Table}}
+
+  ;; The JDBC bridge: an Arrow Flight service over Metabase's JDBC pools, for warehouses the native query engine
+  ;; has no Rust connector for (see dev/notes/datafusion-engine.md).
+  engine-bridge
+  {:team "Querying Platform"
+   :api  #{metabase.engine-bridge.init}
+   :uses #{driver
+           engine
+           startup
+           util}
+   :model-imports #{:model/Database}}
 
   events
   {:team "DevEx"

@@ -19,6 +19,7 @@ path = "src/main.rs"
 [dependencies]
 engine-core = { path = "../engine-core" }
 engine-connector-postgres = { path = "../engine-connectors/postgres" }
+engine-connector-jdbc-bridge = { path = "../engine-connectors/jdbc-bridge" }
 arrow.workspace = true
 arrow-flight.workspace = true
 tonic.workspace = true

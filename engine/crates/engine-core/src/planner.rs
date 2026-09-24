@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::execution::context::SessionState;
+use datafusion::execution::FunctionRegistry;
 use datafusion::execution::SessionStateBuilder;
 use datafusion::logical_expr::{Expr, LogicalPlan, Projection, WindowFunctionDefinition};
 use datafusion::sql::parser::Statement as DFStatement;
@@ -267,14 +268,18 @@ fn build_state(catalog: Arc<SnapshotCatalog>, context: &SessionContext) -> Sessi
             options.execution.time_zone = Some(tz.clone());
         }
     }
-    SessionStateBuilder::new()
+    let mut state = SessionStateBuilder::new()
         .with_config(config)
         .with_default_features()
         .with_catalog_list(catalog)
         .with_analyzer_rule(Arc::new(PolicyInjectionRule::new(context.clone())))
         .with_optimizer_rules(vec![])
         .with_physical_optimizer_rules(vec![])
-        .build()
+        .build();
+    for udf in engine_dialects::udfs::metabase_udfs() {
+        state.register_udf(udf).expect("engine UDF registration");
+    }
+    state
 }
 
 #[cfg(test)]
@@ -461,6 +466,23 @@ mod tests {
             result.warehouse_sql,
             r#"SELECT to_timestamp("Products"."Title", 'YYYYMMDDHH24MISS') AS "t" FROM "public"."Products""#
         );
+    }
+
+    #[tokio::test]
+    async fn mb_to_time_unparses_as_a_time_cast() {
+        // `CAST(x AS TIME)` plans as Time64(ns), which the unparser can't spell; the UDF stands in for it
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT mb_to_time("Title") AS "t" FROM "public"."Products""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.warehouse_sql,
+            r#"SELECT CAST("Products"."Title" AS TIME) AS "t" FROM "public"."Products""#
+        );
+        assert_eq!(result.schema[0].arrow_type, "Time64(µs)");
     }
 
     #[tokio::test]
