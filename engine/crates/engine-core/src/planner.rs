@@ -4,15 +4,20 @@
 
 use std::sync::Arc;
 
+use datafusion::arrow::datatypes::DataType;
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::{Column, TableReference};
+use datafusion::common::{Column, DFSchema, TableReference};
 use datafusion::execution::context::SessionState;
 use datafusion::execution::FunctionRegistry;
 use datafusion::execution::SessionStateBuilder;
+use datafusion::logical_expr::expr::ScalarFunction;
+use datafusion::logical_expr::expr_rewriter::NamePreserver;
+use datafusion::logical_expr::{BinaryExpr, ExprSchemable, Operator, SortExpr};
 use datafusion::logical_expr::{Expr, LogicalPlan, Projection, WindowFunctionDefinition};
 use datafusion::sql::parser::Statement as DFStatement;
 use datafusion::sql::sqlparser::ast::Statement as SqlStatement;
 use datafusion::sql::unparser::Unparser;
+use engine_dialects::udfs;
 use engine_dialects::{DialectPolicy, Warehouse};
 
 use crate::api::{FieldInfo, ParamValue, PlanResult, SessionContext};
@@ -67,8 +72,14 @@ impl Planner {
     pub async fn plan(&self, sql: &str) -> Result<Planned> {
         let plan = self.analyze(sql).await?;
         let plan = qualify_table_scans(plan, &self.state.config_options().catalog.default_schema)?;
+        let plan = resolve_engine_udfs(plan, &self.state)?;
         let plan = merge_nested_projections(plan)?;
         let plan = alias_columns_over_derived_sort(plan)?;
+        let plan = if self.policy.supports_nulls_ordering() {
+            plan
+        } else {
+            emulate_nulls_ordering(plan)?
+        };
         self.reject_unsupported(&plan)?;
         let statement = Unparser::new(self.policy.dialect()).plan_to_sql(&plan)?;
         let mut warehouse_sql = statement.to_string();
@@ -119,6 +130,13 @@ impl Planner {
                 LogicalPlan::Statement(_) => Some("non-query statement"),
                 LogicalPlan::Explain(_) | LogicalPlan::Analyze(_) => Some("EXPLAIN"),
                 LogicalPlan::DescribeTable(_) => Some("DESCRIBE"),
+                LogicalPlan::Limit(l)
+                    if l.skip.is_some()
+                        && l.fetch.is_none()
+                        && !self.policy.supports_offset_without_limit() =>
+                {
+                    Some("OFFSET without LIMIT")
+                }
                 _ => None,
             };
             if let Some(c) = construct {
@@ -134,6 +152,12 @@ impl Planner {
             }
             node.apply_expressions(|expr| {
                 expr.apply(|e| {
+                    if let Expr::AggregateFunction(a) = e {
+                        if a.params.filter.is_some() && !self.policy.supports_aggregate_filter() {
+                            rejected = Some("aggregate FILTER (WHERE ...)".to_string());
+                            return Ok(TreeNodeRecursion::Stop);
+                        }
+                    }
                     let name = match e {
                         Expr::ScalarFunction(f) => Some(f.name().to_string()),
                         Expr::AggregateFunction(a) => Some(a.func.name().to_string()),
@@ -193,6 +217,111 @@ fn unprintable_identifier(node: &LogicalPlan) -> Option<String> {
 /// projection. The unparser wraps the inner one as a derived table (`derived_projection`) but keeps
 /// the outer columns qualified by the base table, which the warehouse then can't resolve. This is
 /// the one optimizer-like rewrite the pushed plan gets; it never changes what the query computes.
+fn is_integer(t: &DataType) -> bool {
+    matches!(
+        t,
+        DataType::Int8
+            | DataType::Int16
+            | DataType::Int32
+            | DataType::Int64
+            | DataType::UInt8
+            | DataType::UInt16
+            | DataType::UInt32
+            | DataType::UInt64
+    )
+}
+
+/// Say in the plan what the SQL surface leaves to the types: integer `/` becomes `mb_int_div`
+/// (DataFusion truncates; MySQL's `/` yields a decimal), and `mb_at_time_zone` becomes
+/// `mb_zoned_to_wall` or `mb_wall_to_zoned` from its argument's type (Postgres' `AT TIME ZONE`
+/// flips on the type by itself; MySQL's `CONVERT_TZ` has to be told). Names are preserved as the
+/// analyzer's own rewrites preserve them, so downstream references still resolve.
+fn resolve_engine_udfs(plan: LogicalPlan, state: &SessionState) -> Result<LogicalPlan> {
+    let int_div = state.udf(udfs::MB_INT_DIV)?;
+    let zoned_to_wall = state.udf(udfs::MB_ZONED_TO_WALL)?;
+    let wall_to_zoned = state.udf(udfs::MB_WALL_TO_ZONED)?;
+    Ok(plan
+        .transform_down_with_subqueries(|node| {
+            let mut schema = DFSchema::empty();
+            for input in node.inputs() {
+                schema.merge(input.schema());
+            }
+            let name_preserver = NamePreserver::new(&node);
+            node.map_expressions(|expr| {
+                let original = name_preserver.save(&expr);
+                expr.transform_up(|e| {
+                    Ok(match e {
+                        Expr::BinaryExpr(BinaryExpr {
+                            left,
+                            op: Operator::Divide,
+                            right,
+                        }) if left.get_type(&schema).is_ok_and(|t| is_integer(&t))
+                            && right.get_type(&schema).is_ok_and(|t| is_integer(&t)) =>
+                        {
+                            Transformed::yes(Expr::ScalarFunction(ScalarFunction::new_udf(
+                                Arc::clone(&int_div),
+                                vec![*left, *right],
+                            )))
+                        }
+                        Expr::ScalarFunction(f)
+                            if f.name() == udfs::MB_AT_TIME_ZONE && f.args.len() == 2 =>
+                        {
+                            match f.args[0].get_type(&schema) {
+                                Ok(DataType::Timestamp(_, Some(_))) => {
+                                    Transformed::yes(Expr::ScalarFunction(ScalarFunction::new_udf(
+                                        Arc::clone(&zoned_to_wall),
+                                        f.args,
+                                    )))
+                                }
+                                Ok(_) => Transformed::yes(Expr::ScalarFunction(
+                                    ScalarFunction::new_udf(Arc::clone(&wall_to_zoned), f.args),
+                                )),
+                                Err(_) => Transformed::no(Expr::ScalarFunction(f)),
+                            }
+                        }
+                        other => Transformed::no(other),
+                    })
+                })
+                .map(|t| t.update_data(|e| original.restore(e)))
+            })?
+            .map_data(|p| p.recompute_schema())
+        })?
+        .data)
+}
+
+/// Spell `NULLS FIRST` / `NULLS LAST` out for a warehouse without the syntax: an `IS NULL` sort
+/// key ahead of any sort whose null placement differs from MySQL's own (nulls first ascending,
+/// last descending).
+fn emulate_nulls_ordering(plan: LogicalPlan) -> Result<LogicalPlan> {
+    Ok(plan
+        .transform_down_with_subqueries(|node| match node {
+            LogicalPlan::Sort(mut sort) => {
+                let mut exprs = Vec::with_capacity(sort.expr.len() * 2);
+                let mut changed = false;
+                for s in sort.expr {
+                    let native_nulls_first = s.asc;
+                    if s.nulls_first != native_nulls_first {
+                        exprs.push(SortExpr::new(
+                            s.expr.clone().is_null(),
+                            !s.nulls_first,
+                            false,
+                        ));
+                        changed = true;
+                    }
+                    exprs.push(s);
+                }
+                sort.expr = exprs;
+                if changed {
+                    Ok(Transformed::yes(LogicalPlan::Sort(sort)))
+                } else {
+                    Ok(Transformed::no(LogicalPlan::Sort(sort)))
+                }
+            }
+            other => Ok(Transformed::no(other)),
+        })?
+        .data)
+}
+
 /// Name every scanned table with the schema the catalog resolved it in. A bare name in the SQL
 /// resolved against the catalog's default schema; sent bare to the warehouse it would resolve
 /// against the connection's search path instead, which need not agree.
@@ -399,6 +528,154 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    fn mysql_planner() -> Planner {
+        let snapshot: CatalogSnapshot = serde_json::from_value(serde_json::json!({
+            "database_id": 43,
+            "catalog_version": "v1",
+            "connector": "mysql",
+            "default_schema": "lakes",
+            "tables": [
+                {"name": "orders", "columns": [
+                    {"name": "id", "type": "Int64", "nullable": false},
+                    {"name": "quantity", "type": "Int64"},
+                    {"name": "total", "type": "Float64"},
+                    {"name": "note", "type": "Utf8"},
+                    {"name": "created_at", "type": "Timestamp(Microsecond, Some(\"UTC\"))"},
+                    {"name": "shipped_at", "type": "Timestamp(Microsecond, None)"}
+                ]}
+            ]
+        }))
+        .unwrap();
+        let catalog = SnapshotCatalog::from_snapshot(&snapshot).unwrap();
+        Planner::new(
+            catalog,
+            SessionContext {
+                database_id: 43,
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    async fn mysql_sql(sql: &str) -> String {
+        mysql_planner()
+            .plan_and_unparse(sql, &[])
+            .await
+            .unwrap()
+            .warehouse_sql
+    }
+
+    #[tokio::test]
+    async fn mysql_quotes_with_backticks_and_qualifies_with_the_database() {
+        assert_eq!(
+            mysql_sql(r#"SELECT "id", "total" FROM "orders" WHERE "total" > $1 ORDER BY "id" LIMIT 10"#).await,
+            "SELECT `orders`.`id`, `orders`.`total` FROM `lakes`.`orders` WHERE (`orders`.`total` > $1) ORDER BY `orders`.`id` IS NULL ASC, `orders`.`id` ASC LIMIT 10"
+        );
+    }
+
+    #[tokio::test]
+    async fn mysql_spells_null_ordering_out_only_where_it_differs_from_its_own() {
+        // ascending nulls-first and descending nulls-last are what MySQL does by itself; DataFusion's
+        // own default for DESC is nulls first, as Postgres'
+        assert_eq!(
+            mysql_sql(r#"SELECT "id", "note", "total" FROM "orders" ORDER BY "note" ASC NULLS FIRST, "total" DESC NULLS LAST, "id" DESC"#).await,
+            "SELECT `orders`.`id`, `orders`.`note`, `orders`.`total` FROM `lakes`.`orders` ORDER BY `orders`.`note` ASC, `orders`.`total` DESC, `orders`.`id` IS NULL DESC, `orders`.`id` DESC"
+        );
+    }
+
+    #[tokio::test]
+    async fn integer_division_is_div_on_mysql_and_slash_on_postgres() {
+        assert_eq!(
+            mysql_sql(r#"SELECT "quantity" / 3 AS q, "total" / 3 AS t FROM "orders""#).await,
+            "SELECT (`orders`.`quantity` DIV 3) AS `q`, (`orders`.`total` / CAST(3 AS DOUBLE)) AS `t` FROM `lakes`.`orders`"
+        );
+        let postgres = planner()
+            .plan_and_unparse(
+                r#"SELECT "ID" / 3, "Total" / 3 FROM "public"."Orders""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            postgres
+                .warehouse_sql
+                .contains(r#"("Orders"."ID" / 3) AS "public.Orders.ID / Int64(3)""#),
+            "{}",
+            postgres.warehouse_sql
+        );
+        assert!(
+            postgres
+                .warehouse_sql
+                .contains(r#"("Orders"."Total" / CAST(3 AS DOUBLE PRECISION))"#),
+            "{}",
+            postgres.warehouse_sql
+        );
+        assert_eq!(postgres.schema[0].arrow_type, "Int64");
+    }
+
+    #[tokio::test]
+    async fn mysql_time_zone_conversion_goes_the_way_the_type_says() {
+        assert_eq!(
+            mysql_sql(r#"SELECT mb_at_time_zone("created_at", 'Asia/Tokyo') AS a, mb_at_time_zone("shipped_at", 'Asia/Tokyo') AS b FROM "orders""#).await,
+            "SELECT CONVERT_TZ(`orders`.`created_at`, @@session.time_zone, 'Asia/Tokyo') AS `a`, CONVERT_TZ(`orders`.`shipped_at`, 'Asia/Tokyo', @@session.time_zone) AS `b` FROM `lakes`.`orders`"
+        );
+        let result = mysql_planner()
+            .plan_and_unparse(r#"SELECT mb_at_time_zone("created_at", 'Asia/Tokyo') AS a, mb_at_time_zone("shipped_at", 'Asia/Tokyo') AS b FROM "orders""#, &[])
+            .await
+            .unwrap();
+        assert_eq!(result.schema[0].arrow_type, "Timestamp(µs)");
+        assert_eq!(result.schema[1].arrow_type, "Timestamp(µs, \"UTC\")");
+    }
+
+    #[tokio::test]
+    async fn mysql_temporal_functions_render_their_own_spellings() {
+        assert_eq!(
+            mysql_sql(r#"SELECT date_trunc('month', "created_at") AS m, date_trunc('week', "created_at") AS w, date_trunc('year', "created_at") AS y FROM "orders""#).await,
+            "SELECT CAST(DATE_FORMAT(`orders`.`created_at`, '%Y-%m-01') AS DATETIME) AS `m`, CAST((DATE(`orders`.`created_at`) - INTERVAL WEEKDAY(`orders`.`created_at`) DAY) AS DATETIME) AS `w`, CAST(MAKEDATE(YEAR(`orders`.`created_at`), 1) AS DATETIME) AS `y` FROM `lakes`.`orders`"
+        );
+        assert_eq!(
+            mysql_sql(r#"SELECT extract(year FROM "created_at") AS y, extract(dow FROM "created_at") AS d, date_part('week', "created_at") AS w FROM "orders""#).await,
+            "SELECT EXTRACT(YEAR FROM `orders`.`created_at`) AS `y`, (DAYOFWEEK(`orders`.`created_at`) - 1) AS `d`, WEEK(`orders`.`created_at`, 3) AS `w` FROM `lakes`.`orders`"
+        );
+        assert_eq!(
+            mysql_sql(r#"SELECT to_timestamp("quantity") AS t, to_timestamp("note", '%Y-%m-%d %H:%M:%S') AS p FROM "orders""#).await,
+            "SELECT CONVERT_TZ(FROM_UNIXTIME(`orders`.`quantity`), @@session.time_zone, '+00:00') AS `t`, STR_TO_DATE(`orders`.`note`, '%Y-%m-%d %H:%i:%s') AS `p` FROM `lakes`.`orders`"
+        );
+    }
+
+    #[tokio::test]
+    async fn mysql_string_functions_render_their_own_spellings() {
+        assert_eq!(
+            mysql_sql(r#"SELECT strpos("note", 'x') AS s, starts_with("note", 'ab') AS b, length("note") AS l, regexp_like("note", '^a') AS r, regexp_like("note", '^a', 'i') AS ri, regexp_match("note", '[0-9]+')[1] AS m, mb_cast("total", 'TEXT') AS c, mb_cast("note", 'BIGINT') AS i FROM "orders""#).await,
+            "SELECT LOCATE('x', `orders`.`note`) AS `s`, (LEFT(`orders`.`note`, CHAR_LENGTH('ab')) = 'ab') AS `b`, CHAR_LENGTH(`orders`.`note`) AS `l`, (`orders`.`note` REGEXP '(?-i)^a') AS `r`, (`orders`.`note` REGEXP '(?i)^a') AS `ri`, REGEXP_SUBSTR(`orders`.`note`, '(?-i)[0-9]+') AS `m`, CAST(`orders`.`total` AS CHAR) AS `c`, CAST(`orders`.`note` AS SIGNED) AS `i` FROM `lakes`.`orders`"
+        );
+    }
+
+    #[tokio::test]
+    async fn mysql_refuses_what_it_cannot_say() {
+        for (sql, construct) in [
+            (
+                r#"SELECT count(*) FILTER (WHERE "total" > 1) FROM "orders""#,
+                "aggregate FILTER",
+            ),
+            (
+                r#"SELECT "id" FROM "orders" OFFSET 2"#,
+                "OFFSET without LIMIT",
+            ),
+            (
+                r#"SELECT approx_percentile_cont("total", 0.5) FROM "orders""#,
+                "function approx_percentile_cont",
+            ),
+        ] {
+            let err = mysql_planner()
+                .plan_and_unparse(sql, &[])
+                .await
+                .unwrap_err();
+            assert_eq!(err.kind, ErrorKind::Unsupported, "{sql}");
+            assert!(err.message.contains(construct), "{sql}: {}", err.message);
+        }
     }
 
     #[tokio::test]

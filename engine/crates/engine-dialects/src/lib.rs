@@ -17,18 +17,24 @@ use datafusion::sql::unparser::dialect::{
 };
 use datafusion::sql::unparser::Unparser;
 
+pub mod mysql;
 pub mod udfs;
+
+pub use mysql::MetabaseMySqlDialect;
 
 /// A warehouse we can unparse to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Warehouse {
     Postgres,
+    /// MySQL and MariaDB.
+    MySql,
 }
 
 impl Warehouse {
     pub fn parse(name: &str) -> Option<Warehouse> {
         match name {
             "postgres" | "postgresql" => Some(Warehouse::Postgres),
+            "mysql" | "mariadb" => Some(Warehouse::MySql),
             _ => None,
         }
     }
@@ -36,6 +42,7 @@ impl Warehouse {
     pub fn name(&self) -> &'static str {
         match self {
             Warehouse::Postgres => "postgres",
+            Warehouse::MySql => "mysql",
         }
     }
 }
@@ -45,6 +52,11 @@ pub struct DialectPolicy {
     warehouse: Warehouse,
     dialect: Arc<dyn Dialect>,
     functions: HashSet<&'static str>,
+    /// `NULLS FIRST` / `NULLS LAST` in `ORDER BY`. Without it the planner spells the ordering
+    /// out with an `IS NULL` sort key.
+    nulls_ordering: bool,
+    /// `agg(x) FILTER (WHERE ...)`.
+    aggregate_filter: bool,
 }
 
 impl DialectPolicy {
@@ -54,8 +66,30 @@ impl DialectPolicy {
                 warehouse,
                 dialect: Arc::new(MetabasePostgresDialect::default()),
                 functions: POSTGRES_FUNCTIONS.iter().copied().collect(),
+                nulls_ordering: true,
+                aggregate_filter: true,
+            },
+            Warehouse::MySql => DialectPolicy {
+                warehouse,
+                dialect: Arc::new(MetabaseMySqlDialect::default()),
+                functions: mysql::MYSQL_FUNCTIONS.iter().copied().collect(),
+                nulls_ordering: false,
+                aggregate_filter: false,
             },
         }
+    }
+
+    pub fn supports_nulls_ordering(&self) -> bool {
+        self.nulls_ordering
+    }
+
+    pub fn supports_aggregate_filter(&self) -> bool {
+        self.aggregate_filter
+    }
+
+    /// `OFFSET n` with no `LIMIT` (MySQL has no syntax for it).
+    pub fn supports_offset_without_limit(&self) -> bool {
+        self.warehouse != Warehouse::MySql
     }
 
     pub fn warehouse(&self) -> Warehouse {
@@ -155,6 +189,52 @@ impl MetabasePostgresDialect {
             root: Box::new(ast::Expr::Nested(Box::new(array))),
             access_chain: vec![ast::AccessExpr::Subscript(ast::Subscript::Index { index })],
         }))
+    }
+}
+
+/// `mb_int_div(a, b)` as `(a / b)`, for dialects whose `/` already is integer division on integers.
+pub(crate) fn plain_division(unparser: &Unparser, args: &[Expr]) -> DFResult<Option<ast::Expr>> {
+    if args.len() != 2 {
+        return Ok(None);
+    }
+    Ok(Some(ast::Expr::Nested(Box::new(ast::Expr::BinaryOp {
+        left: Box::new(unparser.expr_to_sql(&args[0])?),
+        op: ast::BinaryOperator::Divide,
+        right: Box::new(unparser.expr_to_sql(&args[1])?),
+    }))))
+}
+
+/// A function call in the unparser's AST.
+pub(crate) fn call(name: &str, args: Vec<ast::Expr>) -> ast::Expr {
+    ast::Expr::Function(ast::Function {
+        name: ast::ObjectName::from(vec![ast::Ident::new(name)]),
+        uses_odbc_syntax: false,
+        parameters: ast::FunctionArguments::None,
+        args: ast::FunctionArguments::List(ast::FunctionArgumentList {
+            duplicate_treatment: None,
+            args: args
+                .into_iter()
+                .map(|e| ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(e)))
+                .collect(),
+            clauses: vec![],
+        }),
+        filter: None,
+        null_treatment: None,
+        over: None,
+        within_group: vec![],
+    })
+}
+
+/// A single-quoted string literal in the unparser's AST.
+pub(crate) fn string_literal(s: &str) -> ast::Expr {
+    ast::Expr::Value(ast::Value::SingleQuotedString(s.to_string()).into())
+}
+
+/// The string literal `args[i]` holds, if it is one.
+pub(crate) fn literal_str(args: &[Expr], i: usize) -> Option<&str> {
+    match args.get(i) {
+        Some(Expr::Literal(datafusion::common::ScalarValue::Utf8(Some(s)), _)) => Some(s),
+        _ => None,
     }
 }
 
@@ -406,7 +486,10 @@ impl Dialect for MetabasePostgresDialect {
             "regexp_like" => self.regexp_like_as_operator(unparser, args),
             udfs::MB_CAST => self.named_cast(unparser, args),
             udfs::MB_BYTES_TO_TEXT => self.convert_from_utf8(unparser, args),
-            udfs::MB_AT_TIME_ZONE => self.at_time_zone(unparser, args),
+            udfs::MB_AT_TIME_ZONE | udfs::MB_ZONED_TO_WALL | udfs::MB_WALL_TO_ZONED => {
+                self.at_time_zone(unparser, args)
+            }
+            udfs::MB_INT_DIV => plain_division(unparser, args),
             _ => self
                 .inner
                 .scalar_function_to_sql_overrides(unparser, func_name, args),
@@ -550,6 +633,9 @@ const POSTGRES_FUNCTIONS: &[&str] = &[
     udfs::MB_CAST,
     udfs::MB_BYTES_TO_TEXT,
     udfs::MB_AT_TIME_ZONE,
+    udfs::MB_ZONED_TO_WALL,
+    udfs::MB_WALL_TO_ZONED,
+    udfs::MB_INT_DIV,
     "percentile_disc",
     // window
     "row_number",
@@ -586,7 +672,10 @@ mod tests {
         assert_eq!(Warehouse::parse("postgres"), Some(Warehouse::Postgres));
         assert_eq!(Warehouse::parse("postgresql"), Some(Warehouse::Postgres));
         assert_eq!(Warehouse::parse("snowflake"), None);
+        assert_eq!(Warehouse::parse("mysql"), Some(Warehouse::MySql));
+        assert_eq!(Warehouse::parse("mariadb"), Some(Warehouse::MySql));
         assert_eq!(Warehouse::Postgres.name(), "postgres");
+        assert_eq!(Warehouse::MySql.name(), "mysql");
     }
 }
 

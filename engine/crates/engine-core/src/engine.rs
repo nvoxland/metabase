@@ -325,7 +325,11 @@ impl Engine {
                 },
             )
             .await?;
-        let stream = SchemaCastStream::new(handle.stream, &planned.schema);
+        let stream = SchemaCastStream::new(
+            handle.stream,
+            &planned.schema,
+            session.context.report_timezone.as_deref(),
+        );
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.streams.insert(
             id,

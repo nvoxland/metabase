@@ -9,7 +9,7 @@ use std::task::{Context, Poll};
 
 use arrow::array::ArrayRef;
 use arrow::compute::{cast_with_options, CastOptions};
-use arrow::datatypes::{Field, Schema, SchemaRef};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::{RecordBatchStream, SendableRecordBatchStream};
@@ -18,6 +18,8 @@ use futures::Stream;
 pub struct SchemaCastStream {
     inner: SendableRecordBatchStream,
     target: SchemaRef,
+    /// The zone a zone-less timestamp is read in when the plan wants a zoned one.
+    session_tz: String,
 }
 
 /// A plan can leave a column typed `Null` when nothing pins it down (a bare `$1` in the select
@@ -98,18 +100,54 @@ pub fn nullable_schema(schema: &Schema) -> SchemaRef {
     ))
 }
 
+/// Cast one column to the plan's type. A zone-less timestamp (or a date) that the plan types as
+/// zoned is read as wall-clock time in `session_tz`, the way the warehouse's own `::timestamptz`
+/// would read it, not as UTC, which is what Arrow's cast assumes.
+pub fn cast_column(
+    column: &ArrayRef,
+    target: &DataType,
+    session_tz: &str,
+) -> Result<ArrayRef, arrow::error::ArrowError> {
+    // `safe: false` so a value that doesn't fit the plan's type is an error, never a silent NULL.
+    let options = CastOptions {
+        safe: false,
+        ..Default::default()
+    };
+    match (column.data_type(), target) {
+        (
+            DataType::Timestamp(_, None) | DataType::Date32 | DataType::Date64,
+            DataType::Timestamp(unit, Some(_)),
+        ) => {
+            let naive = cast_with_options(column, &DataType::Timestamp(*unit, None), &options)?;
+            let local = cast_with_options(
+                &naive,
+                &DataType::Timestamp(*unit, Some(session_tz.into())),
+                &options,
+            )?;
+            cast_with_options(&local, target, &options)
+        }
+        _ => cast_with_options(column, target, &options),
+    }
+}
+
 impl SchemaCastStream {
-    pub fn new(inner: SendableRecordBatchStream, target: &Schema) -> SchemaCastStream {
+    pub fn new(
+        inner: SendableRecordBatchStream,
+        target: &Schema,
+        session_tz: Option<&str>,
+    ) -> SchemaCastStream {
         let target = resolve_null_types(target, &inner.schema());
         SchemaCastStream {
             inner,
             target: nullable_schema(&target),
+            session_tz: session_tz.unwrap_or("UTC").to_string(),
         }
     }
 
     pub fn cast_batch(
         batch: &RecordBatch,
         target: &SchemaRef,
+        session_tz: &str,
     ) -> Result<RecordBatch, DataFusionError> {
         if batch.num_columns() != target.fields().len() {
             return Err(DataFusionError::Execution(format!(
@@ -126,12 +164,7 @@ impl SchemaCastStream {
                 if column.data_type() == field.data_type() {
                     Ok(Arc::clone(column))
                 } else {
-                    // `safe: false` so a value that doesn't fit the plan's type is an error, never a silent NULL.
-                    let options = CastOptions {
-                        safe: false,
-                        ..Default::default()
-                    };
-                    cast_with_options(column, field.data_type(), &options).map_err(|e| {
+                    cast_column(column, field.data_type(), session_tz).map_err(|e| {
                         DataFusionError::Execution(format!(
                             "casting column {:?} from {} to {}: {e}",
                             field.name(),
@@ -152,9 +185,11 @@ impl Stream for SchemaCastStream {
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(cx) {
-            Poll::Ready(Some(Ok(batch))) => {
-                Poll::Ready(Some(Self::cast_batch(&batch, &self.target)))
-            }
+            Poll::Ready(Some(Ok(batch))) => Poll::Ready(Some(Self::cast_batch(
+                &batch,
+                &self.target,
+                &self.session_tz,
+            ))),
             other => other,
         }
     }
@@ -190,7 +225,7 @@ mod tests {
             Field::new("s", DataType::Utf8, true),
         ]);
         let target = nullable_schema(&plan);
-        let out = SchemaCastStream::cast_batch(&source, &target).unwrap();
+        let out = SchemaCastStream::cast_batch(&source, &target, "UTC").unwrap();
         assert_eq!(out.schema().field(0).data_type(), &DataType::Int64);
         assert!(out.schema().field(0).is_nullable());
         assert_eq!(out.num_rows(), 2);
@@ -204,7 +239,7 @@ mod tests {
         )
         .unwrap();
         let plan = Schema::new(vec![Field::new("s", DataType::Float64, true)]);
-        assert!(SchemaCastStream::cast_batch(&source, &nullable_schema(&plan)).is_err());
+        assert!(SchemaCastStream::cast_batch(&source, &nullable_schema(&plan), "UTC").is_err());
     }
 
     #[test]
@@ -294,6 +329,39 @@ mod tests {
     }
 
     #[test]
+    fn a_zone_less_timestamp_becoming_zoned_is_read_in_the_session_zone() {
+        use arrow::array::{Array, Date32Array, TimestampMicrosecondArray};
+        use arrow::datatypes::TimeUnit;
+        let target = DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()));
+        // 2020-01-01T00:00:00 wall clock in Los Angeles is 08:00 UTC
+        let naive: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![Some(
+            1_577_836_800_000_000,
+        )]));
+        let cast = cast_column(&naive, &target, "America/Los_Angeles").unwrap();
+        let cast = cast
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(cast.value(0), 1_577_836_800_000_000 + 8 * 3_600_000_000);
+        assert_eq!(cast.data_type(), &target);
+        // a date is midnight in that zone
+        let date: ArrayRef = Arc::new(Date32Array::from(vec![Some(18262)]));
+        let cast = cast_column(&date, &target, "America/Los_Angeles").unwrap();
+        let cast = cast
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(cast.value(0), 1_577_836_800_000_000 + 8 * 3_600_000_000);
+        // with no session zone the wall clock is UTC, as before
+        let cast = cast_column(&naive, &target, "UTC").unwrap();
+        let cast = cast
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(cast.value(0), 1_577_836_800_000_000);
+    }
+
+    #[test]
     fn a_retyped_field_keeps_its_metadata() {
         let tagged =
             Field::new("b", DataType::Utf8, true).with_metadata(std::collections::HashMap::from([
@@ -324,6 +392,6 @@ mod tests {
             Field::new("n", DataType::Int64, true),
             Field::new("m", DataType::Int64, true),
         ]);
-        assert!(SchemaCastStream::cast_batch(&source, &nullable_schema(&plan)).is_err());
+        assert!(SchemaCastStream::cast_batch(&source, &nullable_schema(&plan), "UTC").is_err());
     }
 }

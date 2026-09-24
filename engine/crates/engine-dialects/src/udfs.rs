@@ -131,6 +131,74 @@ impl ScalarUDFImpl for MbAtTimeZone {
     }
 }
 
+/// `mb_int_div(a, b)`: integer division, truncating toward zero, which is what DataFusion's `/`
+/// means for two integers. The planner rewrites integer `/` into this so a dialect whose `/`
+/// is not integer division (MySQL's yields a decimal) can spell it (`DIV`).
+pub const MB_INT_DIV: &str = "mb_int_div";
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct MbIntDiv {
+    signature: Signature,
+}
+
+impl ScalarUDFImpl for MbIntDiv {
+    fn name(&self) -> &str {
+        MB_INT_DIV
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        Ok(arg_types.first().cloned().unwrap_or(DataType::Int64))
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("{MB_INT_DIV} is unparsed for the warehouse, never executed by the engine")
+    }
+}
+
+/// `mb_zoned_to_wall(x, 'zone')`: the wall-clock time of instant `x` in `zone` (no zone), and
+/// `mb_wall_to_zoned(x, 'zone')`: the instant at which wall-clock time `x` happens in `zone`.
+/// The planner rewrites [`MB_AT_TIME_ZONE`] into one of these from its argument's type, so a
+/// dialect without a type-directed `AT TIME ZONE` (MySQL's `CONVERT_TZ` needs to be told which
+/// way) knows the direction.
+pub const MB_ZONED_TO_WALL: &str = "mb_zoned_to_wall";
+pub const MB_WALL_TO_ZONED: &str = "mb_wall_to_zoned";
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct MbTimeZoneDirection {
+    signature: Signature,
+    name: &'static str,
+    zoned: bool,
+}
+
+impl ScalarUDFImpl for MbTimeZoneDirection {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(if self.zoned {
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        } else {
+            DataType::Timestamp(TimeUnit::Microsecond, None)
+        })
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!(
+            "{} is unparsed for the warehouse, never executed by the engine",
+            self.name
+        )
+    }
+}
+
 /// Every engine UDF, for registration in a session.
 pub fn metabase_udfs() -> Vec<Arc<ScalarUDF>> {
     vec![
@@ -142,6 +210,19 @@ pub fn metabase_udfs() -> Vec<Arc<ScalarUDF>> {
         })),
         Arc::new(ScalarUDF::new_from_impl(MbAtTimeZone {
             signature: Signature::any(2, Volatility::Immutable),
+        })),
+        Arc::new(ScalarUDF::new_from_impl(MbIntDiv {
+            signature: Signature::any(2, Volatility::Immutable),
+        })),
+        Arc::new(ScalarUDF::new_from_impl(MbTimeZoneDirection {
+            signature: Signature::any(2, Volatility::Immutable),
+            name: MB_ZONED_TO_WALL,
+            zoned: false,
+        })),
+        Arc::new(ScalarUDF::new_from_impl(MbTimeZoneDirection {
+            signature: Signature::any(2, Volatility::Immutable),
+            name: MB_WALL_TO_ZONED,
+            zoned: true,
         })),
     ]
 }
