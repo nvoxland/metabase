@@ -64,7 +64,7 @@
                               :nested-field-columns           false
                               :nested-queries                 true
                               :now                            true
-                              :percentile-aggregations        false ; WITHIN GROUP support in DataFusion unverified
+                              :percentile-aggregations        true
                               :regex                          true
                               :schemas                        true
                               :set-timezone                   true

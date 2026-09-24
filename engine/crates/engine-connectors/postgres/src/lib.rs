@@ -126,14 +126,17 @@ fn quote_ident(s: &str) -> String {
     format!("\"{}\"", s.replace('"', "\"\""))
 }
 
-/// `SET` statements applied to a checked-out connection for one statement.
+/// The report time zone `SET`, applied separately so a zone the server lacks can be tolerated.
+fn time_zone_sql(tz: &str) -> String {
+    format!("SET TIME ZONE {};", quote_literal(tz))
+}
+
+/// `SET` statements applied to a checked-out connection for one statement (the time zone is
+/// applied separately, see `time_zone_sql`).
 fn session_setup_sql(settings: &SessionSettings) -> String {
     let mut sql = String::new();
     if settings.read_only {
         sql.push_str("SET default_transaction_read_only = on;\n");
-    }
-    if let Some(tz) = &settings.time_zone {
-        sql.push_str(&format!("SET TIME ZONE {};\n", quote_literal(tz)));
     }
     if let Some(ms) = settings.statement_timeout_ms {
         sql.push_str(&format!("SET statement_timeout = {ms};\n"));
@@ -303,6 +306,13 @@ async fn start_statement(
     if !setup.is_empty() {
         if let Err(e) = client.batch_execute(&setup).await {
             fail!(warehouse_error(e, false));
+        }
+    }
+    // The report time zone is applied on its own and, as on the JDBC path, a zone the server
+    // doesn't know is logged and skipped rather than failing the query.
+    if let Some(tz) = &query.settings.time_zone {
+        if let Err(e) = client.batch_execute(&time_zone_sql(tz)).await {
+            tracing::warn!(time_zone = tz, error = %e, "could not set the session time zone; running without it");
         }
     }
     let mut statement = match prepare_with_inference(&client, &query.sql, &query.params).await {
@@ -521,9 +531,14 @@ mod tests {
         });
         assert_eq!(
             sql,
-            "SET default_transaction_read_only = on;\nSET TIME ZONE 'America/New_York';\nSET statement_timeout = 1500;\nSET ROLE \"analyst\"\"; DROP\";\n"
+            "SET default_transaction_read_only = on;\nSET statement_timeout = 1500;\nSET ROLE \"analyst\"\"; DROP\";\n"
         );
         assert_eq!(session_setup_sql(&SessionSettings::default()), "");
+        assert_eq!(
+            time_zone_sql("America/New_York"),
+            "SET TIME ZONE 'America/New_York';"
+        );
+        assert_eq!(time_zone_sql("x'; DROP"), "SET TIME ZONE 'x''; DROP';");
         assert_eq!(
             session_setup_sql(&SessionSettings {
                 role: Some("NONE".into()),

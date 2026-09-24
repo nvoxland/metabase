@@ -131,7 +131,10 @@
                                                "pw" [:power $price 2]}
                                  :fields      [[:expression "f"] [:expression "c"] [:expression "r"] [:expression "a"]
                                                [:expression "q"] [:expression "e"] [:expression "lg"] [:expression "pw"]]
-                                 :limit       2}))])
+                                 :limit       2}))
+   (fn [] (mt/mbql-query venues {:aggregation [[:median $price] [:percentile $price 0.9]]
+                                 :breakout    [$category_id]
+                                 :limit       5}))])
 
 (deftest ^:mb/engine-tests corpus-plans-for-postgres-test
   (mt/test-drivers #{:h2}

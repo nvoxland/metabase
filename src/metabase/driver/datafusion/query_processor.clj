@@ -199,3 +199,9 @@
   [_driver _coercion-strategy expr]
   ;; DataFusion uses Chrono format strings. Warehouse dialects translate them (a known gap for Postgres).
   (h2x/with-database-type-info [:to_timestamp expr (h2x/literal "%Y%m%d%H%M%S")] "timestamp"))
+
+;;; DataFusion has `median`, but Postgres doesn't; both have `percentile_cont(p) WITHIN GROUP (ORDER BY x)`, which
+;;; DataFusion plans as an ordered-set aggregate and unparses in that form.
+(defmethod sql.qp/->honeysql [:datafusion :median]
+  [driver [_ _opts arg]]
+  (sql.qp/->honeysql driver [:percentile {} arg 0.5]))
