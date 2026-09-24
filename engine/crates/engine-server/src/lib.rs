@@ -36,6 +36,9 @@ pub struct ExecuteTicket {
     pub sql: String,
     #[serde(default)]
     pub params: Vec<ParamValue>,
+    /// When true, `sql` is warehouse-dialect SQL run without planning (see `Engine::execute_raw`).
+    #[serde(default)]
+    pub raw: bool,
 }
 
 fn status_for(error: engine_core::EngineError) -> Status {
@@ -132,10 +135,16 @@ impl FlightService for EngineFlightService {
                 Status::invalid_argument(format!("ticket is not an execute request: {e}"))
             })?;
         let engine = Arc::clone(&self.engine);
-        let stream_id = engine
-            .execute(ticket.session_id, &ticket.sql, ticket.params)
-            .await
-            .map_err(status_for)?;
+        let started = if ticket.raw {
+            engine
+                .execute_raw(ticket.session_id, &ticket.sql, ticket.params)
+                .await
+        } else {
+            engine
+                .execute(ticket.session_id, &ticket.sql, ticket.params)
+                .await
+        };
+        let stream_id = started.map_err(status_for)?;
         let (entry, batches) = match engine.take_stream(stream_id) {
             Ok(taken) => taken,
             Err(e) => {

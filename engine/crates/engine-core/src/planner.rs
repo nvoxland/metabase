@@ -311,6 +311,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn substr_positions_are_cast_to_integer_for_postgres() {
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT substr("Title", 1, 3) AS "s" FROM "public"."Products""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.warehouse_sql,
+            r#"SELECT substr("Products"."Title", CAST(1 AS INTEGER), CAST(3 AS INTEGER)) AS "s" FROM "public"."Products""#
+        );
+    }
+
+    #[tokio::test]
     async fn remark_is_prepended_as_a_single_line_comment() {
         let snapshot: CatalogSnapshot = serde_json::from_value(serde_json::json!({
             "database_id": 1, "catalog_version": "v1", "connector": "postgres",

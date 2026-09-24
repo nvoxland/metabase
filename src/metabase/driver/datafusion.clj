@@ -7,12 +7,16 @@
   delegated to the database's own driver, because the database keeps its real engine."
   (:require
    [clojure.core.async :as a]
+   [medley.core :as m]
    [metabase.driver :as driver]
    [metabase.driver-api.core :as driver-api]
    [metabase.driver.connection :as driver.conn]
    [metabase.driver.datafusion.query-processor]
    [metabase.driver.settings :as driver.settings]
+   [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
+   [metabase.driver.sql-jdbc.sync.describe-table :as sql-jdbc.describe-table]
    [metabase.driver.sql.query-processor.like-escape-char-built-in :as-alias like-escape-char-built-in]
+   [metabase.driver.sync :as driver.s]
    [metabase.driver.util :as driver.u]
    [metabase.engine.arrow :as engine.arrow]
    [metabase.engine.catalog :as engine.catalog]
@@ -172,3 +176,98 @@
                    (driver-api/reducible-rows (engine.arrow/row-thunk reader) canceled-chan))
           (finally
             (close!)))))))
+
+;;; ------------------------------------------------------ sync ---------------------------------------------------------
+;;;
+;;; Sync runs the warehouse driver's own metadata SQL, but through the engine's connection pool instead of JDBC, so a
+;;; database routed to the engine has a single connection stack.
+
+(defn- numbered-placeholders
+  "Rewrite JDBC-style `?` placeholders as `$1`, `$2`, ... outside string literals and quoted identifiers
+  (a doubled quote inside either toggles twice, so it needs no special case)."
+  [sql]
+  (let [out (StringBuilder.)]
+    (loop [chars (seq sql) quote nil n 0]
+      (if-let [c (first chars)]
+        (cond
+          (= c quote)                        (do (.append out c) (recur (rest chars) nil n))
+          (and (nil? quote) (#{\' \"} c))    (do (.append out c) (recur (rest chars) c n))
+          (and (nil? quote) (= c \?))        (do (.append out (str "$" (inc n))) (recur (rest chars) nil (inc n)))
+          :else                              (do (.append out c) (recur (rest chars) quote n)))
+        (str out)))))
+
+(defn- rows->maps [{:keys [cols rows]}]
+  (let [ks (perf/mapv (comp keyword :name) cols)]
+    (map #(zipmap ks %) rows)))
+
+(defn- metadata-query!
+  "Run one of the warehouse driver's metadata statements through the engine and return its rows as maps."
+  [database [sql & params]]
+  (ensure-registered! database)
+  (engine/with-session [session {:database_id (:id database)}]
+    (rows->maps (engine/query-rows! session (numbered-placeholders sql) (perf/mapv param->engine params)))))
+
+(defn- warehouse-driver-of [database]
+  (keyword (:engine database)))
+
+(defmethod driver/dbms-version :datafusion
+  [_driver database]
+  (let [[{:keys [version]}] (metadata-query! database ["SELECT current_setting('server_version') AS version"])
+        [major minor]       (map parse-long (re-seq #"\d+" (str version)))]
+    {:flavor           "PostgreSQL"
+     :version          version
+     :semantic-version (into [] (remove nil?) [major minor])}))
+
+(def ^:private syncable-tables-sql
+  "The same listing as the Postgres driver's `get-tables-sql`, with the privilege checks the JDBC path makes in a
+  second query folded in. Foreign tables get no writability verdict, as on the JDBC path."
+  "SELECT n.nspname AS schema,
+          c.relname AS name,
+          CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'p' THEN 'PARTITIONED TABLE' WHEN 'v' THEN 'VIEW'
+                         WHEN 'f' THEN 'FOREIGN TABLE' WHEN 'm' THEN 'MATERIALIZED VIEW' END AS type,
+          d.description AS description,
+          NULLIF(stat.n_live_tup, 0) AS estimated_row_count,
+          has_table_privilege(c.oid, 'SELECT') AS can_select,
+          CASE WHEN c.relkind = 'f' THEN NULL
+               ELSE has_any_column_privilege(c.oid, 'INSERT')
+                    AND has_any_column_privilege(c.oid, 'UPDATE')
+                    AND has_table_privilege(c.oid, 'DELETE') END AS is_writable
+   FROM pg_catalog.pg_class c
+   JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+   LEFT JOIN pg_catalog.pg_description d ON c.oid = d.objoid AND d.objsubid = 0 AND d.classoid = 'pg_class'::regclass
+   LEFT JOIN pg_stat_user_tables stat ON n.nspname = stat.schemaname AND c.relname = stat.relname
+   WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+     AND c.relkind IN ('r', 'p', 'v', 'f', 'm')
+   ORDER BY type, schema, name")
+
+(defmethod driver/describe-database* :datafusion
+  [_driver database]
+  (let [excluded            (set (sql-jdbc.sync/excluded-schemas (warehouse-driver-of database)))
+        [inclusion
+         exclusion]         (driver.s/db-details->schema-filter-patterns database)
+        syncable-schema?    (fn [schema]
+                              (and (not (contains? excluded schema))
+                                   (not (re-find #"^metabase_cache.*" schema))
+                                   (driver.s/include-schema? inclusion exclusion schema)))]
+    {:tables (into #{}
+                   (comp (filter (comp syncable-schema? :schema))
+                         (filter :can_select)
+                         (map #(dissoc % :type :can_select)))
+                   (metadata-query! database [syncable-tables-sql]))}))
+
+(defmethod driver/describe-fields :datafusion
+  [_driver database & {:keys [schema-names table-names] :as opts}]
+  ;; the same pipeline as `sql-jdbc.sync/describe-fields`, fed by the engine instead of a JDBC result set
+  (if (or (and schema-names (perf/empty? schema-names))
+          (and table-names (perf/empty? table-names)))
+    []
+    (let [warehouse (warehouse-driver-of database)
+          sql       (sql-jdbc.sync/describe-fields-sql warehouse (assoc opts :details (driver.conn/effective-details database)))]
+      (eduction (comp (m/mapply sql-jdbc.sync/describe-fields-pre-process-xf warehouse database opts)
+                      (sql-jdbc.describe-table/limit-fields-per-table-xf (driver.settings/sync-max-fields-per-table))
+                      (sql-jdbc.describe-table/describe-fields-xf warehouse database))
+                (metadata-query! database sql)))))
+
+(defmethod driver/describe-fks :datafusion
+  [_driver database & {:as opts}]
+  (metadata-query! database (sql-jdbc.sync/describe-fks-sql (warehouse-driver-of database) opts)))

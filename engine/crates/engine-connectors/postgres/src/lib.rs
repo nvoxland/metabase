@@ -265,6 +265,28 @@ impl Stream for RowBatches {
 
 const BATCH_SIZE: usize = 8192;
 
+/// Prepare `sql`, letting Postgres infer placeholder types; when it can't (SQLSTATE 42P18,
+/// e.g. `SELECT $1`), declare them from the Arrow types Metabase attached to the values.
+async fn prepare_with_inference(
+    client: &Object,
+    sql: &str,
+    params: &[engine_core::api::ParamValue],
+) -> std::result::Result<Statement, tokio_postgres::Error> {
+    match client.prepare(sql).await {
+        Ok(statement) => Ok(statement),
+        Err(e)
+            if e.as_db_error().map(|d| d.code().code()) == Some("42P18") && !params.is_empty() =>
+        {
+            let types: Vec<tokio_postgres::types::Type> = params
+                .iter()
+                .map(|p| params::declared_type(&p.arrow_type))
+                .collect();
+            client.prepare_typed(sql, &types).await
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Apply session settings, prepare, bind, and start streaming rows on a checked-out connection.
 /// On failure the connection comes back with the error so the caller can reset it.
 async fn start_statement(
@@ -283,7 +305,7 @@ async fn start_statement(
             fail!(warehouse_error(e, false));
         }
     }
-    let mut statement = match client.prepare(&query.sql).await {
+    let mut statement = match prepare_with_inference(&client, &query.sql, &query.params).await {
         Ok(s) => s,
         Err(e) => fail!(warehouse_error(e, false)),
     };
@@ -503,7 +525,10 @@ mod tests {
         );
         assert_eq!(session_setup_sql(&SessionSettings::default()), "");
         assert_eq!(
-            session_setup_sql(&SessionSettings { role: Some("NONE".into()), ..Default::default() }),
+            session_setup_sql(&SessionSettings {
+                role: Some("NONE".into()),
+                ..Default::default()
+            }),
             "SET ROLE NONE;\n"
         );
     }

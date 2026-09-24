@@ -5,6 +5,7 @@
   come back as the `result` of an `ok` envelope. Engine errors are thrown as `ex-info` whose
   `:type` is the matching `metabase.query-processor.error-type` keyword."
   (:require
+   [metabase.engine.arrow :as engine.arrow]
    [metabase.engine.client :as engine.client]
    [metabase.engine.ffi :as engine.ffi]
    [metabase.engine.protocol :as protocol]
@@ -115,6 +116,24 @@
   `params` are `{:type <Arrow type> :value <JSON value>}` maps bound to `$1`, `$2`, ..."
   [session-id sql params]
   (protocol/-execute (transport) session-id sql params))
+
+(defn execute-raw!
+  "Run warehouse-dialect `sql` in `session-id`'s database without planning it. For Metabase's own
+  metadata queries; never for SQL a person wrote. Same return shape as [[execute!]]."
+  [session-id sql params]
+  (protocol/-execute-raw (transport) session-id sql params))
+
+(defn query-rows!
+  "Run a small internal statement through [[execute-raw!]] and realize every row. Returns
+  `{:cols [...] :rows [[...] ...]}`."
+  [session-id sql params]
+  (let [{:keys [reader close!]} (execute-raw! session-id sql params)]
+    (try
+      (let [next-row (engine.arrow/row-thunk reader)]
+        {:cols (engine.arrow/cols reader)
+         :rows (into [] (take-while some?) (repeatedly next-row))})
+      (finally
+        (close!)))))
 
 (defn pool-stats
   "Connection pool statistics, for all databases or one."

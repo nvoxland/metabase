@@ -18,6 +18,10 @@
 (def ^:private no-options
   (into-array CallOption []))
 
+(def ^:private ^:dynamic *raw*
+  "Whether the statement being started skips planning (see the engine's `execute_raw`)."
+  false)
+
 (defn- location ^Location [url]
   (let [uri (URI. url)]
     (Location/forGrpcInsecure (.getHost uri) (if (neg? (.getPort uri)) 50051 (.getPort uri)))))
@@ -59,10 +63,14 @@
           (throw (ex-info (tru "The engine sidecar returned no response.") {}))))
       (catch FlightRuntimeException e
         (throw (flight-error->exception e)))))
-  (-execute [_ session-id sql params]
+  (-execute [this session-id sql params]
+    (binding [*raw* false]
+      (protocol/-execute-raw this session-id sql params)))
+  (-execute-raw [_ session-id sql params]
     (when closed?
       (throw (ex-info (tru "The engine sidecar connection has been closed.") {})))
-    (let [ticket (json/encode {:session_id session-id :sql sql :params (or params [])})
+    (let [raw?   (if (thread-bound? #'*raw*) *raw* true)
+          ticket (json/encode {:session_id session-id :sql sql :params (or params []) :raw raw?})
           stream (try
                    (.getStream client (Ticket. (.getBytes ^String ticket StandardCharsets/UTF_8)) no-options)
                    (catch FlightRuntimeException e

@@ -19,6 +19,27 @@ pub struct SchemaCastStream {
     target: SchemaRef,
 }
 
+/// A plan can leave a column typed `Null` when nothing pins it down (a bare `$1` in the select
+/// list). The warehouse knows better: take its type for those columns.
+pub fn resolve_null_types(plan: &Schema, warehouse: &Schema) -> Schema {
+    let fields: Vec<Field> = plan
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            if field.data_type() == &arrow::datatypes::DataType::Null {
+                match warehouse.fields().get(i) {
+                    Some(actual) => Field::new(field.name(), actual.data_type().clone(), true),
+                    None => field.as_ref().clone(),
+                }
+            } else {
+                field.as_ref().clone()
+            }
+        })
+        .collect();
+    Schema::new_with_metadata(fields, plan.metadata().clone())
+}
+
 /// The target schema with every field nullable: the warehouse decides what comes back, and a
 /// non-nullable plan field must never make a real result fail.
 pub fn nullable_schema(schema: &Schema) -> SchemaRef {
@@ -37,9 +58,10 @@ pub fn nullable_schema(schema: &Schema) -> SchemaRef {
 
 impl SchemaCastStream {
     pub fn new(inner: SendableRecordBatchStream, target: &Schema) -> SchemaCastStream {
+        let target = resolve_null_types(target, &inner.schema());
         SchemaCastStream {
             inner,
-            target: nullable_schema(target),
+            target: nullable_schema(&target),
         }
     }
 
@@ -141,6 +163,21 @@ mod tests {
         .unwrap();
         let plan = Schema::new(vec![Field::new("s", DataType::Float64, true)]);
         assert!(SchemaCastStream::cast_batch(&source, &nullable_schema(&plan)).is_err());
+    }
+
+    #[test]
+    fn null_plan_types_take_the_warehouse_type() {
+        let plan = Schema::new(vec![
+            Field::new("s", DataType::Null, true),
+            Field::new("n", DataType::Int64, true),
+        ]);
+        let warehouse = Schema::new(vec![
+            Field::new("s", DataType::Utf8, true),
+            Field::new("n", DataType::Int32, true),
+        ]);
+        let resolved = resolve_null_types(&plan, &warehouse);
+        assert_eq!(resolved.field(0).data_type(), &DataType::Utf8);
+        assert_eq!(resolved.field(1).data_type(), &DataType::Int64);
     }
 
     #[test]

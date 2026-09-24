@@ -20,6 +20,12 @@
   (binding [driver/*driver* :datafusion]
     (select-keys (qp.compile/compile query) [:query :params])))
 
+(deftest numbered-placeholders-test
+  (testing "JDBC `?` placeholders become `$n`, except inside string literals and quoted identifiers"
+    (is (= "SELECT \"pk?\" FROM t WHERE a = $1 AND b = 'x?' AND c IN ($2, $3) AND d = 'it''s?'"
+           (#'metabase.driver.datafusion/numbered-placeholders
+            "SELECT \"pk?\" FROM t WHERE a = ? AND b = 'x?' AND c IN (?, ?) AND d = 'it''s?'")))))
+
 (deftest compile-test
   (mt/test-drivers #{:h2}
     (testing "placeholders are numbered and identifiers are quoted exactly"

@@ -106,6 +106,7 @@
    :last-error    (ffi/cfn "mb_engine_last_error" [] ::mem/c-string)
    :free-string   (ffi/cfn "mb_engine_free_string" [::mem/pointer] ::mem/void)
    :execute       (ffi/cfn "mb_engine_execute" [::mem/pointer ::mem/long ::mem/c-string ::mem/c-string ::mem/pointer] ::mem/int)
+   :execute-raw   (ffi/cfn "mb_engine_execute_raw" [::mem/pointer ::mem/long ::mem/c-string ::mem/c-string ::mem/pointer] ::mem/int)
    :stream-export (ffi/cfn "mb_engine_stream_export" [::mem/pointer ::mem/long ::mem/pointer] ::mem/int)
    :stream-cancel (ffi/cfn "mb_engine_stream_cancel" [::mem/pointer ::mem/long] ::mem/int)
    :stream-close  (ffi/cfn "mb_engine_stream_close" [::mem/pointer ::mem/long] ::mem/int)})
@@ -185,6 +186,19 @@
         ((:stream-close fns) handle stream-id)
         (throw e)))))
 
+(declare start-and-export!)
+
+(defn- start-and-export!
+  "Start a statement through `start-fn` (`:execute` or `:execute-raw`) and export its stream."
+  [fns handle start-fn session-id sql params]
+  (let [stream-id (with-open [arena (mem/confined-arena)]
+                    (let [out  (mem/alloc-instance ::mem/long arena)
+                          code (long ((get fns start-fn) handle (long session-id) sql (json/encode (or params [])) out))]
+                      (when-not (zero? code)
+                        (throw (last-error-exception fns)))
+                      (mem/read-long out)))]
+    (export-stream! fns handle stream-id)))
+
 (deftype FfiTransport [fns ^MemorySegment handle ^:volatile-mutable closed?]
   protocol/Transport
   (-call [_ request-json]
@@ -201,13 +215,11 @@
   (-execute [_ session-id sql params]
     (when closed?
       (throw (ex-info (tru "The native query engine has been shut down.") {})))
-    (let [stream-id (with-open [arena (mem/confined-arena)]
-                      (let [out  (mem/alloc-instance ::mem/long arena)
-                            code (long ((:execute fns) handle (long session-id) sql (json/encode (or params [])) out))]
-                        (when-not (zero? code)
-                          (throw (last-error-exception fns)))
-                        (mem/read-long out)))]
-      (export-stream! fns handle stream-id)))
+    (start-and-export! fns handle :execute session-id sql params))
+  (-execute-raw [_ session-id sql params]
+    (when closed?
+      (throw (ex-info (tru "The native query engine has been shut down.") {})))
+    (start-and-export! fns handle :execute-raw session-id sql params))
   (-close [_]
     (when-not closed?
       (set! closed? true)

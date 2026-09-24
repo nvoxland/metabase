@@ -330,6 +330,69 @@ impl Engine {
         Ok(id)
     }
 
+    /// Run warehouse-dialect `sql` in the session's database without planning it. For Metabase's own
+    /// metadata queries (sync), which are written in the warehouse's dialect; not a user-facing path.
+    pub async fn execute_raw(
+        &self,
+        session_id: u64,
+        sql: &str,
+        params: Vec<ParamValue>,
+    ) -> Result<u64> {
+        let session = self.session(session_id)?;
+        let registration = self
+            .databases
+            .get(&session.context.database_id)
+            .map(|r| Arc::clone(r.value()))
+            .ok_or_else(|| {
+                EngineError::new(
+                    ErrorKind::CatalogMissing,
+                    format!(
+                        "database {} is not registered with the engine",
+                        session.context.database_id
+                    ),
+                )
+            })?;
+        let (connector, pool) = self
+            .pools
+            .pool_for(&registration, session.context.role.as_deref())
+            .await?;
+        let settings = SessionSettings {
+            time_zone: session.context.report_timezone.clone(),
+            statement_timeout_ms: session.context.statement_timeout_ms,
+            role: session.context.role.clone(),
+            read_only: true,
+            application_name: "metabase-sync".into(),
+        };
+        let handle = connector
+            .execute(
+                pool.as_ref(),
+                Query {
+                    sql: sql.to_string(),
+                    params,
+                    settings,
+                },
+            )
+            .await?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.streams.insert(
+            id,
+            Arc::new(StreamEntry::new(session_id, handle.stream, handle.cancel)),
+        );
+        Ok(id)
+    }
+
+    /// [`Engine::execute_raw`] for a non-runtime thread.
+    pub fn execute_raw_blocking(
+        self: &Arc<Self>,
+        session_id: u64,
+        sql: String,
+        params: Vec<ParamValue>,
+    ) -> Result<u64> {
+        self.run_on_runtime(move |engine| {
+            Box::pin(async move { engine.execute_raw(session_id, &sql, params).await })
+        })
+    }
+
     pub fn stream(&self, id: u64) -> Result<Arc<StreamEntry>> {
         self.streams
             .get(&id)

@@ -364,6 +364,36 @@ pub unsafe extern "C" fn mb_engine_execute(
     })
 }
 
+/// Run warehouse-dialect `sql` without planning (Metabase's own metadata queries). Rows arrive
+/// through `mb_engine_stream_export` like any other statement.
+///
+/// # Safety
+/// `out_stream_id` must point to a writable u64.
+#[no_mangle]
+pub unsafe extern "C" fn mb_engine_execute_raw(
+    e: *const MbEngine,
+    session_id: u64,
+    sql: *const c_char,
+    params_json: *const c_char,
+    out_stream_id: *mut u64,
+) -> i32 {
+    guarded(|| {
+        if out_stream_id.is_null() {
+            return Err(EngineError::invalid_request("output pointer is null"));
+        }
+        let engine = engine(e)?;
+        let sql = borrow_str(sql, "sql")?.to_string();
+        let params = if params_json.is_null() {
+            vec![]
+        } else {
+            serde_json::from_str(borrow_str(params_json, "params_json")?)?
+        };
+        let id = engine.execute_raw_blocking(session_id, sql, params)?;
+        *out_stream_id = id;
+        Ok(())
+    })
+}
+
 /// Export a stream as an `ArrowArrayStream` into caller-allocated memory (40 bytes, zeroed).
 /// The caller pulls batches through the struct's callbacks and must call its `release` exactly
 /// once; releasing before the end cancels the statement. Only the first export of a stream succeeds.

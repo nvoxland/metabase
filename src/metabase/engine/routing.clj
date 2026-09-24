@@ -83,3 +83,12 @@
              (routable? query metadata-provider warehouse-driver))
       :datafusion
       candidate)))
+
+(defn sync-driver
+  "The driver sync should use for `database`: `:datafusion` when the database is routed to the
+  engine (not in shadow mode, which keeps the driver as the source of truth), else its own driver."
+  [database warehouse-driver]
+  (if (and (contains? engine-warehouses warehouse-driver)
+           (= :datafusion (engine-mode database)))
+    :datafusion
+    warehouse-driver))

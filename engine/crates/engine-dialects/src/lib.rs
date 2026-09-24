@@ -9,7 +9,13 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use datafusion::sql::unparser::dialect::{Dialect, PostgreSqlDialect};
+use datafusion::common::Result as DFResult;
+use datafusion::logical_expr::Expr;
+use datafusion::sql::sqlparser::ast;
+use datafusion::sql::unparser::dialect::{
+    DateFieldExtractStyle, Dialect, DistinctFromStyle, IntervalStyle, PostgreSqlDialect,
+};
+use datafusion::sql::unparser::Unparser;
 
 /// A warehouse we can unparse to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -44,7 +50,7 @@ impl DialectPolicy {
         match warehouse {
             Warehouse::Postgres => DialectPolicy {
                 warehouse,
-                dialect: Arc::new(PostgreSqlDialect {}),
+                dialect: Arc::new(MetabasePostgresDialect::default()),
                 functions: POSTGRES_FUNCTIONS.iter().copied().collect(),
             },
         }
@@ -70,6 +76,123 @@ impl DialectPolicy {
 
     pub fn supports_recursive_cte(&self) -> bool {
         false
+    }
+}
+
+/// DataFusion's Postgres dialect plus the rewrites Metabase's queries need. Each override exists
+/// because DataFusion and Postgres spell or type something differently; keep them small and tested.
+pub struct MetabasePostgresDialect {
+    inner: PostgreSqlDialect,
+}
+
+impl Default for MetabasePostgresDialect {
+    fn default() -> Self {
+        MetabasePostgresDialect {
+            inner: PostgreSqlDialect {},
+        }
+    }
+}
+
+impl MetabasePostgresDialect {
+    /// DataFusion coerces `substr` positions to BIGINT; Postgres only has `substr(text, int, int)`.
+    fn substr_with_int_positions(
+        &self,
+        unparser: &Unparser,
+        args: &[Expr],
+    ) -> DFResult<Option<ast::Expr>> {
+        if args.len() < 2 || args.len() > 3 {
+            return Ok(None);
+        }
+        let mut sql_args = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            let expr = unparser.expr_to_sql(arg)?;
+            let expr = if i == 0 {
+                expr
+            } else {
+                ast::Expr::Cast {
+                    kind: ast::CastKind::Cast,
+                    expr: Box::new(expr),
+                    data_type: ast::DataType::Integer(None),
+                    format: None,
+                    array: false,
+                }
+            };
+            sql_args.push(ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(expr)));
+        }
+        Ok(Some(ast::Expr::Function(ast::Function {
+            name: ast::ObjectName::from(vec![ast::Ident::new("substr")]),
+            uses_odbc_syntax: false,
+            parameters: ast::FunctionArguments::None,
+            args: ast::FunctionArguments::List(ast::FunctionArgumentList {
+                duplicate_treatment: None,
+                args: sql_args,
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+        })))
+    }
+}
+
+impl Dialect for MetabasePostgresDialect {
+    fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
+        self.inner.identifier_quote_style(identifier)
+    }
+
+    fn supports_nulls_first_in_sort(&self) -> bool {
+        self.inner.supports_nulls_first_in_sort()
+    }
+
+    fn use_array_keyword_for_array_literals(&self) -> bool {
+        self.inner.use_array_keyword_for_array_literals()
+    }
+
+    fn supports_qualify(&self) -> bool {
+        self.inner.supports_qualify()
+    }
+
+    fn requires_derived_table_alias(&self) -> bool {
+        self.inner.requires_derived_table_alias()
+    }
+
+    fn supports_empty_select_list(&self) -> bool {
+        self.inner.supports_empty_select_list()
+    }
+
+    fn interval_style(&self) -> IntervalStyle {
+        self.inner.interval_style()
+    }
+
+    fn float64_ast_dtype(&self) -> ast::DataType {
+        self.inner.float64_ast_dtype()
+    }
+
+    fn int8_cast_dtype(&self) -> ast::DataType {
+        self.inner.int8_cast_dtype()
+    }
+
+    fn distinct_from_style(&self) -> DistinctFromStyle {
+        self.inner.distinct_from_style()
+    }
+
+    fn date_field_extract_style(&self) -> DateFieldExtractStyle {
+        self.inner.date_field_extract_style()
+    }
+
+    fn scalar_function_to_sql_overrides(
+        &self,
+        unparser: &Unparser,
+        func_name: &str,
+        args: &[Expr],
+    ) -> DFResult<Option<ast::Expr>> {
+        match func_name {
+            "substr" | "substring" => self.substr_with_int_positions(unparser, args),
+            _ => self
+                .inner
+                .scalar_function_to_sql_overrides(unparser, func_name, args),
+        }
     }
 }
 

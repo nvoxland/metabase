@@ -34,6 +34,8 @@ fn parse_timestamp(s: &str) -> Option<NaiveDateTime> {
         "%Y-%m-%d %H:%M:%S%.f",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+        "%Y-%m-%d %H:%M",
     ] {
         if let Ok(dt) = NaiveDateTime::parse_from_str(s, fmt) {
             return Some(dt);
@@ -83,10 +85,12 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
         }
         Type::DATE => {
             let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
-            Box::new(
-                NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
-                    .map_err(|_| invalid(index, ty, v))?,
-            )
+            // Metabase sends dates as `YYYY-MM-DD`, but a date filter value can also arrive as a full timestamp.
+            let date = NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d")
+                .ok()
+                .or_else(|| parse_timestamp(s).map(|t| t.date()))
+                .ok_or_else(|| invalid(index, ty, v))?;
+            Box::new(date)
         }
         Type::TIMESTAMP => {
             let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
@@ -118,6 +122,25 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
         }
     };
     Ok(bound)
+}
+
+/// The Postgres type to declare for a placeholder when the server can't infer it, from the Arrow
+/// type Metabase attached to the value.
+pub fn declared_type(arrow_type: &str) -> Type {
+    match arrow_type {
+        "Boolean" => Type::BOOL,
+        "Int8" | "Int16" => Type::INT2,
+        "Int32" => Type::INT4,
+        "Int64" => Type::INT8,
+        "Float32" => Type::FLOAT4,
+        "Float64" => Type::FLOAT8,
+        "Date32" => Type::DATE,
+        t if t.starts_with("Decimal") => Type::NUMERIC,
+        t if t.starts_with("Timestamp") && t.contains("Some(") => Type::TIMESTAMPTZ,
+        t if t.starts_with("Timestamp") => Type::TIMESTAMP,
+        t if t.starts_with("Time64") || t.starts_with("Time32") => Type::TIME,
+        _ => Type::TEXT,
+    }
 }
 
 #[cfg(test)]

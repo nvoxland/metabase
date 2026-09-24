@@ -255,6 +255,7 @@ fn shared_library_exports_the_abi() {
             "mb_engine_plan_and_unparse",
             "mb_engine_pool_stats",
             "mb_engine_execute",
+            "mb_engine_execute_raw",
             "mb_engine_stream_export",
             "mb_engine_stream_cancel",
             "mb_engine_stream_close",

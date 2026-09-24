@@ -7,6 +7,7 @@
    [metabase.driver :as driver]
    [metabase.driver.sql-jdbc.sync :as sql-jdbc.sync]
    [metabase.driver.util :as driver.u]
+   [metabase.engine.routing :as engine.routing]
    [metabase.lib-be.core :as lib-be]
    [metabase.sync.db :as sync.db]
    [metabase.sync.interface :as i]
@@ -25,11 +26,17 @@
        (log/errorf "Error while fetching metadata with '%s': %s" ~function-name (ex-message e#))
        (throw e#))))
 
+(defn- sync-driver
+  "The driver that answers metadata questions for `database`: its own, or the native query engine's
+  when the database is routed there."
+  [database]
+  (engine.routing/sync-driver database (driver.u/database->driver database)))
+
 (mu/defn db-metadata :- i/DatabaseMetadata
   "Get basic Metadata about a `database` and its Tables. Doesn't include information about the Fields."
   [database :- i/DatabaseInstance]
   (log-if-error "db-metadata"
-    (let [driver (driver.u/database->driver database)]
+    (let [driver (sync-driver database)]
       (driver/describe-database driver database))))
 
 (defn include-nested-fields-for-table
@@ -47,7 +54,7 @@
   [database :- i/DatabaseInstance
    table    :- i/TableInstance]
   (log-if-error "table-fields-metadata"
-    (let [driver (driver.u/database->driver database)]
+    (let [driver (sync-driver database)]
       (if (driver.u/supports? driver :describe-fields database)
         (set (driver/describe-fields driver
                                      database
@@ -81,7 +88,7 @@
   This will be deprecated in "
   [database :- i/DatabaseInstance & {:as args} :- [:maybe ::driver/describe-fks.options]]
   (log-if-error "fields-metadata"
-    (let [driver             (driver.u/database->driver database)
+    (let [driver             (sync-driver database)
           describe-fields-fn (if (driver.u/supports? driver :describe-fields database)
                                (do (log/debug "Using `describe-fields` (fast sync) to fetch fields metadata.")
                                    driver/describe-fields)
@@ -99,7 +106,7 @@
   [database     :- i/DatabaseInstance
    & {:as args} :- [:maybe ::driver/describe-fks.options]]
   (log-if-error "fk-metadata"
-    (let [driver (driver.u/database->driver database)]
+    (let [driver (sync-driver database)]
       (when (driver.u/supports? driver :metadata/key-constraints database)
         (cond->> (driver/describe-fks driver
                                       (lib-be/instance->metadata database :metadata/database)

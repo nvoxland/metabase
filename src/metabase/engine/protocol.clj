@@ -13,6 +13,9 @@
   (-execute [this session-id sql params]
     "Plan and start `sql` in a session. Returns `{:reader ArrowReader, :cancel! fn, :close! fn}`.
     Throws for engine-reported errors. The caller must call `:close!` exactly once.")
+  (-execute-raw [this session-id sql params]
+    "Run warehouse-dialect `sql` in the session's database without planning it (Metabase's own
+    metadata queries). Same return shape as `-execute`.")
   (-close [this]
     "Release whatever the transport holds (native handles, connections)."))
 
