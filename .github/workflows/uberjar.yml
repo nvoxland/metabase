@@ -86,9 +86,71 @@ jobs:
             core.setOutput('java_version', requirements.java);
             core.setOutput('node_version', requirements.node);
 
-  build:
+  engine-native:
+    # The native query engine, one shared library per platform the jar may run on. The `build` job
+    # places them under resources/native/metabase-engine/<platform>/ before the uberjar build, whose
+    # `:engine` step keeps prebuilt libraries as they are. A leg that fails leaves that platform
+    # without the engine (Metabase keeps every database on JDBC there); it never blocks the jar.
     needs: [setup]
     if: ${{ needs.setup.outputs.build_editions != '[]' }}
+    name: engine (${{ matrix.platform }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ${{ vars.DEFAULT_RUNNER_KEY }}
+            target: x86_64-unknown-linux-gnu
+            library: libmetabase_engine.so
+          - platform: linux-x86_64-musl
+            runner: ${{ vars.DEFAULT_RUNNER_KEY }}
+            target: x86_64-unknown-linux-musl
+            library: libmetabase_engine.so
+            musl: true
+          - platform: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            library: libmetabase_engine.so
+          - platform: linux-aarch64-musl
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            library: libmetabase_engine.so
+            musl: true
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit }}
+      - name: Install the pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
+          key: ${{ matrix.target }}
+      - name: Install the musl toolchain
+        if: ${{ matrix.musl }}
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        working-directory: engine
+        run: cargo build --release -p engine-ffi --target ${{ matrix.target }}
+        env:
+          CC_x86_64_unknown_linux_musl: ${{ matrix.musl && 'musl-gcc' || '' }}
+          CC_aarch64_unknown_linux_musl: ${{ matrix.musl && 'musl-gcc' || '' }}
+      - name: Upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: metabase-engine-${{ matrix.platform }}-${{ inputs.commit || github.sha }}
+          path: engine/target/${{ matrix.target }}/release/${{ matrix.library }}
+          if-no-files-found: error
+
+  build:
+    needs: [setup, engine-native]
+    if: ${{ !cancelled() && needs.setup.outputs.build_editions != '[]' }}
     name: build (${{ matrix.edition }})
     runs-on: ${{ vars.DEFAULT_RUNNER_KEY }}
     timeout-minutes: 20
@@ -116,15 +178,29 @@ jobs:
         uses: ./.github/actions/prepare-backend
         with:
           java-version: "${{ needs.setup.outputs.java_version || 25 }}"
-      - name: Install the Rust toolchain for the native query engine
-        uses: dtolnay/rust-toolchain@stable
+      - name: Fetch the native query engine libraries
+        continue-on-error: true
+        uses: actions/download-artifact@v8
         with:
-          toolchain: 1.98.1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: engine
+          pattern: metabase-engine-*-${{ inputs.commit || github.sha }}
+          path: engine-artifacts
+      - name: Place the native query engine libraries
+        # download-artifact names each directory after its artifact; the loader wants <os>-<arch>[-musl]/
+        run: |
+          set -euo pipefail
+          suffix="-${{ inputs.commit || github.sha }}"
+          for dir in engine-artifacts/metabase-engine-*; do
+            [ -d "$dir" ] || continue
+            platform=$(basename "$dir"); platform=${platform#metabase-engine-}; platform=${platform%"$suffix"}
+            mkdir -p "resources/native/metabase-engine/$platform"
+            cp "$dir"/* "resources/native/metabase-engine/$platform/"
+          done
+          ls -R resources/native/metabase-engine || echo "no native query engine libraries; the jar ships without the engine"
       - name: Build
         run: ./bin/build.sh
+        env:
+          # the libraries come from the engine-native job; never compile the engine here
+          SKIP_ENGINE_NATIVE: ${{ hashFiles('resources/native/metabase-engine/**') == '' && 'true' || 'false' }}
       - name: Upload bundle stats
         if: ${{ matrix.edition == 'ee' && env.EMIT_BUNDLE_STATS == 'true' }}
         continue-on-error: true
