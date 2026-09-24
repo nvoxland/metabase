@@ -5,6 +5,7 @@
 use std::sync::Arc;
 
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
+use datafusion::common::Column;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::FunctionRegistry;
 use datafusion::execution::SessionStateBuilder;
@@ -66,6 +67,7 @@ impl Planner {
     pub async fn plan(&self, sql: &str) -> Result<Planned> {
         let plan = self.analyze(sql).await?;
         let plan = merge_nested_projections(plan)?;
+        let plan = alias_columns_over_derived_sort(plan)?;
         self.reject_unsupported(&plan)?;
         let statement = Unparser::new(self.policy.dialect()).plan_to_sql(&plan)?;
         let mut warehouse_sql = statement.to_string();
@@ -227,6 +229,57 @@ fn merge_nested_projections(plan: LogicalPlan) -> Result<LogicalPlan> {
         Ok(Transformed::yes(LogicalPlan::Projection(projection)))
     })?;
     Ok(merged.data)
+}
+
+/// `Projection(Sort(Projection))` whose sort key is an expression over a column the outer
+/// projection drops. The unparser can't flatten that (plain-column keys it can), so it wraps the
+/// sort in a `derived_sort` subquery but leaves the outer columns qualified by their base table,
+/// which the warehouse can't resolve from outside the subquery. Giving the inner projection
+/// uniquely named copies of the columns the outer one wants, and referring to those by name,
+/// makes the wrapped SQL valid. Sort keys keep referring to the inner projection's own columns.
+fn alias_columns_over_derived_sort(plan: LogicalPlan) -> Result<LogicalPlan> {
+    let rewritten = plan.transform_up(|node| {
+        let LogicalPlan::Projection(outer) = &node else {
+            return Ok(Transformed::no(node));
+        };
+        let LogicalPlan::Sort(sort) = outer.input.as_ref() else {
+            return Ok(Transformed::no(node));
+        };
+        let LogicalPlan::Projection(inner) = sort.input.as_ref() else {
+            return Ok(Transformed::no(node));
+        };
+        if sort.expr.iter().all(|e| matches!(e.expr, Expr::Column(_))) {
+            return Ok(Transformed::no(node));
+        }
+        let mut inner_exprs = inner.expr.clone();
+        let mut outer_exprs = Vec::with_capacity(outer.expr.len());
+        for (i, expr) in outer.expr.iter().enumerate() {
+            let (column, out_name) = match expr {
+                Expr::Column(c) => (c, c.name.clone()),
+                Expr::Alias(a) => match a.expr.as_ref() {
+                    Expr::Column(c) => (c, a.name.clone()),
+                    _ => return Ok(Transformed::no(node)),
+                },
+                _ => return Ok(Transformed::no(node)),
+            };
+            let Ok(index) = inner.schema.index_of_column(column) else {
+                return Ok(Transformed::no(node));
+            };
+            let copy_name = format!("__mb_c{i}");
+            inner_exprs.push(inner.expr[index].clone().unalias().alias(&copy_name));
+            outer_exprs.push(Expr::Column(Column::new_unqualified(&copy_name)).alias(out_name));
+        }
+        let inner =
+            LogicalPlan::Projection(Projection::try_new(inner_exprs, Arc::clone(&inner.input))?);
+        let sorted = LogicalPlan::Sort(datafusion::logical_expr::Sort {
+            expr: sort.expr.clone(),
+            input: Arc::new(inner),
+            fetch: sort.fetch,
+        });
+        let projection = Projection::try_new(outer_exprs, Arc::new(sorted))?;
+        Ok(Transformed::yes(LogicalPlan::Projection(projection)))
+    })?;
+    Ok(rewritten.data)
 }
 
 fn ensure_query(statement: &DFStatement) -> Result<()> {
@@ -548,6 +601,43 @@ mod tests {
             .metadata()
             .get(crate::catalog::DB_TYPE_METADATA)
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn sorting_by_an_expression_over_a_dropped_column_unparses_to_valid_sql() {
+        // the unparser wraps this in a `derived_sort` subquery; the outer columns must not be qualified by the base table
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT o."ID", p."Title" AS "title" FROM "public"."Orders" o LEFT JOIN "public"."Products" p ON o."Product ID" = p."ID" ORDER BY date_trunc('day', o."Created At") DESC LIMIT 2"#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.warehouse_sql,
+            r#"SELECT "__mb_c0" AS "ID", "__mb_c1" AS "title" FROM (SELECT "o"."ID", "p"."Title" AS "title", "o"."Created At", "o"."ID" AS "__mb_c0", "p"."Title" AS "__mb_c1" FROM "public"."Orders" AS "o" LEFT OUTER JOIN "public"."Products" AS "p" ON ("o"."Product ID" = "p"."ID") ORDER BY date_trunc('day', "o"."Created At") DESC NULLS FIRST) AS "derived_sort" LIMIT 2"#
+        );
+        assert_eq!(
+            result
+                .schema
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ID", "title"]
+        );
+        // a plain-column key still flattens
+        let flat = planner()
+            .plan_and_unparse(
+                r#"SELECT o."ID" AS "id", p."Title" AS "title" FROM "public"."Orders" o LEFT JOIN "public"."Products" p ON o."Product ID" = p."ID" ORDER BY o."Created At" DESC LIMIT 2"#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            !flat.warehouse_sql.contains("derived_sort"),
+            "{}",
+            flat.warehouse_sql
+        );
     }
 
     #[tokio::test]
