@@ -66,7 +66,8 @@
                       "timetz" :type/TimeWithTZ
                       "bytea"  :type/*
                       (arrow-type->base-type (.getType field)))
-     :database_type (or db-type (str (.getType field)))}))
+     ;; the Arrow type for every column, tagged or not, so a bucketed column and its source column compare equal
+     :database_type (str (.getType field))}))
 
 (defn cols
   "Result column metadata for every column `batches` will produce."
