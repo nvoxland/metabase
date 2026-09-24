@@ -27,6 +27,7 @@ type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'stati
 pub fn connectors() -> Vec<Arc<dyn Connector>> {
     vec![
         Arc::new(engine_connector_postgres::PostgresConnector),
+        Arc::new(engine_connector_mysql::MySqlConnector),
         Arc::new(engine_connector_jdbc_bridge::JdbcBridgeConnector),
     ]
 }

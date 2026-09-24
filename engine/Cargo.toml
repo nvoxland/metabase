@@ -7,6 +7,7 @@ members = [
   "crates/engine-server",
   "crates/engine-connectors/postgres",
   "crates/engine-connectors/jdbc-bridge",
+  "crates/engine-connectors/mysql",
   "crates/engine-slt",
 ]
 
@@ -54,6 +55,8 @@ tokio-postgres = { version = "0.7.18", features = ["with-chrono-0_4", "with-uuid
 deadpool-postgres = "0.14.2"
 tokio-postgres-rustls = "0.14.0"
 sqllogictest = "0.29.1"
+# MySQL connector (MySQL and MariaDB)
+mysql_async = { version = "0.37.1", default-features = false, features = ["default-rustls-ring"] }
 csv = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 chrono = "0.4"

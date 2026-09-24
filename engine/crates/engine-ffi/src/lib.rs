@@ -23,6 +23,7 @@ use engine_core::{Engine, EngineConfig, EngineError, ErrorKind};
 pub fn connectors() -> Vec<Arc<dyn Connector>> {
     vec![
         Arc::new(engine_connector_postgres::PostgresConnector),
+        Arc::new(engine_connector_mysql::MySqlConnector),
         Arc::new(engine_connector_jdbc_bridge::JdbcBridgeConnector),
     ]
 }

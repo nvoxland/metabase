@@ -1,0 +1,27 @@
+[package]
+name = "engine-connector-mysql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine-core = { path = "../../engine-core" }
+engine-dialects = { path = "../../engine-dialects" }
+async-trait.workspace = true
+arrow.workspace = true
+datafusion.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tokio-stream.workspace = true
+futures.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+mysql_async.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }
