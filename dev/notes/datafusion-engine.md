@@ -256,7 +256,7 @@ Lessons that changed the design in small but important ways:
 
 ## Open questions
 
-- Should the SQL editor default to the engine dialect with passthrough as an opt-in, or the reverse during migration?
+- Should the SQL editor default to the engine dialect with passthrough as an opt-in, or the reverse during migration? Related: a routed question's "view the SQL" shows the engine-dialect SQL Metabase compiled (`mb_cast`, `$1` placeholders), not the warehouse SQL the engine sent; the latter is a `plan-and-unparse` away once the editor question is settled.
 - How do we communicate "Metabase gives the engine's answer regardless of warehouse" where it changes existing results?
 - Production base image: the Ubuntu variant, or `gcompat` on Alpine?
 - Does sync-time row sampling for fingerprinting route through the engine in the MVP? Default: no.

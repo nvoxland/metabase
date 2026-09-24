@@ -115,16 +115,28 @@
         (swap! stamps assoc (:id database) {:stamp fresh :at now})
         fresh))))
 
+(defn- metadata-database
+  "The database whose synced tables and fields `database` queries: itself, or for a database-routing
+  destination (which has no synced metadata of its own) its router."
+  [database]
+  (if-let [router-id (:router-database-id database)]
+    (assoc database :id router-id)
+    database))
+
+(defn- registration-behind?
+  "Whether the metadata the engine was registered with for `database` has since changed (a sync, a
+  schema change), as opposed to a query naming a column that doesn't exist."
+  [database]
+  (let [metadata (metadata-database database)]
+    (not= (:stamp (get @stamps (:id metadata))) (engine.catalog/stamp metadata))))
+
 (defn- ensure-registered!
   "Make sure the engine has the database's connection details and current catalog. Checks a cheap
   metadata stamp on every query and only builds the full snapshot when it changed."
   [database]
   ;; The transport is part of the stamp so a restarted engine (which starts empty) gets registered again.
   (let [details  (driver.conn/effective-details database)
-        ;; a database-routing destination has no synced metadata of its own: its tables are the router's
-        metadata (if-let [router-id (:router-database-id database)]
-                   (assoc database :id router-id)
-                   database)
+        metadata (metadata-database database)
         stamp    {:stamp [(catalog-stamp metadata) (hash details)] :transport (engine/transport)}]
     (when (not= (engine/registration (:id database)) stamp)
       (let [snapshot (assoc (engine.catalog/snapshot metadata) :database_id (:id database))]
@@ -197,14 +209,17 @@
                            {:type (name context)})})
 
 (defn- stale-registration-error?
-  "Whether the engine failed because what it holds for the database is behind: its catalog doesn't
-  know a table (the snapshot predates a sync, or a schema change), or it has no registration at all
-  (a restarted sidecar starts empty while this process still remembers registering)."
-  [e]
+  "Whether the engine failed because what it holds for `database` is behind: it has no registration
+  at all (a restarted sidecar starts empty while this process still remembers registering), or its
+  catalog doesn't know a table or column and the database's metadata has changed since it was
+  registered (the snapshot predates a sync, or a schema change). A query naming a column that never
+  existed fails without a re-registration."
+  [e database]
   (let [{:keys [kind message]} (:engine/error (ex-data e))]
     (boolean (or (= kind "catalog_missing")
                  (and (= kind "plan")
-                      (re-find #"table '[^']*' not found|No field named" (str message)))))))
+                      (re-find #"table '[^']*' not found|No field named" (str message))
+                      (registration-behind? database))))))
 
 (defn- start-statement!
   "Register the database if needed, open a session, and start `sql`: `[session-id handle]`. The
@@ -225,7 +240,7 @@
         [session handle] (try
                            (start-statement! driver database outer-query sql params)
                            (catch clojure.lang.ExceptionInfo e
-                             (if (stale-registration-error? e)
+                             (if (stale-registration-error? e database)
                                ;; register again from a fresh snapshot and try once more
                                (do (swap! stamps dissoc (:id database))
                                    (engine/forget-registration! (:id database))
@@ -276,6 +291,29 @@
   (ensure-registered! database)
   (engine/with-session [session {:database_id (:id database)}]
     (rows->maps (engine/query-rows! session (numbered-placeholders sql) (perf/mapv param->engine params)))))
+
+(defn- metadata-reducible
+  "Like [[metadata-query!]], but the rows come out of the engine as the returned reducible is reduced,
+  never all at once: the field listing of a large warehouse is the one metadata result that doesn't
+  fit in memory comfortably. The session lives for the reduction."
+  [database [sql & params]]
+  (ensure-registered! database)
+  (reify clojure.lang.IReduceInit
+    (reduce [_ rf init]
+      (engine/with-session [session {:database_id (:id database)}]
+        (let [{:keys [reader close!]} (engine/execute-raw! session (numbered-placeholders sql) (perf/mapv param->engine params))]
+          (try
+            (let [ks       (perf/mapv (comp keyword :name) (engine.arrow/cols reader))
+                  next-row (engine.arrow/row-thunk reader)]
+              (loop [acc init]
+                (if-let [row (next-row)]
+                  (let [acc (rf acc (zipmap ks row))]
+                    (if (reduced? acc)
+                      @acc
+                      (recur acc)))
+                  acc)))
+            (finally
+              (close!))))))))
 
 (defn- warehouse-driver-of [database]
   (keyword (:engine database)))
@@ -336,7 +374,7 @@
       (eduction (comp (m/mapply sql-jdbc.sync/describe-fields-pre-process-xf warehouse database opts)
                       (sql-jdbc.describe-table/limit-fields-per-table-xf (driver.settings/sync-max-fields-per-table))
                       (sql-jdbc.describe-table/describe-fields-xf warehouse database))
-                (metadata-query! database sql)))))
+                (metadata-reducible database sql)))))
 
 (defmethod driver/describe-fks :datafusion
   [_driver database & {:keys [schema-names table-names] :as opts}]

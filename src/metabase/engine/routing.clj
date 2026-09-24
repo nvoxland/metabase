@@ -141,6 +141,9 @@
   (and (contains? (engine-warehouses) warehouse-driver)
        ;; a database routed to an engine this process can't start keeps working on its driver
        (engine/available?)
+       ;; likewise one reached through the JDBC bridge while the bridge isn't listening
+       (or (not (contains? (engine.settings/bridge-warehouses) warehouse-driver))
+           (some? (engine.settings/bridge-url)))
        (details-supported? (:details database))
        (not (native-query? query metadata-provider))
        (not (nested-field-column-query? query metadata-provider))))

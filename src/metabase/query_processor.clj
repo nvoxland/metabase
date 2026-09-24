@@ -13,6 +13,7 @@
    [metabase.api.common :as api]
    [metabase.driver.util :as driver.u]
    [metabase.engine.routing :as engine.routing]
+   [metabase.engine.settings :as engine.settings]
    [metabase.engine.shadow :as engine.shadow]
    [metabase.lib-be.core :as lib-be]
    [metabase.lib.metadata :as lib.metadata]
@@ -53,29 +54,41 @@
 
 (defn- shadow-database
   "The query's database and a metadata provider for it: the one the query processor's setup already
-  attached to the query when there is one, else the request's (cached) application-database one."
+  attached to the query when there is one, else the request's (cached) application-database one.
+  Only consulted for a database in shadow mode, so an uncached run outside a request is rare."
   [query]
   (let [mp (if (lib.metadata.protocols/metadata-providerable? query)
              (lib.metadata/->metadata-provider query)
              (lib-be/application-database-metadata-provider (:database query)))]
     [mp (lib.metadata/database mp)]))
 
+(defn- start-shadow-comparison!
+  "Queue a background comparison of both paths for `query` when its database is in shadow mode."
+  [query]
+  ;; the database-local `query-engine` is already bound by setup: check it before touching any metadata
+  (when (and (not= (:type query) :internal)
+             (integer? (:database query))
+             (= :shadow (engine.settings/query-engine)))
+    (let [[mp database] (shadow-database query)
+          user-id       api/*current-user-id*]
+      (when (engine.routing/shadow? query mp database (driver.u/database->driver (:database query)))
+        (engine.shadow/run-in-background!
+         query
+         (fn []
+           (engine.shadow/compare-results (shadow-rerun query user-id :jdbc)
+                                          (shadow-rerun query user-id :datafusion))))))))
+
 (defn- engine-shadow-middleware
   "For databases in `shadow` query-engine mode: answer the query normally, then compare the JDBC
-  and engine paths in the background. See `metabase.engine.shadow`."
+  and engine paths in the background. See `metabase.engine.shadow`. The comparison is a side
+  channel: nothing about it may fail a query the driver has already answered."
   [qp]
   (fn [query rff]
     (let [result (qp query rff)]
-      (when (and (not= (:type query) :internal)
-                 (integer? (:database query)))
-        (let [[mp database] (shadow-database query)
-              user-id       api/*current-user-id*]
-          (when (engine.routing/shadow? query mp database (driver.u/database->driver (:database query)))
-            (engine.shadow/run-in-background!
-             query
-             (fn []
-               (engine.shadow/compare-results (shadow-rerun query user-id :jdbc)
-                                              (shadow-rerun query user-id :datafusion)))))))
+      (try
+        (start-shadow-comparison! query)
+        (catch Throwable e
+          (log/warn e "Couldn't start the shadow comparison for this query")))
       result)))
 
 (def around-middleware

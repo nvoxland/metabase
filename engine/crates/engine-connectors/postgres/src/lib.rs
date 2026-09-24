@@ -363,8 +363,9 @@ async fn start_statement(
         ));
     }
     let mut params: Vec<params::BoundParam> = Vec::with_capacity(query.params.len());
+    let session_tz = query.settings.time_zone.as_deref();
     for (i, (p, ty)) in query.params.iter().zip(statement.params()).enumerate() {
-        match params::bind(i, p, ty) {
+        match params::bind(i, p, ty, session_tz) {
             Ok(bound) => params.push(bound),
             Err(e) => fail!(e),
         }

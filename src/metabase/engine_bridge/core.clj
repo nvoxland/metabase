@@ -172,6 +172,11 @@
                    (throw (ex-info (format "Database %s not found" database_id) {:type :invalid-query})))
         driver   (driver.u/database->driver database)
         canceled (a/promise-chan)]
+    ;; the engine cancelling its stream (a query timeout, a closed reader) must stop the statement on the warehouse,
+    ;; not just this stream: the JDBC statement watches the same channel the driver's own path uses
+    (.setOnCancelHandler listener (fn [] (a/put! canceled ::canceled)))
+    ;; `:write?` is left at its default, so the connection is read-only as on the JDBC path (the ticket's
+    ;; `read_only` is always true)
     (sql-jdbc.execute/do-with-connection-with-options
      driver
      database

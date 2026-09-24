@@ -1,7 +1,7 @@
 //! Bind parameter values to the types Postgres inferred for the prepared statement.
 
 use bytes::BytesMut;
-use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
+use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use engine_core::api::ParamValue;
 use engine_core::error::{EngineError, ErrorKind, Result};
 use serde_json::Value;
@@ -48,7 +48,24 @@ fn parse_timestamp(s: &str) -> Option<NaiveDateTime> {
 }
 
 /// Convert one JSON value into the Postgres type the statement expects.
-pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
+/// A zone-less wall-clock time read in the session's zone (the report time zone), as Postgres reads
+/// a `timestamp` literal it coerces to `timestamptz`; UTC when the session has none.
+fn zoned(naive: NaiveDateTime, session_tz: Option<&str>) -> Option<DateTime<Utc>> {
+    match session_tz {
+        None => Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)),
+        Some(tz) => {
+            let tz: arrow::array::timezone::Tz = tz.parse().ok()?;
+            Some(tz.from_local_datetime(&naive).single()?.with_timezone(&Utc))
+        }
+    }
+}
+
+pub fn bind(
+    index: usize,
+    param: &ParamValue,
+    ty: &Type,
+    session_tz: Option<&str>,
+) -> Result<BoundParam> {
     let v = &param.value;
     if v.is_null() {
         // A NULL must still carry the type Postgres inferred for the placeholder.
@@ -102,7 +119,7 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
         Type::TIMESTAMPTZ => {
             let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
             let naive = parse_timestamp(s).ok_or_else(|| invalid(index, ty, v))?;
-            Box::new(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
+            Box::new(zoned(naive, session_tz).ok_or_else(|| invalid(index, ty, v))?)
         }
         Type::TIME => {
             let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
@@ -319,27 +336,44 @@ mod tests {
 
     #[test]
     fn binds_by_the_statements_type_not_the_arrow_hint() {
-        assert!(bind(0, &param(Value::from(3)), &Type::FLOAT8).is_ok());
-        assert!(bind(0, &param(Value::from("2024-02-03")), &Type::DATE).is_ok());
+        assert!(bind(0, &param(Value::from(3)), &Type::FLOAT8, None).is_ok());
+        assert!(bind(0, &param(Value::from("2024-02-03")), &Type::DATE, None).is_ok());
         assert!(bind(
             0,
             &param(Value::from("2024-02-03T04:05:06Z")),
-            &Type::TIMESTAMPTZ
+            &Type::TIMESTAMPTZ,
+            None
         )
         .is_ok());
         assert!(bind(
             0,
             &param(Value::from("2024-02-03 04:05:06.5")),
-            &Type::TIMESTAMP
+            &Type::TIMESTAMP,
+            None
         )
         .is_ok());
-        assert!(bind(0, &param(Value::Null), &Type::INT8).is_ok());
-        assert!(bind(0, &param(Value::Null), &Type::TIMESTAMPTZ).is_ok());
+        assert!(bind(0, &param(Value::Null), &Type::INT8, None).is_ok());
+        assert!(bind(0, &param(Value::Null), &Type::TIMESTAMPTZ, None).is_ok());
+    }
+
+    #[test]
+    fn a_zone_less_timestamp_bound_as_timestamptz_is_read_in_the_session_zone() {
+        use chrono::NaiveDate;
+        // 2024-01-01 00:00 wall clock in Los Angeles is 08:00 UTC; with no session zone it is UTC itself
+        let naive = NaiveDate::from_ymd_opt(2024, 1, 1)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+        let la = zoned(naive, Some("America/Los_Angeles")).unwrap();
+        assert_eq!(la.to_rfc3339(), "2024-01-01T08:00:00+00:00");
+        let utc = zoned(naive, None).unwrap();
+        assert_eq!(utc.to_rfc3339(), "2024-01-01T00:00:00+00:00");
+        assert!(zoned(naive, Some("Nowhere/Land")).is_none());
     }
 
     #[test]
     fn mismatches_are_invalid_requests_naming_the_parameter() {
-        let err = bind(1, &param(Value::from("nope")), &Type::INT8).unwrap_err();
+        let err = bind(1, &param(Value::from("nope")), &Type::INT8, None).unwrap_err();
         assert_eq!(err.kind, ErrorKind::InvalidRequest);
         assert!(err.message.contains("$2"), "{}", err.message);
     }

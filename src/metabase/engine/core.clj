@@ -125,7 +125,11 @@
   [database-id]
   (swap! registrations dissoc database-id)
   (when (running?)
-    (invalidate-database! database-id)))
+    ;; a details update or a delete must go through even when the engine (a sidecar, say) is gone
+    (try
+      (invalidate-database! database-id)
+      (catch Throwable e
+        (log/warnf e "Couldn't forget database %d in the native query engine" database-id)))))
 
 (defn create-session!
   "Open a session for `context` (`{:database_id ...}` plus user, timezone, remark, ...). Returns the

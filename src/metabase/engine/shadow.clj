@@ -89,7 +89,9 @@
 (defn record!
   "Record a comparison for `query`, logging mismatches."
   [query outcome elapsed-ms]
-  (let [entry (assoc outcome :query query :elapsed-ms elapsed-ms)]
+  ;; the attached metadata provider (every table and field the request fetched) would otherwise be pinned for as long
+  ;; as the comparison is kept
+  (let [entry (assoc outcome :query (dissoc query :lib/metadata) :elapsed-ms elapsed-ms)]
     (swap! recent-comparisons (fn [entries] (vec (take max-recent (cons entry entries)))))
     (if (:match? outcome)
       (log/debugf "Shadow comparison matched (%d ms)" elapsed-ms)
