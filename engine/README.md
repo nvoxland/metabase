@@ -74,7 +74,9 @@ already present under `resources/native/metabase-engine/` are used as-is, so CI 
 per-platform builds from `.github/workflows/engine.yml` there before building the jar.
 
 The Alpine image needs `libgcc` (added to `bin/docker/Dockerfile`) because a musl build without
-`crt-static` links `libgcc_s` dynamically.
+`crt-static` links `libgcc_s` dynamically. The `build-native` matrix in the engine workflow builds a
+`linux-x86_64-musl` library, but nothing places it in the jar yet: until that plumbing exists the
+image starts without the engine and routing keeps every database on JDBC.
 
 ## The JDBC bridge
 

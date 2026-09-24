@@ -38,6 +38,20 @@
         (is (= [#uuid "d6b02fa2-bf7b-4b32-80d5-060b649c9859" "d6b02fa2-bf7b-4b32-80d5-060b649c9859"]
                ((engine.arrow/row-thunk (one-batch root)))))))))
 
+(deftest ^:parallel timetz-columns-test
+  (testing "a text column the catalog tagged as timetz becomes an OffsetTime, like the JDBC driver"
+    (with-open [allocator (RootAllocator.)
+                v         (VarCharVector. (Field. "t" (FieldType. true (ArrowType$Utf8.) nil {"metabase.db_type" "timetz"}) nil) allocator)]
+      (.allocateNew v)
+      (.setSafe v 0 (.getBytes "07:23:18.331+00" "UTF-8"))
+      (.setSafe v 1 (.getBytes "23:05:00+05:30" "UTF-8"))
+      (.setValueCount v 2)
+      (with-open [root (VectorSchemaRoot. ^java.util.List [v])]
+        (.setRowCount root 2)
+        (let [next-row (engine.arrow/row-thunk (one-batch root))]
+          (is (= [(java.time.OffsetTime/parse "07:23:18.331+00:00")] (next-row)))
+          (is (= [(java.time.OffsetTime/parse "23:05:00+05:30")] (next-row))))))))
+
 (deftest ^:parallel timestamp-units-test
   (testing "every Arrow timestamp unit becomes the java.time value the JDBC drivers would return"
     (with-open [allocator (RootAllocator.)

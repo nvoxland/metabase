@@ -78,6 +78,12 @@
   [^FieldVector vector]
   (some-> vector .getField .getMetadata (.get "metabase.db_type")))
 
+(defn- parse-offset-time
+  "An `OffsetTime` from Postgres' text form of `timetz`, whose offset omits the minutes when they
+  are zero (`+00`, `-07`, `+05:30`)."
+  ^java.time.OffsetTime [^String s]
+  (java.time.OffsetTime/parse (if (re-find #"[+-]\d\d$" s) (str s ":00") s)))
+
 (defn- timestamp-fn
   "Accessor for any timestamp vector: `nanos-per-unit` scales the stored integer to nanoseconds; a
   zoned column (Arrow carries the zone, always UTC from the engine) becomes an `OffsetDateTime`,
@@ -106,8 +112,10 @@
       DecimalVector         (fn [i] (when-not (null? i) (strip-zeros (.getObject ^DecimalVector vector (int i)))))
       VarCharVector         (let [text (fn [^long i] (String. (.get ^VarCharVector vector (int i)) StandardCharsets/UTF_8))]
                               ;; the catalog tags columns with the warehouse's type name; restore what Arrow can't carry
-                              (if (= "uuid" (db-type vector))
-                                (fn [i] (when-not (null? i) (java.util.UUID/fromString (text i))))
+                              (case (db-type vector)
+                                "uuid"   (fn [i] (when-not (null? i) (java.util.UUID/fromString (text i))))
+                                ;; Arrow has no time-with-zone; Postgres sends `07:23:18.331+00` as text
+                                "timetz" (fn [i] (when-not (null? i) (parse-offset-time (text i))))
                                 (fn [i] (when-not (null? i) (text i)))))
       BitVector             (fn [i] (when-not (null? i) (= 1 (.get ^BitVector vector (int i)))))
       DateDayVector         (fn [i] (when-not (null? i) (LocalDate/ofEpochDay (.get ^DateDayVector vector (int i)))))

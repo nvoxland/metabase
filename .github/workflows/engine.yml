@@ -151,6 +151,12 @@ jobs:
             runner: macos-latest
             target: aarch64-apple-darwin
             library: libmetabase_engine.dylib
+          # The production image is Alpine: the loader looks for `linux-x86_64-musl`.
+          - platform: linux-x86_64-musl
+            runner: ${{ vars.DEFAULT_RUNNER_KEY }}
+            target: x86_64-unknown-linux-musl
+            library: libmetabase_engine.so
+            musl: true
     steps:
       - uses: actions/checkout@v6
       - name: Install the pinned Rust toolchain
@@ -162,8 +168,14 @@ jobs:
         with:
           workspaces: engine
           key: ${{ matrix.target }}
+      - name: Install the musl toolchain
+        if: ${{ matrix.musl }}
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
+        # `engine/.cargo/config.toml` turns off crt-static for musl so the result is a loadable cdylib.
         run: cargo build --release -p engine-ffi --target ${{ matrix.target }}
+        env:
+          CC_x86_64_unknown_linux_musl: ${{ matrix.musl && 'musl-gcc' || '' }}
       - name: Upload
         uses: actions/upload-artifact@v7
         with:

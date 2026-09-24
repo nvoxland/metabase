@@ -5,6 +5,7 @@
    [metabase.driver :as driver]
    [metabase.engine.test-util :as engine.tu]
    [metabase.lib-be.core :as lib-be]
+   [metabase.query-processor :as qp]
    [metabase.sync.core :as sync]
    [metabase.test :as mt]
    [toucan2.core :as t2]))
@@ -41,6 +42,11 @@
                                               :details  (:details jdbc-db)
                                               :settings {:query-engine "datafusion"}}]
             (sync/sync-database! db {:scan :schema})
+            (testing "and a query right after the sync sees the new tables (the catalog stamp is cached briefly)"
+              (mt/with-db db
+                (mt/with-temporary-setting-values [query-engine :datafusion]
+                  (is (= [[1 "Red Medicine"]]
+                         (mt/rows (qp/process-query (mt/mbql-query venues {:fields [$id $name] :filter [:= $id 1]}))))))))
             (let [table-ids (t2/select-fn-set :id :model/Table :db_id (:id db) :active true)]
               (is (pos? (:fields jdbc-counts)))
               (is (= jdbc-counts

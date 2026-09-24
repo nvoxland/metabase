@@ -88,6 +88,11 @@
   [unit :- driver-api/schema.temporal-bucketing.unit.date-time.truncate
    expr :- ::h2x/expr]
   (cond
+    ;; the catalog types `timetz` as text (Arrow has no time with zone); read it as a plain time first, which drops
+    ;; the offset the JDBC path keeps. Ordered before plain time: `:type/TimeWithTZ` is a `:type/Time`.
+    (h2x/database-or-effective-type-isa? expr "timetz" :type/TimeWithTZ)
+    (time-trunc unit (->time expr))
+
     (h2x/database-or-effective-type-isa? expr "time" :type/Time)
     (time-trunc unit expr)
 
@@ -101,9 +106,10 @@
         (h2x/type-info expr') (h2x/with-type-info (h2x/type-info expr'))))))
 
 (defn- extract-integer [unit expr]
-  (h2x/->integer (extract unit (if (h2x/database-or-effective-type-isa? expr "time" :type/Time)
-                                 expr
-                                 (->timestamp expr)))))
+  (h2x/->integer (extract unit (cond
+                                 (h2x/database-or-effective-type-isa? expr "timetz" :type/TimeWithTZ) (->time expr)
+                                 (h2x/database-or-effective-type-isa? expr "time" :type/Time)         expr
+                                 :else                                                                (->timestamp expr)))))
 
 (defmethod sql.qp/date [:datafusion :default]          [_ _ expr] expr)
 (defmethod sql.qp/date [:datafusion :second-of-minute] [_ _ expr] (extract-integer :second expr))
@@ -166,20 +172,19 @@
   (h2x// (sql.qp/datetime-diff driver :day x y) 7))
 
 (defn- months-between
-  "Whole months from `x` to `y`: the year and month difference, minus one when `y` hasn't reached `x`'s
-  day of month and time yet (or plus one in the negative direction)."
+  "Whole months from `x` to `y` at day granularity, like Postgres' `age(date_trunc('day', y),
+  date_trunc('day', x))`: the year and month difference, minus one when `y`'s day of month hasn't
+  reached `x`'s yet (or plus one in the negative direction). The time of day doesn't count."
   [x y]
-  (let [x         (->timestamp x)
-        y         (->timestamp y)
-        raw       (h2x/+ (h2x/* (h2x/- (extract :year y) (extract :year x)) 12)
-                         (h2x/- (extract :month y) (extract :month x)))
-        ;; seconds into the month, so day-of-month and time compare as one number
-        into-month (fn [expr]
-                     (h2x/- (extract :epoch expr) (extract :epoch [:date_trunc (h2x/literal :month) expr])))]
+  (let [x   (->timestamp x)
+        y   (->timestamp y)
+        raw (h2x/+ (h2x/* (h2x/- (extract :year y) (extract :year x)) 12)
+                   (h2x/- (extract :month y) (extract :month x)))
+        day (fn [expr] (extract :day expr))]
     (h2x/->integer
      [:case
-      [:and [:> raw [:inline 0]] [:< (into-month y) (into-month x)]] (h2x/- raw [:inline 1])
-      [:and [:< raw [:inline 0]] [:> (into-month y) (into-month x)]] (h2x/+ raw [:inline 1])
+      [:and [:> raw [:inline 0]] [:< (day y) (day x)]] (h2x/- raw [:inline 1])
+      [:and [:< raw [:inline 0]] [:> (day y) (day x)]] (h2x/+ raw [:inline 1])
       :else raw])))
 
 (defmethod sql.qp/datetime-diff [:datafusion :month]
@@ -264,9 +269,11 @@
                          (h2x/is-of-type? expr "timestamptz")
                          (h2x/is-of-type? expr "timestamp with time zone"))
         _            (sql.u/validate-convert-timezone-args timestamptz? target-timezone source-timezone)
-        ;; a date has no clock to shift; make it a timestamp first so the source zone applies to midnight
+        ;; a date has no clock to shift; make it a timestamp first so the source zone applies to midnight. A literal
+        ;; is bound as a parameter, so it gets an explicit type too (neither planner would infer one under the UDF).
         expr         (cond-> expr
-                       (or (instance? java.time.LocalDate expr)
+                       (or (string? arg)
+                           (instance? java.time.LocalDate expr)
                            (h2x/is-of-type? expr "date"))
                        h2x/->timestamp)
         at-zone      (fn [zone e] [:mb_at_time_zone e (h2x/literal zone)])

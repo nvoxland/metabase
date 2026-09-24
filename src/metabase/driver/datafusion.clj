@@ -187,25 +187,52 @@
    :query_origin         (when-let [context (-> outer-query :info :context)]
                            {:type (name context)})})
 
+(defn- stale-catalog-error?
+  "Whether the engine failed to plan because its catalog doesn't know a table: the snapshot it holds
+  predates a sync (the catalog stamp is cached briefly) or a schema change."
+  [e]
+  (let [{:keys [kind message]} (:engine/error (ex-data e))]
+    (boolean (and (= kind "plan") (re-find #"not found" (str message))))))
+
+(defn- start-statement!
+  "Register the database if needed, open a session, and start `sql`: `[session-id handle]`. The
+  session is destroyed if the statement can't start."
+  [driver database outer-query sql params]
+  (ensure-registered! database)
+  (let [session (engine/create-session! (session-context driver database outer-query))]
+    (try
+      [session (engine/execute! session sql params)]
+      (catch Throwable e
+        (u/ignore-exceptions (engine/destroy-session! session))
+        (throw e)))))
+
 (defmethod driver/execute-reducible-query :datafusion
   [driver {{sql :query, params :params} :native, :as outer-query} _context respond]
-  (let [database (driver-api/database (driver-api/metadata-provider))]
-    (ensure-registered! database)
-    (engine/with-session [session (session-context driver database outer-query)]
-      (let [{:keys [reader cancel! close!]} (engine/execute! session sql (perf/mapv param->engine params))
-            canceled-chan                   (driver-api/canceled-chan)]
-        (when canceled-chan
-          (a/go
-            (when (a/<! canceled-chan)
-              (try
-                (cancel!)
-                (catch Throwable e
-                  (log/warn e "Couldn't cancel engine query"))))))
-        (try
-          (respond {:cols (engine.arrow/cols reader)}
-                   (driver-api/reducible-rows (engine.arrow/row-thunk reader) canceled-chan))
-          (finally
-            (close!)))))))
+  (let [database         (driver-api/database (driver-api/metadata-provider))
+        params           (perf/mapv param->engine params)
+        [session handle] (try
+                           (start-statement! driver database outer-query sql params)
+                           (catch clojure.lang.ExceptionInfo e
+                             (if (stale-catalog-error? e)
+                               ;; re-snapshot the catalog and try once more
+                               (do (swap! stamps dissoc (:id database))
+                                   (start-statement! driver database outer-query sql params))
+                               (throw e))))
+        {:keys [reader cancel! close!]} handle
+        canceled-chan    (driver-api/canceled-chan)]
+    (when canceled-chan
+      (a/go
+        (when (a/<! canceled-chan)
+          (try
+            (cancel!)
+            (catch Throwable e
+              (log/warn e "Couldn't cancel engine query"))))))
+    (try
+      (respond {:cols (engine.arrow/cols reader)}
+               (driver-api/reducible-rows (engine.arrow/row-thunk reader) canceled-chan))
+      (finally
+        (close!)
+        (u/ignore-exceptions (engine/destroy-session! session))))))
 
 ;;; ------------------------------------------------------ sync ---------------------------------------------------------
 ;;;
