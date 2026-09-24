@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion::common::Column;
+use datafusion::common::{Column, TableReference};
 use datafusion::execution::context::SessionState;
 use datafusion::execution::FunctionRegistry;
 use datafusion::execution::SessionStateBuilder;
@@ -66,6 +66,7 @@ impl Planner {
     /// plan's Arrow schema for execution.
     pub async fn plan(&self, sql: &str) -> Result<Planned> {
         let plan = self.analyze(sql).await?;
+        let plan = qualify_table_scans(plan, &self.state.config_options().catalog.default_schema)?;
         let plan = merge_nested_projections(plan)?;
         let plan = alias_columns_over_derived_sort(plan)?;
         self.reject_unsupported(&plan)?;
@@ -192,6 +193,23 @@ fn unprintable_identifier(node: &LogicalPlan) -> Option<String> {
 /// projection. The unparser wraps the inner one as a derived table (`derived_projection`) but keeps
 /// the outer columns qualified by the base table, which the warehouse then can't resolve. This is
 /// the one optimizer-like rewrite the pushed plan gets; it never changes what the query computes.
+/// Name every scanned table with the schema the catalog resolved it in. A bare name in the SQL
+/// resolved against the catalog's default schema; sent bare to the warehouse it would resolve
+/// against the connection's search path instead, which need not agree.
+fn qualify_table_scans(plan: LogicalPlan, default_schema: &str) -> Result<LogicalPlan> {
+    Ok(plan
+        .transform_down_with_subqueries(|node| match node {
+            LogicalPlan::TableScan(mut scan)
+                if matches!(scan.table_name, TableReference::Bare { .. }) =>
+            {
+                scan.table_name = TableReference::partial(default_schema, scan.table_name.table());
+                Ok(Transformed::yes(LogicalPlan::TableScan(scan)))
+            }
+            other => Ok(Transformed::no(other)),
+        })?
+        .data)
+}
+
 fn merge_nested_projections(plan: LogicalPlan) -> Result<LogicalPlan> {
     let merged = plan.transform_up(|node| {
         let LogicalPlan::Projection(outer) = &node else {
@@ -381,6 +399,60 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn bare_table_names_reach_the_warehouse_qualified_with_the_default_schema() {
+        // The catalog resolved the table in its default schema; the warehouse must query that same
+        // table whatever its own search path says.
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT o."ID", p."Title" FROM "Orders" o JOIN "Products" p ON o."Product ID" = p."ID" WHERE o."ID" IN (SELECT "ID" FROM "Orders" WHERE "Total" > 1)"#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            result
+                .warehouse_sql
+                .contains(r#"FROM "public"."Orders" AS "o" INNER JOIN "public"."Products" AS "p""#),
+            "{}",
+            result.warehouse_sql
+        );
+        assert!(
+            result
+                .warehouse_sql
+                .contains(r#"FROM "public"."Orders" WHERE"#),
+            "{}",
+            result.warehouse_sql
+        );
+    }
+
+    #[tokio::test]
+    async fn regexp_like_renders_as_the_postgres_match_operators() {
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT regexp_like("Title", '^A') AS a, regexp_like("Title", '^a', 'i') AS b FROM "public"."Products""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.warehouse_sql,
+            r#"SELECT ("Products"."Title" ~ '^A') AS "a", ("Products"."Title" ~* '^a') AS "b" FROM "public"."Products""#
+        );
+        let err = planner()
+            .plan_and_unparse(
+                r#"SELECT regexp_like("Title", 'a', 'x') FROM "public"."Products""#,
+                &[],
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            err.message.contains("no Postgres operator"),
+            "{}",
+            err.message
+        );
     }
 
     #[tokio::test]

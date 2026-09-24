@@ -1,0 +1,70 @@
+# Date and timestamp handling: truncation, parts, arithmetic, comparisons.
+
+query IT
+SELECT "id", date_trunc('month', "created_at") AS "m" FROM "orders" ORDER BY "id" LIMIT 4
+----
+1 2019-02-01T00:00:00Z
+2 2019-02-01T00:00:00Z
+3 2018-12-01T00:00:00Z
+4 2020-06-01T00:00:00Z
+
+query TI
+SELECT date_trunc('year', "created_at") AS "y", count(*) FROM "orders" GROUP BY 1 ORDER BY 1
+----
+2017-01-01T00:00:00Z 1
+2018-01-01T00:00:00Z 1
+2019-01-01T00:00:00Z 4
+2020-01-01T00:00:00Z 3
+2021-01-01T00:00:00Z 1
+
+query IRRR
+SELECT "id", extract(year FROM "created_at") AS "yr", extract(month FROM "created_at") AS "mo", extract(day FROM "created_at") AS "d" FROM "orders" WHERE "id" <= 3 ORDER BY "id"
+----
+1 2019 2 11
+2 2019 2 11
+3 2018 12 31
+
+query IRR
+SELECT "id", extract(dow FROM "ordered_on") AS "dow", extract(doy FROM "ordered_on") AS "doy" FROM "orders" WHERE "id" <= 3 ORDER BY "id"
+----
+1 1 42
+2 1 42
+3 1 365
+
+query IT
+SELECT "id", "ordered_on" FROM "orders" WHERE "ordered_on" >= DATE '2020-01-01' ORDER BY "id"
+----
+4 2020-06-15
+8 2020-01-02
+9 2020-06-15
+10 2021-05-05
+
+query I
+SELECT "id" FROM "orders" WHERE "created_at" < TIMESTAMP '2019-01-01 00:00:00' ORDER BY "id"
+----
+3
+5
+
+query IT
+SELECT "id", "ordered_on" + INTERVAL '7 days' AS "week_later" FROM "orders" WHERE "id" <= 2 ORDER BY "id"
+----
+1 2019-02-18
+2 2019-02-18
+
+query TI
+SELECT "ordered_on", count(*) FROM "orders" GROUP BY "ordered_on" HAVING count(*) > 1 ORDER BY "ordered_on"
+----
+2019-02-11 2
+2020-06-15 2
+
+query IR
+SELECT "id", date_part('hour', "created_at") AS "h" FROM "orders" WHERE "id" IN (1, 4) ORDER BY "id"
+----
+1 21
+4 9
+
+query IT
+SELECT "id", CAST("created_at" AS DATE) AS "d" FROM "orders" WHERE "id" <= 2 ORDER BY "id"
+----
+1 2019-02-11
+2 2019-02-11

@@ -1,0 +1,110 @@
+# Projection, filtering, ordering, paging.
+
+query IT
+SELECT "id", "title" FROM "products" ORDER BY "id"
+----
+1 Rustic Paper Wallet
+2 Small Marble Shoes
+3 Synergistic Granite Chair
+4 Enormous Aluminum Shirt
+5 Practical Bronze Computer
+6 Aerodynamic Bronze Hat
+7 Durable Rubber Chair
+8 Ergonomic Silk Coat
+
+query IR
+SELECT "id", "price" FROM "products" WHERE "price" > 30 ORDER BY "price" DESC
+----
+8 80.50
+2 70.08
+5 65.71
+7 61.92
+3 35.39
+
+query I
+SELECT "id" FROM "products" WHERE "category" IS NULL
+----
+8
+
+query IR
+SELECT "id", "rating" FROM "products" WHERE "rating" IS NOT NULL ORDER BY "rating", "id" LIMIT 3
+----
+2 0.0
+6 2.5
+4 3.0
+
+query I
+SELECT "id" FROM "orders" ORDER BY "id" LIMIT 3 OFFSET 2
+----
+3
+4
+5
+
+query T
+SELECT DISTINCT "category" FROM "products" ORDER BY "category"
+----
+Doohickey
+Gizmo
+Widget
+NULL
+
+query IT
+SELECT "id", "active" FROM "products" WHERE NOT "active" ORDER BY "id"
+----
+3 false
+7 false
+
+query I
+SELECT "id" FROM "products" WHERE "category" IN ('Gizmo', 'Widget') AND "price" BETWEEN 10 AND 62 ORDER BY "id"
+----
+1
+6
+7
+
+query IT
+SELECT "id", "title" FROM "products" WHERE "title" LIKE '%Bronze%' ORDER BY "id"
+----
+5 Practical Bronze Computer
+6 Aerodynamic Bronze Hat
+
+query IT
+SELECT "id", CASE WHEN "price" >= 60 THEN 'high' WHEN "price" >= 30 THEN 'mid' ELSE 'low' END AS "band" FROM "products" ORDER BY "id"
+----
+1 low
+2 high
+3 mid
+4 low
+5 high
+6 low
+7 high
+8 high
+
+query IT
+SELECT "id", COALESCE("note", '-') AS "note" FROM "orders" ORDER BY "id"
+----
+1 gift
+2 -
+3 rush
+4 -
+5 bulk
+6 -
+7 gift
+8 -
+9 rush
+10 orphan
+
+query IRR
+SELECT "id", "price" * "rating" AS "score", "price" / 2 AS "half" FROM "products" WHERE "id" <= 3 ORDER BY "id"
+----
+1 135.516 14.730000
+2 0.0 35.040000
+3 141.56 17.695000
+
+query III
+SELECT "id", "quantity" / 3 AS "q3", "quantity" % 3 AS "r3" FROM "orders" WHERE "id" <= 5 ORDER BY "id"
+----
+1 0 2
+2 0 1
+3 1 1
+4 0 1
+5 3 1

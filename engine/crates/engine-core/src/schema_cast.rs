@@ -2,6 +2,7 @@
 //! told to expect; the warehouse's decoder produces its own best guess (int4 vs Int64, decimal
 //! scale, timestamp unit), and this reconciles them column by column.
 
+use crate::catalog::DB_TYPE_METADATA;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -41,9 +42,13 @@ pub fn resolve_null_types(plan: &Schema, warehouse: &Schema) -> Schema {
                 (DataType::Utf8, Some(DataType::Binary | DataType::LargeBinary)) => true,
                 // the catalog said integer (or boolean) but the warehouse now sends something wider (a column was
                 // promoted, e.g. by an upload append, and the snapshot is a few seconds behind): casting down would
-                // silently truncate. A narrower warehouse type still casts up to the plan's.
+                // silently truncate. A narrower warehouse type still casts up to the plan's. Only catalog columns
+                // (the ones carrying the warehouse type name) can be stale: a computed value such as `sum(x)` or
+                // `extract(...)` takes the type the plan promised, however the warehouse spells its result.
                 (plan, Some(actual))
-                    if numeric_rank(actual) > numeric_rank(plan) && numeric_rank(plan) > 0 =>
+                    if field.metadata().contains_key(DB_TYPE_METADATA)
+                        && numeric_rank(actual) > numeric_rank(plan)
+                        && numeric_rank(plan) > 0 =>
                 {
                     true
                 }
@@ -249,10 +254,16 @@ mod tests {
 
     #[test]
     fn a_promoted_column_keeps_the_wider_warehouse_type() {
+        let catalog_column = |name: &str, t: DataType| {
+            Field::new(name, t, true).with_metadata(std::collections::HashMap::from([(
+                DB_TYPE_METADATA.to_string(),
+                "int8".to_string(),
+            )]))
+        };
         let plan = Schema::new(vec![
-            Field::new("n", DataType::Int64, true),
-            Field::new("b", DataType::Boolean, true),
-            Field::new("narrow", DataType::Int64, true),
+            catalog_column("n", DataType::Int64),
+            catalog_column("b", DataType::Boolean),
+            catalog_column("narrow", DataType::Int64),
         ]);
         let warehouse = Schema::new(vec![
             Field::new("n", DataType::Float64, true),
@@ -264,6 +275,22 @@ mod tests {
         assert_eq!(resolved.field(1).data_type(), &DataType::Int64);
         // a narrower warehouse type casts up to the plan's
         assert_eq!(resolved.field(2).data_type(), &DataType::Int64);
+    }
+
+    #[test]
+    fn a_computed_value_takes_the_plan_type_even_when_the_warehouse_sends_wider() {
+        // `sum(bigint)` and `extract(...)` come back from Postgres as numeric; the plan said Int64 / Int32
+        let plan = Schema::new(vec![
+            Field::new("s", DataType::Int64, true),
+            Field::new("yr", DataType::Int32, true),
+        ]);
+        let warehouse = Schema::new(vec![
+            Field::new("s", DataType::Decimal128(38, 10), true),
+            Field::new("yr", DataType::Decimal128(38, 10), true),
+        ]);
+        let resolved = resolve_null_types(&plan, &warehouse);
+        assert_eq!(resolved.field(0).data_type(), &DataType::Int64);
+        assert_eq!(resolved.field(1).data_type(), &DataType::Int32);
     }
 
     #[test]

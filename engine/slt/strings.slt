@@ -1,0 +1,63 @@
+# String functions the MBQL expressions compile to.
+
+query ITT
+SELECT "id", lower("title") AS "l", upper("category") AS "u" FROM "products" WHERE "id" <= 2 ORDER BY "id"
+----
+1 rustic paper wallet GIZMO
+2 small marble shoes DOOHICKEY
+
+query IIT
+SELECT "id", length("title") AS "n", trim("title") AS "t" FROM "products" WHERE "id" <= 2 ORDER BY "id"
+----
+1 19 Rustic Paper Wallet
+2 18 Small Marble Shoes
+
+query IT
+SELECT "id", substr("title", 1, 6) AS "s" FROM "products" WHERE "id" <= 3 ORDER BY "id"
+----
+1 Rustic
+2 Small 
+3 Synerg
+
+query IT
+SELECT "id", concat("category", '/', "title") AS "c" FROM "products" WHERE "id" IN (1, 8) ORDER BY "id"
+----
+1 Gizmo/Rustic Paper Wallet
+8 /Ergonomic Silk Coat
+
+query IT
+SELECT "id", replace("title", ' ', '_') AS "r" FROM "products" WHERE "id" <= 2 ORDER BY "id"
+----
+1 Rustic_Paper_Wallet
+2 Small_Marble_Shoes
+
+query II
+SELECT "id", strpos("title", 'Bronze') AS "p" FROM "products" WHERE "id" IN (5, 6) ORDER BY "id"
+----
+5 11
+6 13
+
+query IT
+SELECT "id", "title" FROM "products" WHERE starts_with("title", 'S') ORDER BY "id"
+----
+2 Small Marble Shoes
+3 Synergistic Granite Chair
+
+query IT
+SELECT "id", regexp_like("title", '^[A-Z][a-z]+ [A-Z]') AS "m" FROM "products" WHERE "id" <= 3 ORDER BY "id"
+----
+1 true
+2 true
+3 true
+
+query IT
+SELECT "id", CAST("price" AS TEXT) AS "p" FROM "products" WHERE "id" <= 2 ORDER BY "id"
+----
+1 29.46
+2 70.08
+
+query IR
+SELECT "id", CAST("id" AS DOUBLE) / 4 AS "q" FROM "products" WHERE "id" <= 2 ORDER BY "id"
+----
+1 0.25
+2 0.5

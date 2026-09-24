@@ -30,6 +30,12 @@ async fn pool() -> Option<Arc<dyn engine_core::connector::Pool>> {
         .await
     {
         Ok(_) => Some(pool),
+        Err(e) if std::env::var("MB_ENGINE_TESTS_REQUIRED").is_ok_and(|v| v == "true") => {
+            panic!(
+                "MB_ENGINE_TESTS_REQUIRED but no Postgres reachable ({})",
+                e.message
+            )
+        }
         Err(e) => {
             eprintln!("skipping: no Postgres reachable ({})", e.message);
             None

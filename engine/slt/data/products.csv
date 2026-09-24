@@ -1,0 +1,9 @@
+id,title,category,price,rating,active,created_at
+1,Rustic Paper Wallet,Gizmo,29.46,4.6,true,2017-07-19T19:44:56Z
+2,Small Marble Shoes,Doohickey,70.08,0.0,true,2019-04-11T08:49:35Z
+3,Synergistic Granite Chair,Doohickey,35.39,4.0,false,2018-09-08T22:03:20Z
+4,Enormous Aluminum Shirt,Doohickey,25.10,3.0,true,2017-10-13T02:00:00Z
+5,Practical Bronze Computer,Widget,65.71,3.7,true,2018-11-05T16:16:52Z
+6,Aerodynamic Bronze Hat,Widget,13.42,2.5,true,2016-12-15T14:00:00Z
+7,Durable Rubber Chair,Gizmo,61.92,,false,2019-02-28T23:59:59Z
+8,Ergonomic Silk Coat,,80.50,4.1,true,2020-01-01T00:00:00Z

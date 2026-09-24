@@ -301,6 +301,36 @@ impl MetabasePostgresDialect {
 impl MetabasePostgresDialect {
     /// `mb_at_time_zone(x, 'zone')` as `(x AT TIME ZONE 'zone')`, parenthesized so nesting reads
     /// unambiguously.
+    /// `regexp_like(x, re)` is Postgres' `x ~ re`; the only flag Postgres spells as an operator is
+    /// `i` (`~*`). Other flags have no operator form and are refused rather than sent as a
+    /// function Postgres doesn't have.
+    fn regexp_like_as_operator(
+        &self,
+        unparser: &Unparser,
+        args: &[Expr],
+    ) -> DFResult<Option<ast::Expr>> {
+        let op = match args {
+            [_, _] => ast::BinaryOperator::PGRegexMatch,
+            [_, _, Expr::Literal(datafusion::common::ScalarValue::Utf8(Some(flags)), _)] => {
+                match flags.as_str() {
+                    "" => ast::BinaryOperator::PGRegexMatch,
+                    "i" => ast::BinaryOperator::PGRegexIMatch,
+                    other => {
+                        return Err(datafusion::error::DataFusionError::NotImplemented(format!(
+                            "regexp_like flags {other:?} have no Postgres operator"
+                        )))
+                    }
+                }
+            }
+            _ => return Ok(None),
+        };
+        Ok(Some(ast::Expr::Nested(Box::new(ast::Expr::BinaryOp {
+            left: Box::new(unparser.expr_to_sql(&args[0])?),
+            op,
+            right: Box::new(unparser.expr_to_sql(&args[1])?),
+        }))))
+    }
+
     fn at_time_zone(&self, unparser: &Unparser, args: &[Expr]) -> DFResult<Option<ast::Expr>> {
         if args.len() != 2 {
             return Ok(None);
@@ -373,6 +403,7 @@ impl Dialect for MetabasePostgresDialect {
             "substr" | "substring" => self.substr_with_int_positions(unparser, args),
             "array_element" => self.parenthesized_subscript(unparser, args),
             "to_timestamp" => self.to_timestamp_with_postgres_format(unparser, args),
+            "regexp_like" => self.regexp_like_as_operator(unparser, args),
             udfs::MB_CAST => self.named_cast(unparser, args),
             udfs::MB_BYTES_TO_TEXT => self.convert_from_utf8(unparser, args),
             udfs::MB_AT_TIME_ZONE => self.at_time_zone(unparser, args),
@@ -461,6 +492,7 @@ const POSTGRES_FUNCTIONS: &[&str] = &[
     "overlay",
     "array_element",
     "regexp_match",
+    "regexp_like",
     "regexp_replace",
     "regexp_count",
     "to_hex",
@@ -544,7 +576,8 @@ mod tests {
         assert!(policy.supports_function("COUNT"));
         assert!(policy.supports_function("regexp_match"));
         assert!(!policy.supports_function("arrow_cast"));
-        assert!(!policy.supports_function("regexp_like"));
+        assert!(policy.supports_function("regexp_like"));
+        assert!(!policy.supports_function("regexp_instr"));
         assert!(!policy.supports_function("approx_percentile_cont"));
     }
 

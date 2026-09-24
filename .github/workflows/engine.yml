@@ -44,12 +44,10 @@ jobs:
           --health-timeout 5s
           --health-retries 10
     env:
-      # The live connector tests read these; they skip when unset.
-      MB_ENGINE_TEST_PG_HOST: localhost
-      MB_ENGINE_TEST_PG_PORT: 5432
-      MB_ENGINE_TEST_PG_USER: metabase
-      MB_ENGINE_TEST_PG_PASSWORD: password
-      MB_ENGINE_TEST_PG_DBNAME: metabase_1
+      # The live connector tests and the sqllogictest harness (engine-slt) run against this server;
+      # locally they skip when it is unreachable, here that is a failure.
+      ENGINE_TEST_POSTGRES_DETAILS: '{"host":"localhost","port":5432,"dbname":"metabase_1","user":"metabase","password":"password","ssl":false}'
+      MB_ENGINE_TESTS_REQUIRED: 'true'
     steps:
       - uses: actions/checkout@v6
       - name: Install the pinned Rust toolchain
