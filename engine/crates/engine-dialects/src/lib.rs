@@ -506,6 +506,9 @@ impl Dialect for MetabasePostgresDialect {
                 self.at_time_zone(unparser, args)
             }
             udfs::MB_INT_DIV => plain_division(unparser, args),
+            udfs::MB_TRUNC if args.len() == 1 => {
+                Ok(Some(call("trunc", vec![unparser.expr_to_sql(&args[0])?])))
+            }
             _ => self
                 .inner
                 .scalar_function_to_sql_overrides(unparser, func_name, args),
@@ -652,6 +655,7 @@ const POSTGRES_FUNCTIONS: &[&str] = &[
     udfs::MB_ZONED_TO_WALL,
     udfs::MB_WALL_TO_ZONED,
     udfs::MB_INT_DIV,
+    udfs::MB_TRUNC,
     "percentile_disc",
     // window
     "row_number",

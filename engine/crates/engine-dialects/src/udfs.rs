@@ -200,6 +200,34 @@ impl ScalarUDFImpl for MbTimeZoneDirection {
     }
 }
 
+/// `mb_trunc(x)`: `x` with its fraction dropped, in `x`'s own type. DataFusion's cast of a float or
+/// a decimal to an integer truncates, Postgres' and MySQL's round, so the planner puts this in
+/// front of such a cast; each dialect spells it (`trunc`, `TRUNCATE(x, 0)`).
+pub const MB_TRUNC: &str = "mb_trunc";
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct MbTrunc {
+    signature: Signature,
+}
+
+impl ScalarUDFImpl for MbTrunc {
+    fn name(&self) -> &str {
+        MB_TRUNC
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        Ok(arg_types.first().cloned().unwrap_or(DataType::Float64))
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("{MB_TRUNC} is unparsed for the warehouse, never executed by the engine")
+    }
+}
+
 /// An aggregate function under the name a dialect knows it by. DataFusion calls its sample
 /// standard deviation `stddev` and its sample variance `var`; MySQL's `STDDEV` is the population
 /// one and it has no `VAR`, Postgres has no `var`. The planner swaps the function for this
@@ -261,6 +289,9 @@ pub fn metabase_udfs() -> Vec<Arc<ScalarUDF>> {
         })),
         Arc::new(ScalarUDF::new_from_impl(MbIntDiv {
             signature: Signature::any(2, Volatility::Immutable),
+        })),
+        Arc::new(ScalarUDF::new_from_impl(MbTrunc {
+            signature: Signature::any(1, Volatility::Immutable),
         })),
         Arc::new(ScalarUDF::new_from_impl(MbTimeZoneDirection {
             signature: Signature::any(2, Volatility::Immutable),

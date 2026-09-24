@@ -1,0 +1,81 @@
+# Casts and CASE: conversions the expression editor produces.
+
+query ITT
+SELECT "id", CAST("price" AS TEXT) AS "t", CAST("id" AS TEXT) AS "it" FROM "products" WHERE "id" <= 2 ORDER BY "id"
+----
+1 29.46 1
+2 70.08 2
+
+query II
+SELECT "id", CAST("rating" AS BIGINT) AS "i" FROM "products" WHERE "id" <= 3 ORDER BY "id"
+----
+1 4
+2 0
+3 4
+
+query IRR
+SELECT "id", CAST("quantity" AS DOUBLE) AS "d", CAST("total" AS DOUBLE) AS "td" FROM "orders" WHERE "id" <= 2 ORDER BY "id"
+----
+1 2.0 58.92
+2 1.0 29.46
+
+query IT
+SELECT "id", CAST("note" AS TEXT) IS NULL AS "no_note" FROM "orders" WHERE "id" <= 3 ORDER BY "id"
+----
+1 false
+2 true
+3 false
+
+query IT
+SELECT "id", CAST("created_at" AS DATE) AS "d" FROM "products" WHERE "id" <= 2 ORDER BY "id"
+----
+1 2017-07-19
+2 2019-04-11
+
+query ITT
+SELECT "id", CAST('2020-02-03' AS DATE) AS "d", CAST('2020-02-03 04:05:06' AS TIMESTAMP) AS "ts" FROM "orders" WHERE "id" = 1
+----
+1 2020-02-03 2020-02-03T04:05:06
+
+query IIR
+SELECT "id", CAST('42' AS BIGINT) + "quantity" AS "n", CAST('2.5' AS DOUBLE) * "quantity" AS "x" FROM "orders" WHERE "id" <= 2 ORDER BY "id"
+----
+1 44 5.0
+2 43 2.5
+
+query II
+SELECT "id", CASE "category" WHEN 'Gizmo' THEN 1 WHEN 'Widget' THEN 2 ELSE 0 END AS "code" FROM "products" ORDER BY "id"
+----
+1 1
+2 0
+3 0
+4 0
+5 2
+6 2
+7 1
+8 0
+
+query IT
+SELECT "id", CASE WHEN "rating" IS NULL THEN 'unrated' WHEN "rating" >= 4 THEN 'good' ELSE 'meh' END AS "verdict" FROM "products" ORDER BY "id"
+----
+1 good
+2 meh
+3 good
+4 meh
+5 meh
+6 meh
+7 unrated
+8 good
+
+query IRT
+SELECT "id", coalesce("rating", 0) AS "r", nullif("category", 'Gizmo') AS "c" FROM "products" WHERE "id" IN (1, 7) ORDER BY "id"
+----
+1 4.6 NULL
+7 0.0 NULL
+
+query ITT
+SELECT "id", "active" AND "price" > 30 AS "pricey_active", NOT "active" AS "inactive" FROM "products" WHERE "id" <= 3 ORDER BY "id"
+----
+1 false false
+2 true false
+3 false true

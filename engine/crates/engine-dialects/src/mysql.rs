@@ -318,6 +318,27 @@ impl Dialect for MetabaseMySqlDialect {
         true
     }
 
+    /// MySQL refuses a frame on the ranking and offset functions; the unparser spells DataFusion's
+    /// default frame out unless told not to.
+    fn window_func_support_window_frame(
+        &self,
+        func_name: &str,
+        _start_bound: &ast::WindowFrameBound,
+        _end_bound: &ast::WindowFrameBound,
+    ) -> bool {
+        !matches!(
+            func_name,
+            "row_number"
+                | "rank"
+                | "dense_rank"
+                | "percent_rank"
+                | "cume_dist"
+                | "ntile"
+                | "lag"
+                | "lead"
+        )
+    }
+
     fn scalar_function_to_sql_overrides(
         &self,
         unparser: &Unparser,
@@ -431,6 +452,9 @@ impl Dialect for MetabaseMySqlDialect {
             udfs::MB_AT_TIME_ZONE => Err(not_impl(
                 "AT TIME ZONE on a value of unknown type (the planner resolves the direction)",
             )),
+            udfs::MB_TRUNC if args.len() == 1 => {
+                Ok(Some(call("TRUNCATE", vec![sql(0)?, number(0)])))
+            }
             udfs::MB_INT_DIV if args.len() == 2 => Ok(Some(binary(
                 sql(0)?,
                 ast::BinaryOperator::MyIntegerDivide,
@@ -511,6 +535,7 @@ pub const MYSQL_FUNCTIONS: &[&str] = &[
     "greatest",
     "least",
     "mb_int_div",
+    "mb_trunc",
     // strings
     "lower",
     "upper",

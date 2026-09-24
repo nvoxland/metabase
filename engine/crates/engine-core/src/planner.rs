@@ -10,7 +10,7 @@ use datafusion::common::{Column, DFSchema, TableReference};
 use datafusion::execution::context::SessionState;
 use datafusion::execution::FunctionRegistry;
 use datafusion::execution::SessionStateBuilder;
-use datafusion::logical_expr::expr::ScalarFunction;
+use datafusion::logical_expr::expr::{Cast, ScalarFunction};
 use datafusion::logical_expr::expr_rewriter::NamePreserver;
 use datafusion::logical_expr::{BinaryExpr, ExprSchemable, Operator, SortExpr};
 use datafusion::logical_expr::{Expr, LogicalPlan, Projection, WindowFunctionDefinition};
@@ -222,6 +222,17 @@ fn unprintable_identifier(node: &LogicalPlan) -> Option<String> {
 /// projection. The unparser wraps the inner one as a derived table (`derived_projection`) but keeps
 /// the outer columns qualified by the base table, which the warehouse then can't resolve. This is
 /// the one optimizer-like rewrite the pushed plan gets; it never changes what the query computes.
+fn is_fraction(t: &DataType) -> bool {
+    matches!(
+        t,
+        DataType::Float16
+            | DataType::Float32
+            | DataType::Float64
+            | DataType::Decimal128(_, _)
+            | DataType::Decimal256(_, _)
+    )
+}
+
 fn is_integer(t: &DataType) -> bool {
     matches!(
         t,
@@ -243,6 +254,7 @@ fn is_integer(t: &DataType) -> bool {
 /// analyzer's own rewrites preserve them, so downstream references still resolve.
 fn resolve_engine_udfs(plan: LogicalPlan, state: &SessionState) -> Result<LogicalPlan> {
     let int_div = state.udf(udfs::MB_INT_DIV)?;
+    let trunc = state.udf(udfs::MB_TRUNC)?;
     let zoned_to_wall = state.udf(udfs::MB_ZONED_TO_WALL)?;
     let wall_to_zoned = state.udf(udfs::MB_WALL_TO_ZONED)?;
     Ok(plan
@@ -266,6 +278,39 @@ fn resolve_engine_udfs(plan: LogicalPlan, state: &SessionState) -> Result<Logica
                             Transformed::yes(Expr::ScalarFunction(ScalarFunction::new_udf(
                                 Arc::clone(&int_div),
                                 vec![*left, *right],
+                            )))
+                        }
+                        // a fraction cast to an integer: DataFusion truncates, the warehouses would round
+                        Expr::Cast(Cast { expr, field })
+                            if is_integer(field.data_type())
+                                && expr.get_type(&schema).is_ok_and(|t| is_fraction(&t)) =>
+                        {
+                            Transformed::yes(Expr::Cast(Cast::new_from_field(
+                                Box::new(Expr::ScalarFunction(ScalarFunction::new_udf(
+                                    Arc::clone(&trunc),
+                                    vec![*expr],
+                                ))),
+                                field,
+                            )))
+                        }
+                        Expr::ScalarFunction(f)
+                            if f.name() == udfs::MB_CAST
+                                && f.args.len() == 2
+                                && matches!(&f.args[1], Expr::Literal(datafusion::common::ScalarValue::Utf8(Some(t)), _) if t.eq_ignore_ascii_case("BIGINT"))
+                                && f.args[0].get_type(&schema).is_ok_and(|t| is_fraction(&t)) =>
+                        {
+                            let mut args = f.args;
+                            let value = args.remove(0);
+                            args.insert(
+                                0,
+                                Expr::ScalarFunction(ScalarFunction::new_udf(
+                                    Arc::clone(&trunc),
+                                    vec![value],
+                                )),
+                            );
+                            Transformed::yes(Expr::ScalarFunction(ScalarFunction::new_udf(
+                                f.func,
+                                args,
                             )))
                         }
                         Expr::ScalarFunction(f)
@@ -743,6 +788,25 @@ mod tests {
             r#"SELECT stddev("Orders"."Total"), var_samp("Orders"."Total") AS "var_samp(public.Orders.Total)" FROM "public"."Orders""#
         );
         assert_eq!(postgres.schema[1].name, "var_samp(public.Orders.Total)");
+    }
+
+    #[tokio::test]
+    async fn a_fraction_cast_to_an_integer_truncates_on_every_warehouse() {
+        assert_eq!(
+            mysql_sql(r#"SELECT CAST("total" AS BIGINT) AS a, mb_cast("total", 'BIGINT') AS b, CAST("quantity" AS BIGINT) AS c, CAST("note" AS BIGINT) AS d FROM "orders""#).await,
+            "SELECT CAST(TRUNCATE(`orders`.`total`, 0) AS SIGNED) AS `a`, CAST(TRUNCATE(`orders`.`total`, 0) AS SIGNED) AS `b`, CAST(`orders`.`quantity` AS SIGNED) AS `c`, CAST(`orders`.`note` AS SIGNED) AS `d` FROM `lakes`.`orders`"
+        );
+        let postgres = planner()
+            .plan_and_unparse(
+                r#"SELECT CAST("Total" AS BIGINT) AS a FROM "public"."Orders""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            postgres.warehouse_sql,
+            r#"SELECT CAST(trunc("Orders"."Total") AS BIGINT) AS "a" FROM "public"."Orders""#
+        );
     }
 
     #[tokio::test]
