@@ -469,20 +469,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mb_to_time_unparses_as_a_time_cast() {
-        // `CAST(x AS TIME)` plans as Time64(ns), which the unparser can't spell; the UDF stands in for it
+    async fn mb_cast_names_the_cast_so_aggregates_over_it_do_not_collide() {
+        // `max(x)` and `max(CAST(x AS TEXT))` share a schema name in DataFusion; the UDF gives the cast its own
         let result = planner()
             .plan_and_unparse(
-                r#"SELECT mb_to_time("Title") AS "t" FROM "public"."Products""#,
+                r#"SELECT max("Title") AS "m", max(mb_cast("Title", 'TEXT')) AS "t" FROM "public"."Products""#,
                 &[],
             )
             .await
             .unwrap();
         assert_eq!(
             result.warehouse_sql,
-            r#"SELECT CAST("Products"."Title" AS TIME) AS "t" FROM "public"."Products""#
+            r#"SELECT max("Products"."Title") AS "m", max(CAST("Products"."Title" AS TEXT)) AS "t" FROM "public"."Products""#
         );
-        assert_eq!(result.schema[0].arrow_type, "Time64(µs)");
+        assert_eq!(result.schema[1].arrow_type, "Utf8");
+        let time = planner()
+            .plan_and_unparse(
+                r#"SELECT mb_cast("Title", 'TIME') AS "tm" FROM "public"."Products""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            time.warehouse_sql,
+            r#"SELECT CAST("Products"."Title" AS TIME) AS "tm" FROM "public"."Products""#
+        );
+        assert_eq!(time.schema[0].arrow_type, "Time64(µs)");
+    }
+
+    #[tokio::test]
+    async fn mb_bytes_to_text_unparses_as_convert_from() {
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT mb_bytes_to_text("Title") AS "s" FROM "public"."Products""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.warehouse_sql,
+            r#"SELECT convert_from("Products"."Title", 'UTF8') AS "s" FROM "public"."Products""#
+        );
     }
 
     #[tokio::test]

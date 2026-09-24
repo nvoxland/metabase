@@ -242,16 +242,24 @@ impl MetabasePostgresDialect {
 }
 
 impl MetabasePostgresDialect {
-    /// Render a one-argument engine UDF as `CAST(arg AS type)`.
-    fn cast_to(
-        &self,
-        unparser: &Unparser,
-        args: &[Expr],
-        data_type: ast::DataType,
-    ) -> DFResult<Option<ast::Expr>> {
-        if args.len() != 1 {
+    /// `mb_cast(x, 'TYPE')` as `CAST(x AS <postgres type>)`.
+    fn named_cast(&self, unparser: &Unparser, args: &[Expr]) -> DFResult<Option<ast::Expr>> {
+        if args.len() != 2 {
             return Ok(None);
         }
+        let Expr::Literal(datafusion::common::ScalarValue::Utf8(Some(type_name)), _) = &args[1]
+        else {
+            return Ok(None);
+        };
+        let data_type = match type_name.to_ascii_uppercase().as_str() {
+            "TEXT" => ast::DataType::Text,
+            "BIGINT" => ast::DataType::BigInt(None),
+            "DOUBLE" => ast::DataType::DoublePrecision,
+            "DATE" => ast::DataType::Date,
+            "TIMESTAMP" => ast::DataType::Timestamp(None, ast::TimezoneInfo::None),
+            "TIME" => ast::DataType::Time(None, ast::TimezoneInfo::None),
+            _ => return Ok(None),
+        };
         Ok(Some(ast::Expr::Cast {
             kind: ast::CastKind::Cast,
             expr: Box::new(unparser.expr_to_sql(&args[0])?),
@@ -259,6 +267,32 @@ impl MetabasePostgresDialect {
             format: None,
             array: false,
         }))
+    }
+
+    /// `mb_bytes_to_text(x)` as `convert_from(x, 'UTF8')`.
+    fn convert_from_utf8(&self, unparser: &Unparser, args: &[Expr]) -> DFResult<Option<ast::Expr>> {
+        if args.len() != 1 {
+            return Ok(None);
+        }
+        let value = unparser.expr_to_sql(&args[0])?;
+        let encoding = ast::Expr::Value(ast::Value::SingleQuotedString("UTF8".into()).into());
+        Ok(Some(ast::Expr::Function(ast::Function {
+            name: ast::ObjectName::from(vec![ast::Ident::new("convert_from")]),
+            uses_odbc_syntax: false,
+            parameters: ast::FunctionArguments::None,
+            args: ast::FunctionArguments::List(ast::FunctionArgumentList {
+                duplicate_treatment: None,
+                args: vec![
+                    ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(value)),
+                    ast::FunctionArg::Unnamed(ast::FunctionArgExpr::Expr(encoding)),
+                ],
+                clauses: vec![],
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: vec![],
+        })))
     }
 }
 
@@ -337,11 +371,8 @@ impl Dialect for MetabasePostgresDialect {
             "substr" | "substring" => self.substr_with_int_positions(unparser, args),
             "array_element" => self.parenthesized_subscript(unparser, args),
             "to_timestamp" => self.to_timestamp_with_postgres_format(unparser, args),
-            udfs::MB_TO_TIME => self.cast_to(
-                unparser,
-                args,
-                ast::DataType::Time(None, ast::TimezoneInfo::None),
-            ),
+            udfs::MB_CAST => self.named_cast(unparser, args),
+            udfs::MB_BYTES_TO_TEXT => self.convert_from_utf8(unparser, args),
             udfs::MB_AT_TIME_ZONE => self.at_time_zone(unparser, args),
             _ => self
                 .inner
@@ -481,7 +512,8 @@ const POSTGRES_FUNCTIONS: &[&str] = &[
     "regr_syy",
     "regr_sxy",
     "percentile_cont",
-    udfs::MB_TO_TIME,
+    udfs::MB_CAST,
+    udfs::MB_BYTES_TO_TEXT,
     udfs::MB_AT_TIME_ZONE,
     "percentile_disc",
     // window

@@ -64,11 +64,18 @@
 (defn- ->timestamp [expr]
   (h2x/->pg-timestamp expr))
 
+(defn- named-cast
+  "A cast through the engine's `mb_cast(x, 'TYPE')`, which each dialect renders as `CAST(x AS ...)`. Used instead of a
+  plain `CAST` because DataFusion names a cast after its argument, so `max(x)` and `max(CAST(x AS TEXT))` in one
+  query collide and it refuses the query; and because `CAST(x AS TIME)` plans as a nanosecond time the unparser
+  can't spell. `sql-type` is one of TEXT, BIGINT, DOUBLE, DATE, TIMESTAMP, TIME."
+  [sql-type db-type expr]
+  (h2x/with-database-type-info [:mb_cast expr (h2x/literal sql-type)] db-type))
+
 (defn- ->time
-  "Cast to `time`. `CAST(x AS TIME)` plans as a nanosecond time the engine's unparser can't spell, so the engine's
-  `mb_to_time` stands in for it and each dialect renders the cast."
+  "Cast to `time`."
   [expr]
-  (h2x/with-database-type-info [:mb_to_time expr] "time"))
+  (named-cast "TIME" "time" expr))
 
 (defn- two-digits
   "A time-of-day part as a two-character string, in both dialects."
@@ -226,7 +233,15 @@
 
 (defmethod sql.qp/->honeysql [:datafusion :text]
   [driver [_ _opts value]]
-  (h2x/maybe-cast "TEXT" (sql.qp/->honeysql driver value)))
+  (named-cast "TEXT" "text" (sql.qp/->honeysql driver value)))
+
+(defmethod sql.qp/->honeysql [:datafusion :integer]
+  [driver [_ _opts value]]
+  (named-cast "BIGINT" "bigint" (sql.qp/->honeysql driver value)))
+
+(defmethod sql.qp/->honeysql [:datafusion :float]
+  [driver [_ _opts value]]
+  (named-cast "DOUBLE" "double precision" (sql.qp/->honeysql driver value)))
 
 (defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/YYYYMMDDHHMMSSString->Temporal]
   [_driver _coercion-strategy expr]
@@ -236,11 +251,20 @@
 ;;; ISO 8601 strings cast directly in both dialects.
 (defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/ISO8601->DateTime]
   [_driver _coercion-strategy expr]
-  (h2x/cast "timestamp" expr))
+  (named-cast "TIMESTAMP" "timestamp" expr))
 
 (defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/ISO8601->Date]
   [_driver _coercion-strategy expr]
-  (h2x/cast "date" expr))
+  (named-cast "DATE" "date" expr))
+
+;;; Byte strings are read as UTF-8 text first (`convert_from` on Postgres, through the engine's `mb_bytes_to_text`).
+(defmethod sql.qp/cast-temporal-byte [:datafusion :Coercion/ISO8601Bytes->Temporal]
+  [driver _coercion-strategy expr]
+  (sql.qp/cast-temporal-string driver :Coercion/ISO8601->DateTime [:mb_bytes_to_text expr]))
+
+(defmethod sql.qp/cast-temporal-byte [:datafusion :Coercion/YYYYMMDDHHMMSSBytes->Temporal]
+  [driver _coercion-strategy expr]
+  (sql.qp/cast-temporal-string driver :Coercion/YYYYMMDDHHMMSSString->Temporal [:mb_bytes_to_text expr]))
 
 (defmethod sql.qp/cast-temporal-string [:datafusion :Coercion/ISO8601->Time]
   [_driver _coercion-strategy expr]

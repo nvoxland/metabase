@@ -4,24 +4,41 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::{DataType, TimeUnit};
-use datafusion::common::{not_impl_err, Result};
+use datafusion::arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
+use datafusion::common::{not_impl_err, plan_err, Result, ScalarValue};
 use datafusion::logical_expr::{
-    ColumnarValue, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
+    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
+    Volatility,
 };
 
-/// `mb_to_time(x)`: a cast to `TIME`. `CAST(x AS TIME)` itself plans as `Time64(Nanosecond)`,
-/// which the unparser has no SQL spelling for; this types as microseconds, what warehouses send.
-pub const MB_TO_TIME: &str = "mb_to_time";
+/// `mb_cast(x, 'TYPE')`: a cast the plan names differently from its argument. DataFusion gives
+/// `CAST(x AS t)` the same schema name as `x`, so `max(x)` and `max(CAST(x AS TEXT))` in one
+/// query collide and the query is refused; a function call has its own name. It also types
+/// `TIME` as microseconds, which the unparser can spell (a plain cast plans as nanoseconds).
+/// The type names are SQL's: TEXT, BIGINT, DOUBLE, DATE, TIMESTAMP, TIME.
+pub const MB_CAST: &str = "mb_cast";
+
+/// The Arrow type `mb_cast` produces for a type name, if it is one we know.
+pub fn cast_target(type_name: &str) -> Option<DataType> {
+    Some(match type_name.to_ascii_uppercase().as_str() {
+        "TEXT" => DataType::Utf8,
+        "BIGINT" => DataType::Int64,
+        "DOUBLE" => DataType::Float64,
+        "DATE" => DataType::Date32,
+        "TIMESTAMP" => DataType::Timestamp(TimeUnit::Microsecond, None),
+        "TIME" => DataType::Time64(TimeUnit::Microsecond),
+        _ => return None,
+    })
+}
 
 #[derive(Debug, PartialEq, Eq, Hash)]
-struct MbToTime {
+struct MbCast {
     signature: Signature,
 }
 
-impl ScalarUDFImpl for MbToTime {
+impl ScalarUDFImpl for MbCast {
     fn name(&self) -> &str {
-        MB_TO_TIME
+        MB_CAST
     }
 
     fn signature(&self) -> &Signature {
@@ -29,11 +46,50 @@ impl ScalarUDFImpl for MbToTime {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Time64(TimeUnit::Microsecond))
+        plan_err!("{MB_CAST} needs its type name to decide its type")
+    }
+
+    fn return_field_from_args(&self, args: ReturnFieldArgs) -> Result<FieldRef> {
+        let Some(Some(ScalarValue::Utf8(Some(type_name)))) = args.scalar_arguments.get(1) else {
+            return plan_err!("{MB_CAST}: the second argument must be a type name literal");
+        };
+        let Some(data_type) = cast_target(type_name) else {
+            return plan_err!("{MB_CAST}: unknown type name {type_name:?}");
+        };
+        Ok(Arc::new(Field::new(MB_CAST, data_type, true)))
     }
 
     fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        not_impl_err!("{MB_TO_TIME} is unparsed for the warehouse, never executed by the engine")
+        not_impl_err!("{MB_CAST} is unparsed for the warehouse, never executed by the engine")
+    }
+}
+
+/// `mb_bytes_to_text(x)`: a byte string read as UTF-8 text (Postgres' `convert_from(x, 'UTF8')`),
+/// which DataFusion has no function for.
+pub const MB_BYTES_TO_TEXT: &str = "mb_bytes_to_text";
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct MbBytesToText {
+    signature: Signature,
+}
+
+impl ScalarUDFImpl for MbBytesToText {
+    fn name(&self) -> &str {
+        MB_BYTES_TO_TEXT
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!(
+            "{MB_BYTES_TO_TEXT} is unparsed for the warehouse, never executed by the engine"
+        )
     }
 }
 
@@ -76,7 +132,10 @@ impl ScalarUDFImpl for MbAtTimeZone {
 /// Every engine UDF, for registration in a session.
 pub fn metabase_udfs() -> Vec<Arc<ScalarUDF>> {
     vec![
-        Arc::new(ScalarUDF::new_from_impl(MbToTime {
+        Arc::new(ScalarUDF::new_from_impl(MbCast {
+            signature: Signature::any(2, Volatility::Immutable),
+        })),
+        Arc::new(ScalarUDF::new_from_impl(MbBytesToText {
             signature: Signature::any(1, Volatility::Immutable),
         })),
         Arc::new(ScalarUDF::new_from_impl(MbAtTimeZone {
