@@ -111,7 +111,7 @@
       (throw (ex-info "Query metadata not set in time for querying against model"
                       {:location `populate-metadata})))))
 
-(deftest persisted-models-complex-queries-test
+(deftest ^:mb/jdbc-only persisted-models-complex-queries-test
   (testing "Can use aggregations and custom columns with persisted models (#28679)"
     (mt/test-drivers (mt/normal-drivers-with-feature :persist-models)
       (mt/dataset test-data
@@ -153,7 +153,7 @@
                 (testing "Did not find bad field clauses"
                   (is (= [] @bad-refs)))))))))))
 
-(deftest persisted-models-complex-queries-joins-test
+(deftest ^:mb/jdbc-only persisted-models-complex-queries-joins-test
   (testing "Can use joins with persisted models (#28902)"
     (mt/test-drivers (mt/normal-drivers-with-feature :persist-models)
       (mt/dataset test-data
@@ -188,7 +188,7 @@
                       "Gizmo"     4784, "Widget" 5061}
                      (->> results :data :rows (into {})))))))))))
 
-(deftest persisted-models-repeated-column-names-test
+(deftest ^:mb/jdbc-only persisted-models-repeated-column-names-test
   (testing "Persisted models with repeated column names from joins query successfully (#25014)"
     ;; Joining orders with people surfaces all columns from both tables, producing duplicate `id` and `created_at`
     ;; in the model's result metadata (deduplicated as `id_2`/`created_at_2`). Pre-fix, the QP generated SQL like
@@ -224,7 +224,7 @@
                 (testing "Query against the persisted table succeeds and returns the expected row count"
                   (is (= [[18760]] (mt/rows results))))))))))))
 
-(deftest sql-qp-independent-persisted-lookup-test
+(deftest ^:mb/jdbc-only sql-qp-independent-persisted-lookup-test
   (testing "SQL QP looks up the persisted cache rather than using an inline :persisted-info/native from the query map"
     (mt/test-drivers (mt/normal-drivers-with-feature :persist-models)
       (mt/dataset test-data
@@ -269,7 +269,7 @@
                   (is (nil? (#'sql.qp/resolve-persisted-source-sql
                              {:source-table (mt/id :products)}))))))))))))
 
-(deftest persisted-models-multi-stage-test
+(deftest ^:mb/jdbc-only persisted-models-multi-stage-test
   (mt/test-drivers (mt/normal-drivers-with-feature :persist-models)
     (mt/with-persistence-enabled! [persist-models!]
       (let [mp (mt/metadata-provider)

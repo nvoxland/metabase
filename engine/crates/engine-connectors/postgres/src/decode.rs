@@ -32,7 +32,7 @@ pub fn arrow_type_for(ty: &Type) -> Option<DataType> {
         Type::OID => DataType::UInt32,
         Type::FLOAT4 => DataType::Float32,
         Type::FLOAT8 => DataType::Float64,
-        Type::NUMERIC => DataType::Decimal128(DECIMAL_PRECISION, DECIMAL_SCALE),
+        Type::NUMERIC | Type::MONEY => DataType::Decimal128(DECIMAL_PRECISION, DECIMAL_SCALE),
         Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME | Type::CHAR | Type::UNKNOWN => {
             DataType::Utf8
         }
@@ -86,7 +86,7 @@ impl ColumnBuilder {
             Type::OID => ColumnBuilder::UInt32(UInt32Builder::with_capacity(capacity)),
             Type::FLOAT4 => ColumnBuilder::Float32(Float32Builder::with_capacity(capacity)),
             Type::FLOAT8 => ColumnBuilder::Float64(Float64Builder::with_capacity(capacity)),
-            Type::NUMERIC => ColumnBuilder::Decimal(
+            Type::NUMERIC | Type::MONEY => ColumnBuilder::Decimal(
                 Decimal128Builder::with_capacity(capacity)
                     .with_data_type(DataType::Decimal128(DECIMAL_PRECISION, DECIMAL_SCALE)),
             ),
@@ -356,14 +356,21 @@ impl PgNumeric {
 
 impl<'a> FromSql<'a> for PgNumeric {
     fn from_sql(
-        _ty: &Type,
+        ty: &Type,
         raw: &'a [u8],
     ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        if *ty == Type::MONEY {
+            // `money` is an int64 count of the currency's minor unit (two decimals)
+            let cents = i64::from_be_bytes(raw.try_into().map_err(|_| "money: not 8 bytes")?);
+            return Ok(PgNumeric(Some(
+                cents as i128 * 10i128.pow(DECIMAL_SCALE as u32 - 2),
+            )));
+        }
         PgNumeric::parse(raw).map_err(Into::into)
     }
 
     fn accepts(ty: &Type) -> bool {
-        *ty == Type::NUMERIC
+        *ty == Type::NUMERIC || *ty == Type::MONEY
     }
 }
 

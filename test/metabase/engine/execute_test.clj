@@ -77,11 +77,11 @@
 (deftest ^:mb/engine-tests ^:mb/driver-tests routing-binds-the-datafusion-driver-test
   (mt/test-drivers #{:postgres}
     (engine.tu/with-engine
-      (mt/with-temporary-setting-values [query-engine :datafusion]
+      (engine.tu/with-query-engine :datafusion
         (is (= 1 (count (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1}))))))
         (is (some #(= (mt/id) (:database_id %)) (:pools (engine/pool-stats)))
             "the engine opened a pool for the routed database"))
-      (mt/with-temporary-setting-values [query-engine :jdbc]
+      (engine.tu/with-query-engine :jdbc
         (is (= 1 (count (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1}))))))))))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests native-queries-stay-on-jdbc-test
@@ -93,7 +93,7 @@
 (deftest ^:mb/engine-tests ^:mb/driver-tests unsupported-constructs-are-rejected-test
   (mt/test-drivers #{:postgres}
     (engine.tu/with-engine
-      (mt/with-temporary-setting-values [query-engine :datafusion]
+      (engine.tu/with-query-engine :datafusion
         ;; run one routed query so the engine knows the database, then ask it to plan something Postgres can't run
         (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1})))
         (engine/with-session [session {:database_id (mt/id)}]
@@ -138,7 +138,7 @@
   (mt/test-drivers #{:postgres}
     (engine.tu/with-engine
       (engine.shadow/clear!)
-      (mt/with-temporary-setting-values [query-engine :shadow]
+      (engine.tu/with-query-engine :shadow
         (testing "the driver answers the query"
           (is (= 3 (count (mt/rows (qp/process-query (mt/mbql-query venues {:order-by [[:asc $id]] :limit 3})))))))
         (engine.shadow/await-pending!)

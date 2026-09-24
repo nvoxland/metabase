@@ -7,7 +7,7 @@
    [metabase.driver.sql-jdbc.execute.diagnostic :as sql-jdbc.execute.diagnostic]
    [metabase.test :as mt]))
 
-(deftest diagnostic-info-capture-test
+(deftest ^:mb/jdbc-only diagnostic-info-capture-test
   (mt/test-drivers (mt/driver-select {:+parent :sql-jdbc})
     ;; force creation of test data DB if it's not already created
     (mt/db)

@@ -197,7 +197,8 @@
   [e]
   (let [{:keys [kind message]} (:engine/error (ex-data e))]
     (boolean (or (= kind "catalog_missing")
-                 (and (= kind "plan") (re-find #"table '[^']*' not found" (str message)))))))
+                 (and (= kind "plan")
+                      (re-find #"table '[^']*' not found|No field named" (str message)))))))
 
 (defn- start-statement!
   "Register the database if needed, open a session, and start `sql`: `[session-id handle]`. The

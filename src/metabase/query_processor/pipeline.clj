@@ -4,6 +4,7 @@
    [metabase.analytics-interface.core :as analytics]
    [metabase.driver :as driver]
    [metabase.query-processor.error-type :as qp.error-type]
+   [metabase.query-processor.setup :as qp.setup]
    [metabase.util.i18n :as i18n]
    [metabase.util.log :as log]))
 
@@ -87,7 +88,8 @@
                                                          ([] (rf))
                                                          ([acc]
                                                           (analytics/inc! :metabase-query-processor/query
-                                                                          {:driver driver/*driver* :status "success"})
+                                                                          {:driver (qp.setup/reported-driver)
+                                                                           :status "success"})
                                                           (some-> *canceled-chan* a/close!)
                                                           (rf acc))
                                                          ([acc row]

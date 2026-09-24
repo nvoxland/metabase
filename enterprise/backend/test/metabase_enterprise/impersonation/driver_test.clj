@@ -810,7 +810,7 @@
           (finally
             (t2/update! :model/Database :id (mt/id) (update (mt/db) :details dissoc :role))))))))
 
-(deftest persistence-disabled-when-impersonated-test
+(deftest ^:mb/jdbc-only persistence-disabled-when-impersonated-test
   ;; Test explicitly with postgres since it supports persistence and impersonation
   (mt/test-driver :postgres
     (mt/with-premium-features #{:advanced-permissions}

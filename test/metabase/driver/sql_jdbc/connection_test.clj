@@ -507,7 +507,7 @@
   [& _args]
   false)
 
-(deftest test-bad-connection-detail-acquisition
+(deftest ^:mb/jdbc-only test-bad-connection-detail-acquisition
   (mt/test-drivers (mt/normal-drivers-with-feature ::regular-connection-pooling)
     (let [original-details (:details (mt/db))]
       ;; Only test drivers that use a username to log in
@@ -529,7 +529,7 @@
 ;;; Needs a comment please.
 ;; [kondo-keep] suppresses a warning :redundant-ignore can't see; --audit rechecks
 #_{:clj-kondo/ignore [:metabase/disallow-hardcoded-driver-names-in-tests]}
-(deftest test-auth-provider-connection
+(deftest ^:mb/jdbc-only test-auth-provider-connection
   (mt/with-premium-features #{:database-auth-providers}
     (mt/test-driver :postgres
       (testing "Azure Managed Identity connections can be created and expired passwords get renewed"

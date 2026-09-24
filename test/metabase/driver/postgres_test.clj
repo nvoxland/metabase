@@ -1174,7 +1174,7 @@
                                          :target [:dimension [:template-tag "type"]]
                                          :value  ["toucan"]}])))))))))))
 
-(deftest enums-test-3
+(deftest ^:mb/jdbc-only enums-test-3
   (mt/test-driver :postgres
     (do-with-enums-db!
      (fn [db]
@@ -2026,7 +2026,7 @@
               (is (nil? (some (partial re-matches #"metabase_cache(.*)")
                               (driver/syncable-schemas driver/*driver* (mt/db))))))))))))
 
-(deftest table-privileges-test
+(deftest ^:mb/jdbc-only table-privileges-test
   (mt/test-driver :postgres
     (testing "`table-privileges` should return the correct data for current_user and role privileges"
       (mt/with-empty-db

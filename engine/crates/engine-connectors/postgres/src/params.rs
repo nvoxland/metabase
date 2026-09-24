@@ -112,6 +112,12 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
                 .ok_or_else(|| invalid(index, ty, v))?;
             Box::new(t)
         }
+        Type::INET | Type::CIDR => {
+            let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
+            Box::new(
+                PgInet::parse(s.trim(), *ty == Type::CIDR).ok_or_else(|| invalid(index, ty, v))?,
+            )
+        }
         Type::UUID => {
             let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
             Box::new(s.parse::<uuid::Uuid>().map_err(|_| invalid(index, ty, v))?)
@@ -134,6 +140,55 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
         },
     };
     Ok(bound)
+}
+
+/// An `inet`/`cidr` value in Postgres' binary form: family, prefix bits, is-cidr, length, address.
+#[derive(Debug)]
+struct PgInet {
+    addr: std::net::IpAddr,
+    bits: u8,
+    cidr: bool,
+}
+
+impl PgInet {
+    fn parse(s: &str, cidr: bool) -> Option<PgInet> {
+        let (addr, bits) = match s.split_once('/') {
+            Some((a, b)) => (a.parse::<std::net::IpAddr>().ok()?, b.parse::<u8>().ok()?),
+            None => {
+                let addr = s.parse::<std::net::IpAddr>().ok()?;
+                (addr, if addr.is_ipv4() { 32 } else { 128 })
+            }
+        };
+        Some(PgInet { addr, bits, cidr })
+    }
+}
+
+impl ToSql for PgInet {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        const PGSQL_AF_INET: u8 = 2;
+        const PGSQL_AF_INET6: u8 = 3;
+        match self.addr {
+            std::net::IpAddr::V4(a) => {
+                out.extend_from_slice(&[PGSQL_AF_INET, self.bits, self.cidr as u8, 4]);
+                out.extend_from_slice(&a.octets());
+            }
+            std::net::IpAddr::V6(a) => {
+                out.extend_from_slice(&[PGSQL_AF_INET6, self.bits, self.cidr as u8, 16]);
+                out.extend_from_slice(&a.octets());
+            }
+        }
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::INET || *ty == Type::CIDR
+    }
+
+    tokio_postgres::types::to_sql_checked!();
 }
 
 /// A value sent as its text form for a type this binder has no native encoding for (enums,

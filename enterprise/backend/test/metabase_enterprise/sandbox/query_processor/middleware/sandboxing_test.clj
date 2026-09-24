@@ -1309,7 +1309,7 @@
             (is (= {:cached? false, :num-rows 5}
                    (run-query)))))))))
 
-(deftest persistence-disabled-when-sandboxed-test
+(deftest ^:mb/jdbc-only persistence-disabled-when-sandboxed-test
   (mt/test-drivers (mt/normal-drivers-with-feature :persist-models)
     (mt/dataset test-data
       ;; with-gtaps! creates a new copy of the database. So make sure to do that before anything else. Gets really

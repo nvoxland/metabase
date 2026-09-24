@@ -304,7 +304,7 @@
         qp/process-query
         mt/rows)))
 
-(deftest cancel-statement-only-when-rows-remain-test
+(deftest ^:mb/jdbc-only cancel-statement-only-when-rows-remain-test
   (testing "the statement is canceled only when reduction stopped before the ResultSet ran out of rows"
     (mt/test-drivers (mt/normal-driver-select
                       {:+parent :sql-jdbc

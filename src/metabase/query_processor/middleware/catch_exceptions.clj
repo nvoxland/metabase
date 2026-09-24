@@ -4,7 +4,6 @@
   (:require
    [clojure.string :as str]
    [metabase.analytics-interface.core :as analytics]
-   [metabase.driver :as driver]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.queries.schema :as queries.schema]
    [metabase.query-processor.compile :as qp.compile]
@@ -13,6 +12,7 @@
    [metabase.query-processor.pipeline :as qp.pipeline]
    [metabase.query-processor.preprocess :as qp.preprocess]
    [metabase.query-processor.schema :as qp.schema]
+   [metabase.query-processor.setup :as qp.setup]
    [metabase.util :as u]
    [metabase.util.i18n :refer [trs]]
    [metabase.util.log :as log]
@@ -167,7 +167,8 @@
         (try
           (qp query rff)
           (catch Throwable e
-            (analytics/inc! :metabase-query-processor/query {:driver driver/*driver* :status "failure"})
+            (analytics/inc! :metabase-query-processor/query {:driver (qp.setup/reported-driver)
+                                                             :status "failure"})
             ;; format the Exception and return it
             (let [formatted-exception (format-exception* query e @extra-info)
                   query-canceled?     (some (comp :query/query-canceled? ex-data)

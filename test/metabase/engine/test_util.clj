@@ -38,3 +38,15 @@
   the library isn't built."
   [& body]
   `(do-with-engine! (fn [] ~@body)))
+
+(defn do-with-query-engine!
+  "Impl for [[with-query-engine]]."
+  [mode thunk]
+  (mt/with-temp-vals-in-db :model/Database (mt/id) {:settings (assoc (:settings (mt/db)) :query-engine (name mode))}
+    (thunk)))
+
+(defmacro with-query-engine
+  "Run `body` with the test database's `query-engine` set to `mode` (`:jdbc`, `:datafusion`, or
+  `:shadow`) as a database-local value, which wins over any site-wide or environment default."
+  [mode & body]
+  `(do-with-query-engine! ~mode (fn [] ~@body)))
