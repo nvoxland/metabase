@@ -112,6 +112,10 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
                 .ok_or_else(|| invalid(index, ty, v))?;
             Box::new(t)
         }
+        Type::BIT | Type::VARBIT => {
+            let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
+            Box::new(PgBits::parse(s.trim()).ok_or_else(|| invalid(index, ty, v))?)
+        }
         Type::INET | Type::CIDR => {
             let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
             Box::new(
@@ -140,6 +144,54 @@ pub fn bind(index: usize, param: &ParamValue, ty: &Type) -> Result<BoundParam> {
         },
     };
     Ok(bound)
+}
+
+/// A `bit`/`varbit` value (`'1011'`) in Postgres' binary form: the bit count, then the bits packed
+/// most significant first.
+#[derive(Debug)]
+struct PgBits {
+    len: i32,
+    bytes: Vec<u8>,
+}
+
+impl PgBits {
+    fn parse(s: &str) -> Option<PgBits> {
+        let s = s
+            .strip_prefix("B'")
+            .and_then(|r| r.strip_suffix('\''))
+            .unwrap_or(s);
+        if s.is_empty() || !s.bytes().all(|b| b == b'0' || b == b'1') {
+            return None;
+        }
+        let mut bytes = vec![0u8; s.len().div_ceil(8)];
+        for (i, b) in s.bytes().enumerate() {
+            if b == b'1' {
+                bytes[i / 8] |= 0x80 >> (i % 8);
+            }
+        }
+        Some(PgBits {
+            len: s.len() as i32,
+            bytes,
+        })
+    }
+}
+
+impl ToSql for PgBits {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> std::result::Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.extend_from_slice(&self.len.to_be_bytes());
+        out.extend_from_slice(&self.bytes);
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::BIT || *ty == Type::VARBIT
+    }
+
+    tokio_postgres::types::to_sql_checked!();
 }
 
 /// An `inet`/`cidr` value in Postgres' binary form: family, prefix bits, is-cidr, length, address.

@@ -125,6 +125,11 @@
   driver, so it must be in the warehouse's dialect: the engine is not routed to for it."
   false)
 
+(def ^:dynamic *reported-driver*
+  "The warehouse's own driver while a query runs through the engine driver, for metrics and logs
+  that report per driver. Bound by the query processor's setup when it routes a query."
+  nil)
+
 (def ^:dynamic *force*
   "When bound to `:jdbc` or `:datafusion`, overrides the database's `query-engine` setting. Shadow
   mode uses it to run the same query through both paths."
@@ -173,11 +178,3 @@
            (= :datafusion (engine-mode database)))
     :datafusion
     warehouse-driver))
-
-(defn reported-driver
-  "The driver to report a query under (metrics, logs): the warehouse's own driver, from the
-  metadata provider's database, when the query processor bound the engine driver for the run."
-  [bound-driver metadata-provider]
-  (if (and (= bound-driver :datafusion) metadata-provider)
-    (keyword (:engine (lib.metadata/database metadata-provider)))
-    bound-driver))

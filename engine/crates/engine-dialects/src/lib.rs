@@ -255,6 +255,7 @@ impl MetabasePostgresDialect {
             "TEXT" => ast::DataType::Text,
             "BIGINT" => ast::DataType::BigInt(None),
             "DOUBLE" => ast::DataType::DoublePrecision,
+            "NUMERIC" => ast::DataType::Numeric(ast::ExactNumberInfo::None),
             "DATE" => ast::DataType::Date,
             "TIMESTAMP" => ast::DataType::Timestamp(None, ast::TimezoneInfo::None),
             "TIMESTAMPTZ" => ast::DataType::Timestamp(None, ast::TimezoneInfo::WithTimeZone),

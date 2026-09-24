@@ -312,3 +312,13 @@
                                                 expr
                                                 (at-zone source-timezone expr)))]
     (h2x/with-database-type-info expr "timestamp")))
+
+;;; Postgres has no arithmetic or aggregates over `money`; its driver reads such fields as `numeric`, and so does this one.
+(defmethod sql.qp/->honeysql [:datafusion :field]
+  [driver [_ _opts id-or-name :as clause]]
+  (let [stored-field (when (integer? id-or-name)
+                       (driver-api/field (driver-api/metadata-provider) id-or-name))
+        identifier   ((get-method sql.qp/->honeysql [:sql :field]) driver clause)]
+    (if (= (:database-type stored-field) "money")
+      (named-cast "NUMERIC" "numeric" identifier)
+      identifier)))

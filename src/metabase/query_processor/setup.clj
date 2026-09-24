@@ -184,8 +184,9 @@
               driver   (engine.routing/effective-driver query mp database (or bound warehouse-driver) warehouse-driver)]
           (if (= driver bound)
             (f query)
-            (driver/with-driver driver
-              (f query))))))))
+            (binding [engine.routing/*reported-driver* (when (= driver :datafusion) warehouse-driver)]
+              (driver/with-driver driver
+                (f query)))))))))
 
 (mu/defn- do-with-database-local-settings :- fn?
   [f :- fn?]

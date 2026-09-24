@@ -6,9 +6,9 @@
    (java.time LocalDateTime LocalTime OffsetDateTime ZoneOffset)
    (org.apache.arrow.memory RootAllocator)
    (org.apache.arrow.vector TimeNanoVector TimeStampMicroTZVector TimeStampMilliVector TimeStampNanoTZVector
-                            TimeStampNanoVector VarCharVector VectorSchemaRoot)
+                            TimeStampNanoVector VarBinaryVector VarCharVector VectorSchemaRoot)
    (org.apache.arrow.vector.types TimeUnit)
-   (org.apache.arrow.vector.types.pojo ArrowType$Time ArrowType$Timestamp ArrowType$Utf8 Field FieldType)))
+   (org.apache.arrow.vector.types.pojo ArrowType$Binary ArrowType$Time ArrowType$Timestamp ArrowType$Utf8 Field FieldType)))
 
 (set! *warn-on-reflection* true)
 
@@ -51,6 +51,17 @@
         (let [next-row (engine.arrow/row-thunk (one-batch root))]
           (is (= [(java.time.OffsetTime/parse "07:23:18.331+00:00")] (next-row)))
           (is (= [(java.time.OffsetTime/parse "23:05:00+05:30")] (next-row))))))))
+
+(deftest ^:parallel bytea-columns-test
+  (testing "a binary column the catalog tagged as bytea comes back in Postgres' hex text form, like the JDBC driver"
+    (with-open [allocator (RootAllocator.)
+                v         (VarBinaryVector. (Field. "b" (FieldType. true (ArrowType$Binary.) nil {"metabase.db_type" "bytea"}) nil) allocator)]
+      (.allocateNew v)
+      (.setSafe v 0 (byte-array [(unchecked-byte 0x90) 0 (unchecked-byte 0xab)]))
+      (.setValueCount v 1)
+      (with-open [root (VectorSchemaRoot. ^java.util.List [v])]
+        (.setRowCount root 1)
+        (is (= ["\\x9000ab"] ((engine.arrow/row-thunk (one-batch root)))))))))
 
 (deftest ^:parallel timestamp-units-test
   (testing "every Arrow timestamp unit becomes the java.time value the JDBC drivers would return"

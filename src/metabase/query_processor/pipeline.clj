@@ -4,8 +4,6 @@
    [metabase.analytics-interface.core :as analytics]
    [metabase.driver :as driver]
    [metabase.engine.routing :as engine.routing]
-   [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.query-processor.error-type :as qp.error-type]
    [metabase.util.i18n :as i18n]
    [metabase.util.log :as log]))
@@ -50,11 +48,6 @@
   [result]
   (default-result-handler result))
 
-(def ^:dynamic *reported-driver*
-  "The driver the running query is reported under (metrics): the warehouse's own driver when the
-  native query engine's driver was bound for it. Bound by [[*execute*]]."
-  nil)
-
 (defn ^:dynamic *execute*
   "Called by [[*run*]] to have driver run query. By default, [[metabase.driver/execute-reducible-query]]. `respond` is a
   callback with the signature:
@@ -70,11 +63,7 @@
       nil)
     ;; Normal execution path
     (let [context {:canceled-chan *canceled-chan*}]
-      (binding [*reported-driver* (engine.routing/reported-driver
-                                   driver
-                                   (when (lib.metadata.protocols/metadata-providerable? query)
-                                     (lib.metadata/->metadata-provider query)))]
-        (driver/execute-reducible-query driver query context respond)))))
+      (driver/execute-reducible-query driver query context respond))))
 
 (defn ^:dynamic *reduce*
   "Called by [[*run*]] (inside the `respond` callback provided by it) to reduce results of query. Reduces results, then
@@ -99,7 +88,7 @@
                                                          ([] (rf))
                                                          ([acc]
                                                           (analytics/inc! :metabase-query-processor/query
-                                                                          {:driver (or *reported-driver* driver/*driver*)
+                                                                          {:driver (or engine.routing/*reported-driver* driver/*driver*)
                                                                            :status "success"})
                                                           (some-> *canceled-chan* a/close!)
                                                           (rf acc))

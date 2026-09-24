@@ -15,7 +15,7 @@ use datafusion::logical_expr::{
 /// `CAST(x AS t)` the same schema name as `x`, so `max(x)` and `max(CAST(x AS TEXT))` in one
 /// query collide and the query is refused; a function call has its own name. It also types
 /// `TIME` as microseconds, which the unparser can spell (a plain cast plans as nanoseconds).
-/// The type names are SQL's: TEXT, BIGINT, DOUBLE, DATE, TIMESTAMP, TIMESTAMPTZ, TIME.
+/// The type names are SQL's: TEXT, BIGINT, DOUBLE, NUMERIC, DATE, TIMESTAMP, TIMESTAMPTZ, TIME.
 pub const MB_CAST: &str = "mb_cast";
 
 /// The Arrow type `mb_cast` produces for a type name, if it is one we know.
@@ -24,6 +24,7 @@ pub fn cast_target(type_name: &str) -> Option<DataType> {
         "TEXT" => DataType::Utf8,
         "BIGINT" => DataType::Int64,
         "DOUBLE" => DataType::Float64,
+        "NUMERIC" => DataType::Decimal128(38, 10),
         "DATE" => DataType::Date32,
         "TIMESTAMP" => DataType::Timestamp(TimeUnit::Microsecond, None),
         "TIMESTAMPTZ" => DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),

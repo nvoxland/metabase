@@ -37,6 +37,14 @@ pub fn resolve_null_types(plan: &Schema, warehouse: &Schema) -> Schema {
                     DataType::Time64(_) | DataType::Time32(_),
                     Some(DataType::Time64(_) | DataType::Time32(_)),
                 ) => true,
+                // Metabase types `bytea` as `:type/*`, which the catalog maps to Utf8; the bytes are not text
+                (DataType::Utf8, Some(DataType::Binary | DataType::LargeBinary)) => true,
+                // the catalog said integer but the warehouse now sends fractions (a column was promoted, e.g. by
+                // an upload append, and the snapshot is a few seconds behind): casting would silently truncate
+                (
+                    DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64,
+                    Some(DataType::Float32 | DataType::Float64 | DataType::Decimal128(_, _)),
+                ) => true,
                 _ => false,
             };
             match (take_warehouse_type, actual) {
@@ -205,6 +213,26 @@ mod tests {
         assert_eq!(
             resolved.field(0).data_type(),
             &DataType::Time64(TimeUnit::Microsecond)
+        );
+    }
+
+    #[test]
+    fn binary_columns_keep_the_warehouse_type() {
+        let plan = Schema::new(vec![Field::new("b", DataType::Utf8, true)]);
+        let warehouse = Schema::new(vec![Field::new("b", DataType::Binary, true)]);
+        assert_eq!(
+            resolve_null_types(&plan, &warehouse).field(0).data_type(),
+            &DataType::Binary
+        );
+    }
+
+    #[test]
+    fn a_promoted_integer_column_keeps_the_warehouse_float_type() {
+        let plan = Schema::new(vec![Field::new("n", DataType::Int64, true)]);
+        let warehouse = Schema::new(vec![Field::new("n", DataType::Float64, true)]);
+        assert_eq!(
+            resolve_null_types(&plan, &warehouse).field(0).data_type(),
+            &DataType::Float64
         );
     }
 

@@ -78,6 +78,14 @@
   [^FieldVector vector]
   (some-> vector .getField .getMetadata (.get "metabase.db_type")))
 
+(defn- hex-text
+  "`\\x` followed by the bytes in lowercase hex: how Postgres prints `bytea`."
+  ^String [^bytes bs]
+  (let [sb (StringBuilder. "\\x")]
+    (doseq [b bs]
+      (.append sb (format "%02x" (bit-and 0xff (long b)))))
+    (str sb)))
+
 (defn- parse-offset-time
   "An `OffsetTime` from Postgres' text form of `timetz`, whose offset omits the minutes when they
   are zero (`+00`, `-07`, `+05:30`)."
@@ -131,7 +139,10 @@
       TimeMilliVector        (fn [i] (when-not (null? i) (LocalTime/ofNanoOfDay (* 1000000 (long (.get ^TimeMilliVector vector (int i)))))))
       TimeMicroVector        (fn [i] (when-not (null? i) (LocalTime/ofNanoOfDay (* 1000 (.get ^TimeMicroVector vector (int i))))))
       TimeNanoVector         (fn [i] (when-not (null? i) (LocalTime/ofNanoOfDay (.get ^TimeNanoVector vector (int i)))))
-      VarBinaryVector       (fn [i] (when-not (null? i) (.get ^VarBinaryVector vector (int i))))
+      VarBinaryVector       (if (= "bytea" (db-type vector))
+                              ;; the Postgres JDBC driver hands `bytea` back in Postgres' hex text form
+                              (fn [i] (when-not (null? i) (hex-text (.get ^VarBinaryVector vector (int i)))))
+                              (fn [i] (when-not (null? i) (.get ^VarBinaryVector vector (int i)))))
       (fn [i] (when-not (null? i)
                 (let [v (.getObject vector (int i))]
                   (if (instance? org.apache.arrow.vector.util.Text v) (str v) v)))))))

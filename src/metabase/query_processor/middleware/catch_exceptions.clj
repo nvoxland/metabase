@@ -6,8 +6,6 @@
    [metabase.analytics-interface.core :as analytics]
    [metabase.driver :as driver]
    [metabase.engine.routing :as engine.routing]
-   [metabase.lib.metadata :as lib.metadata]
-   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.queries.schema :as queries.schema]
    [metabase.query-processor.compile :as qp.compile]
@@ -171,9 +169,7 @@
           (qp query rff)
           (catch Throwable e
             (analytics/inc! :metabase-query-processor/query
-                            {:driver (engine.routing/reported-driver driver/*driver*
-                                                                     (when (lib.metadata.protocols/metadata-providerable? query)
-                                                                       (lib.metadata/->metadata-provider query)))
+                            {:driver (or engine.routing/*reported-driver* driver/*driver*)
                              :status "failure"})
             ;; format the Exception and return it
             (let [formatted-exception (format-exception* query e @extra-info)
