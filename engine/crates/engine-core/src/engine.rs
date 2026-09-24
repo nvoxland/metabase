@@ -296,10 +296,7 @@ impl Engine {
                 ),
             ));
         }
-        let (connector, pool) = self
-            .pools
-            .pool_for(&registration, session.context.role.as_deref())
-            .await?;
+        let (connector, pool) = self.pools.pool_for(&registration).await?;
         let settings = SessionSettings {
             time_zone: session.context.report_timezone.clone(),
             statement_timeout_ms: session.context.statement_timeout_ms,
@@ -352,10 +349,7 @@ impl Engine {
                     ),
                 )
             })?;
-        let (connector, pool) = self
-            .pools
-            .pool_for(&registration, session.context.role.as_deref())
-            .await?;
+        let (connector, pool) = self.pools.pool_for(&registration).await?;
         let settings = SessionSettings {
             time_zone: session.context.report_timezone.clone(),
             statement_timeout_ms: session.context.statement_timeout_ms,

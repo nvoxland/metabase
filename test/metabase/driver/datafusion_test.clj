@@ -9,6 +9,7 @@
    [metabase.driver.datafusion]
    [metabase.engine.catalog :as engine.catalog]
    [metabase.engine.core :as engine]
+   [metabase.engine.test-util :as engine.tu]
    [metabase.query-processor.compile :as qp.compile]
    [metabase.test :as mt]))
 
@@ -134,8 +135,8 @@
 
 (deftest ^:mb/engine-tests corpus-plans-for-postgres-test
   (mt/test-drivers #{:h2}
-    (mt/with-temporary-setting-values [engine-transport :ffi]
-      (try
+    (engine.tu/with-engine
+      (do
         ;; Plan the H2 dataset's metadata as if it were Postgres: this checks the compiler and the unparser, not H2.
         (engine/register-catalog! (assoc (engine.catalog/snapshot (mt/db)) :connector "postgres"))
         (engine/with-session [session {:database_id (mt/id)}]
@@ -153,6 +154,4 @@
                   (is (seq (:schema result)))
                   (testing "every parameter has a placeholder in the warehouse SQL"
                     (doseq [n (range 1 (inc (count params)))]
-                      (is (str/includes? (:warehouse_sql result) (str "$" n))))))))))
-        (finally
-          (engine/stop!))))))
+                      (is (str/includes? (:warehouse_sql result) (str "$" n))))))))))))))

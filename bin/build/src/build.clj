@@ -1,5 +1,6 @@
 (ns build
   (:require
+   [build.engine :as build.engine]
    [build.licenses :as license]
    [build.python :as build.python]
    [build.uberjar :as uberjar]
@@ -93,6 +94,8 @@
                        (build-drivers/build-drivers! edition))
    :python       (fn [{:keys [edition]}]
                    (build.python/build-python-deps! edition))
+   :engine       (fn [{:keys [edition]}]
+                   (build.engine/build-engine-native! edition))
    :uberjar      (fn [{:keys [edition]}]
                    (build-uberjar! edition))))
 

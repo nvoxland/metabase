@@ -82,6 +82,28 @@
   [database-id]
   (call! {:op "invalidate_database" :database_id database-id}))
 
+(defonce ^:private registrations
+  ;; database id -> whatever the registering code uses to decide the engine is current for that database (the
+  ;; driver keys on a catalog stamp, a details hash, and the transport). Kept here so an event (a deleted
+  ;; database) can forget it without the engine module knowing about the driver.
+  (atom {}))
+
+(defn registration
+  "What was recorded for `database-id` by [[remember-registration!]], or nil."
+  [database-id]
+  (get @registrations database-id))
+
+(defn remember-registration!
+  "Record that `database-id` is registered with the engine under `stamp`."
+  [database-id stamp]
+  (swap! registrations assoc database-id stamp))
+
+(defn forget-database!
+  "Drop what the engine knows about a database: its registration memo and its pools and catalog."
+  [database-id]
+  (swap! registrations dissoc database-id)
+  (invalidate-database! database-id))
+
 (defn create-session!
   "Open a session for `context` (`{:database_id ...}` plus user, timezone, remark, ...). Returns the
   session id; close it with [[destroy-session!]]."

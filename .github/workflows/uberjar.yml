@@ -116,6 +116,13 @@ jobs:
         uses: ./.github/actions/prepare-backend
         with:
           java-version: "${{ needs.setup.outputs.java_version || 25 }}"
+      - name: Install the Rust toolchain for the native query engine
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine
       - name: Build
         run: ./bin/build.sh
       - name: Upload bundle stats

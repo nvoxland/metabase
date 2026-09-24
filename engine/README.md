@@ -63,6 +63,19 @@ with `MB_ENGINE_TRANSPORT=sidecar` (and `MB_ENGINE_SIDECAR_URL` if not `http://l
 Because the JVM can't reload a native library, this is the way to pick up engine changes without
 restarting the REPL.
 
+## Packaging
+
+`./bin/build.sh` has an `:engine` step (`bin/build/src/build/engine.clj`) that runs
+`cargo build --release -p engine-ffi` for the host and copies the library to
+`resources/native/metabase-engine/<os>-<arch>[-musl]/`, which the uberjar picks up like any other
+resource. `SKIP_ENGINE_NATIVE=true` skips it; without `cargo` on the path it warns and the jar ships
+without the engine, in which case `engine.init` keeps every database on the JDBC path. Libraries
+already present under `resources/native/metabase-engine/` are used as-is, so CI can place the
+per-platform builds from `.github/workflows/engine.yml` there before building the jar.
+
+The Alpine image needs `libgcc` (added to `bin/docker/Dockerfile`) because a musl build without
+`crt-static` links `libgcc_s` dynamically.
+
 ## Conventions
 
 - Nothing runs on the caller's thread. The C ABI hands every request to the engine's worker

@@ -45,6 +45,10 @@
 ;;; engine can plan but a warehouse can't run are rejected by the engine at query time, not here.
 (doseq [[feature supported?] {:convert-timezone               false ; needs timezone-aware unparsing; tracked for M4
                               :datetime-diff                  true
+                              ;; sync: the warehouse driver's metadata SQL runs through the engine (see below)
+                              :describe-fields                true
+                              :describe-indexes               false
+                              :metadata/key-constraints       true
                               :expression-literals            true
                               :expressions                    true
                               :expressions/date               true
@@ -81,11 +85,6 @@
 
 ;;; ------------------------------------------------ engine registration -------------------------------------------------
 
-(defonce ^:private registered
-  ;; database id -> {:stamp [catalog version, details hash], :transport <the engine it was registered with>}
-  ;; The transport is part of the key so a restarted engine (which starts empty) gets registered again.
-  (atom {}))
-
 (defn- pool-config []
   {:max_size            (driver.settings/jdbc-data-warehouse-max-connection-pool-size)
    :checkout_timeout_ms 10000
@@ -95,9 +94,10 @@
   "Make sure the engine has the database's connection details and current catalog. Checks a cheap
   metadata stamp on every query and only builds the full snapshot when it changed."
   [database]
+  ;; The transport is part of the stamp so a restarted engine (which starts empty) gets registered again.
   (let [details (driver.conn/effective-details database)
-        stamp   [(engine.catalog/stamp database) (hash details)]]
-    (when (not= (get @registered (:id database)) {:stamp stamp :transport (engine/transport)})
+        stamp   {:stamp [(engine.catalog/stamp database) (hash details)] :transport (engine/transport)}]
+    (when (not= (engine/registration (:id database)) stamp)
       (let [snapshot (engine.catalog/snapshot database)]
         (log/infof "Registering database %d with the native query engine (%s)" (:id database) (:catalog_version snapshot))
         (engine/register-database! {:database_id (:id database)
@@ -105,7 +105,7 @@
                                     :details     details
                                     :pool        (pool-config)})
         (engine/register-catalog! snapshot)
-        (swap! registered assoc (:id database) {:stamp stamp :transport (engine/transport)})))))
+        (engine/remember-registration! (:id database) stamp)))))
 
 (defenterprise impersonation-role
   "The warehouse role a routed query must run as: the current user's impersonation role, else the
@@ -117,8 +117,7 @@
 (defn forget-database!
   "Drop what the engine knows about a database (after its details or metadata change)."
   [database-id]
-  (swap! registered dissoc database-id)
-  (engine/invalidate-database! database-id))
+  (engine/forget-database! database-id))
 
 ;;; ---------------------------------------------------- execution -------------------------------------------------------
 
@@ -269,5 +268,9 @@
                 (metadata-query! database sql)))))
 
 (defmethod driver/describe-fks :datafusion
-  [_driver database & {:as opts}]
-  (metadata-query! database (sql-jdbc.sync/describe-fks-sql (warehouse-driver-of database) opts)))
+  [_driver database & {:keys [schema-names table-names] :as opts}]
+  (if (or (and schema-names (perf/empty? schema-names))
+          (and table-names (perf/empty? table-names)))
+    []
+    (metadata-query! database (sql-jdbc.sync/describe-fks-sql (warehouse-driver-of database)
+                                                              (assoc opts :details (driver.conn/effective-details database))))))

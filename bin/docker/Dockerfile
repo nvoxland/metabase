@@ -9,7 +9,8 @@ ENV GIT_COMMIT_SHA=${GIT_COMMIT_SHA}
 COPY DigiCertGlobalRootG2.crt.pem /app/certs/DigiCertGlobalRootG2.crt.pem
 
 # dependencies
-RUN apk add -U bash fontconfig curl font-noto font-noto-arabic font-noto-hebrew font-noto-cjk font-noto-thai java-cacerts && \
+# libgcc: the native query engine (a Rust shared library) links libgcc_s dynamically on musl
+RUN apk add -U bash libgcc fontconfig curl font-noto font-noto-arabic font-noto-hebrew font-noto-cjk font-noto-thai java-cacerts && \
     apk upgrade && \
     rm -rf /var/cache/apk/* && \
     mkdir -p /app/certs && \

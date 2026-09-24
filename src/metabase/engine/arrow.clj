@@ -7,11 +7,13 @@
   `FlightStream` (the sidecar); [[Batches]] hides the difference."
   (:import
    (java.nio.charset StandardCharsets)
-   (java.time Instant LocalDate LocalTime ZoneOffset)
+   (java.time Instant LocalDate LocalDateTime LocalTime ZoneOffset)
    (org.apache.arrow.flight FlightStream)
    (org.apache.arrow.vector BigIntVector BitVector DateDayVector DecimalVector FieldVector Float4Vector Float8Vector
-                            IntVector SmallIntVector TimeMicroVector TimeStampMicroTZVector TimeStampMicroVector
-                            TinyIntVector UInt4Vector VarBinaryVector VarCharVector VectorSchemaRoot)
+                            IntVector SmallIntVector TimeMicroVector TimeMilliVector TimeNanoVector TimeSecVector
+                            TimeStampVector TimeStampMicroTZVector TimeStampMicroVector TimeStampMilliTZVector
+                            TimeStampMilliVector TimeStampNanoTZVector TimeStampNanoVector TimeStampSecTZVector
+                            TimeStampSecVector TinyIntVector UInt4Vector VarBinaryVector VarCharVector VectorSchemaRoot)
    (org.apache.arrow.vector.ipc ArrowReader)
    (org.apache.arrow.vector.types.pojo ArrowType ArrowType$Binary ArrowType$Bool ArrowType$Date ArrowType$Decimal
                                        ArrowType$FloatingPoint ArrowType$Int ArrowType$LargeUtf8 ArrowType$Time
@@ -70,6 +72,19 @@
       (.setScale stripped 0)
       stripped)))
 
+(defn- timestamp-fn
+  "Accessor for any timestamp vector: `nanos-per-unit` scales the stored integer to nanoseconds; a
+  zoned column (Arrow carries the zone, always UTC from the engine) becomes an `OffsetDateTime`,
+  an unzoned one a `LocalDateTime`, matching what the JDBC drivers return."
+  [^TimeStampVector vector ^long nanos-per-unit zoned?]
+  (fn [i]
+    (when-not (.isNull vector (int i))
+      (let [nanos   (* nanos-per-unit (.get vector (int i)))
+            instant (Instant/ofEpochSecond (Math/floorDiv nanos 1000000000) (Math/floorMod nanos 1000000000))]
+        (if zoned?
+          (.atOffset instant ZoneOffset/UTC)
+          (LocalDateTime/ofInstant instant ZoneOffset/UTC))))))
+
 (defn- value-fn
   "A function from row index to the Clojure value of `vector` at that index, or nil for nulls."
   [^FieldVector vector]
@@ -86,13 +101,18 @@
       VarCharVector         (fn [i] (when-not (null? i) (String. (.get ^VarCharVector vector (int i)) StandardCharsets/UTF_8)))
       BitVector             (fn [i] (when-not (null? i) (= 1 (.get ^BitVector vector (int i)))))
       DateDayVector         (fn [i] (when-not (null? i) (LocalDate/ofEpochDay (.get ^DateDayVector vector (int i)))))
-      TimeStampMicroTZVector (fn [i] (when-not (null? i)
-                                       (let [micros (.get ^TimeStampMicroTZVector vector (int i))]
-                                         (.atOffset (Instant/ofEpochSecond (Math/floorDiv micros 1000000)
-                                                                           (* 1000 (Math/floorMod micros 1000000)))
-                                                    ZoneOffset/UTC))))
-      TimeStampMicroVector  (fn [i] (when-not (null? i) (.getObject ^TimeStampMicroVector vector (int i))))
-      TimeMicroVector       (fn [i] (when-not (null? i) (LocalTime/ofNanoOfDay (* 1000 (.get ^TimeMicroVector vector (int i))))))
+      TimeStampSecTZVector   (timestamp-fn vector 1000000000 true)
+      TimeStampMilliTZVector (timestamp-fn vector 1000000 true)
+      TimeStampMicroTZVector (timestamp-fn vector 1000 true)
+      TimeStampNanoTZVector  (timestamp-fn vector 1 true)
+      TimeStampSecVector     (timestamp-fn vector 1000000000 false)
+      TimeStampMilliVector   (timestamp-fn vector 1000000 false)
+      TimeStampMicroVector   (timestamp-fn vector 1000 false)
+      TimeStampNanoVector    (timestamp-fn vector 1 false)
+      TimeSecVector          (fn [i] (when-not (null? i) (LocalTime/ofSecondOfDay (.get ^TimeSecVector vector (int i)))))
+      TimeMilliVector        (fn [i] (when-not (null? i) (LocalTime/ofNanoOfDay (* 1000000 (long (.get ^TimeMilliVector vector (int i)))))))
+      TimeMicroVector        (fn [i] (when-not (null? i) (LocalTime/ofNanoOfDay (* 1000 (.get ^TimeMicroVector vector (int i))))))
+      TimeNanoVector         (fn [i] (when-not (null? i) (LocalTime/ofNanoOfDay (.get ^TimeNanoVector vector (int i)))))
       VarBinaryVector       (fn [i] (when-not (null? i) (.get ^VarBinaryVector vector (int i))))
       (fn [i] (when-not (null? i)
                 (let [v (.getObject vector (int i))]

@@ -136,6 +136,26 @@ impl MetabasePostgresDialect {
     }
 }
 
+impl MetabasePostgresDialect {
+    /// DataFusion unparses `array_element(f(x), 1)` as `f(x)[1]`, which Postgres only accepts with
+    /// the array expression in parentheses: `(f(x))[1]`.
+    fn parenthesized_subscript(
+        &self,
+        unparser: &Unparser,
+        args: &[Expr],
+    ) -> DFResult<Option<ast::Expr>> {
+        if args.len() != 2 {
+            return Ok(None);
+        }
+        let array = unparser.expr_to_sql(&args[0])?;
+        let index = unparser.expr_to_sql(&args[1])?;
+        Ok(Some(ast::Expr::CompoundFieldAccess {
+            root: Box::new(ast::Expr::Nested(Box::new(array))),
+            access_chain: vec![ast::AccessExpr::Subscript(ast::Subscript::Index { index })],
+        }))
+    }
+}
+
 impl Dialect for MetabasePostgresDialect {
     fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
         self.inner.identifier_quote_style(identifier)
@@ -189,6 +209,7 @@ impl Dialect for MetabasePostgresDialect {
     ) -> DFResult<Option<ast::Expr>> {
         match func_name {
             "substr" | "substring" => self.substr_with_int_positions(unparser, args),
+            "array_element" => self.parenthesized_subscript(unparser, args),
             _ => self
                 .inner
                 .scalar_function_to_sql_overrides(unparser, func_name, args),

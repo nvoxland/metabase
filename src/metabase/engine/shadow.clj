@@ -5,7 +5,9 @@
   driver can be measured on real traffic before switching a database over."
   (:require
    [metabase.util :as u]
-   [metabase.util.log :as log]))
+   [metabase.util.log :as log])
+  (:import
+   (java.util.concurrent ArrayBlockingQueue RejectedExecutionException ThreadFactory ThreadPoolExecutor TimeUnit)))
 
 (set! *warn-on-reflection* true)
 
@@ -18,10 +20,30 @@
 (defonce ^:private pending
   (atom #{}))
 
+(defonce ^:private dropped
+  ;; comparisons not run because the executor was saturated
+  (atom 0))
+
+(defonce ^:private executor
+  ;; A small pool with a bounded queue: shadow mode re-runs every query twice, so under load it
+  ;; samples rather than doubling the warehouse's work. Plain threads (not futures) so the query
+  ;; processor's dynamic bindings don't carry over and each rerun gets its own setup.
+  (ThreadPoolExecutor. 2 2 30 TimeUnit/SECONDS
+                       (ArrayBlockingQueue. 64)
+                       (reify ThreadFactory
+                         (newThread [_ runnable]
+                           (doto (Thread. runnable "engine-shadow-comparison")
+                             (.setDaemon true))))))
+
 (defn recent
   "The most recent comparisons, newest first: `{:match? :query :jdbc :engine :error :elapsed-ms}`."
   []
   @recent-comparisons)
+
+(defn dropped-count
+  "How many comparisons were skipped because the background executor was saturated."
+  []
+  @dropped)
 
 (defn clear!
   "Forget recorded comparisons."
@@ -71,34 +93,41 @@
     (swap! recent-comparisons (fn [entries] (vec (take max-recent (cons entry entries)))))
     (if (:match? outcome)
       (log/debugf "Shadow comparison matched (%d ms)" elapsed-ms)
-      (log/warnf "Shadow comparison mismatch (%s): %s" (:error outcome) (pr-str (:detail outcome))))
+      ;; row values stay out of the log; [[recent]] keeps them for whoever is measuring the gap
+      (log/warnf "Shadow comparison mismatch for database %s (%s): %s"
+                 (:database query)
+                 (:error outcome)
+                 (pr-str (cond-> (:detail outcome)
+                           (map? (:detail outcome)) (update :first-difference #(some-> % (select-keys [:row])))))))
     entry))
 
 (defn run-in-background!
-  "Run `compare-fn` (a no-arg function producing a comparison outcome) on a fresh thread and record
-  its result. A plain thread, not a future, so the query processor's dynamic bindings (the bound
-  driver, the metadata provider, the setup marker) don't carry over and the re-runs get their own
-  setup. Returns a promise of the recorded entry; [[await-pending!]] waits for all of them."
+  "Run `compare-fn` (a no-arg function producing a comparison outcome) on the shadow executor and
+  record its result. Returns a promise of the recorded entry, or nil when the executor is saturated
+  and the comparison is dropped; [[await-pending!]] waits for all of them."
   [query compare-fn]
-  (let [timer   (u/start-timer)
-        done    (promise)
-        thread  (Thread.
-                 (fn []
-                   (try
-                     (let [outcome (try
-                                     (compare-fn)
-                                     (catch Throwable e
-                                       {:match? false :error :comparison-threw :detail (ex-message e)}))]
-                       (deliver done (record! query outcome (u/since-ms timer))))
-                     (catch Throwable e
-                       (deliver done {:match? false :error :comparison-threw :detail (ex-message e)}))
-                     (finally
-                       (swap! pending disj done))))
-                 "engine-shadow-comparison")]
+  (let [timer (u/start-timer)
+        done  (promise)
+        task  (fn []
+                (try
+                  (let [outcome (try
+                                  (compare-fn)
+                                  (catch Throwable e
+                                    {:match? false :error :comparison-threw :detail (ex-message e)}))]
+                    (deliver done (record! query outcome (u/since-ms timer))))
+                  (catch Throwable e
+                    (deliver done {:match? false :error :comparison-threw :detail (ex-message e)}))
+                  (finally
+                    (swap! pending disj done))))]
     (swap! pending conj done)
-    (.setDaemon thread true)
-    (.start thread)
-    done))
+    (try
+      (.execute ^ThreadPoolExecutor executor ^Runnable task)
+      done
+      (catch RejectedExecutionException _
+        (swap! pending disj done)
+        (swap! dropped inc)
+        (log/debug "Shadow comparison dropped: the background executor is saturated")
+        nil))))
 
 (defn await-pending!
   "Wait for background comparisons to finish (tests)."

@@ -306,7 +306,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             result.warehouse_sql,
-            r#"SELECT regexp_match("Products"."Title", '^(\w+)')[1] AS "m" FROM "public"."Products" LIMIT 2"#
+            r#"SELECT (regexp_match("Products"."Title", '^(\w+)'))[1] AS "m" FROM "public"."Products" LIMIT 2"#
         );
     }
 

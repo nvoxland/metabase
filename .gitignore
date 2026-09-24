@@ -203,6 +203,8 @@ CLAUDE.local.md
 /resources/python-sources/sqlglot/
 /resources/python-sources/sqlglot-*.dist-info/
 /resources/python-sources/.lock
+# native query engine libraries, built by bin/build or downloaded in CI
+/resources/native/
 __pycache__/
 .mcp.json
 .config/wt.toml

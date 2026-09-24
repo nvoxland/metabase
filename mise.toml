@@ -70,6 +70,9 @@ python = "3.12"
 # Uv - for sqlglot installation
 uv = "0.10.2"
 
+# Rust - for the native query engine in engine/ (the version is also pinned in engine/rust-toolchain.toml)
+rust = "1.98.1"
+
 # =============================================================================
 # Other Tools (quality of life)
 # =============================================================================

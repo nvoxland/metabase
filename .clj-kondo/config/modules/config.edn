@@ -995,7 +995,8 @@
            metabase.engine.init
            metabase.engine.routing
            metabase.engine.shadow}
-   :uses #{lib.metadata
+   :uses #{events
+           lib.metadata
            settings
            util
            util.config

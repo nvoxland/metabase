@@ -3,21 +3,15 @@
   (:require
    [clojure.test :refer :all]
    [metabase.driver :as driver]
-   [metabase.engine.core :as engine]
+   [metabase.engine.test-util :as engine.tu]
    [metabase.lib-be.core :as lib-be]
    [metabase.sync.core :as sync]
-   [metabase.test :as mt]))
-
-(defmacro ^:private with-engine [& body]
-  `(mt/with-temporary-setting-values [~'engine-transport :ffi]
-     (try
-       ~@body
-       (finally
-         (engine/stop!)))))
+   [metabase.test :as mt]
+   [toucan2.core :as t2]))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests describe-through-engine-matches-jdbc-test
   (mt/test-drivers #{:postgres}
-    (with-engine
+    (engine.tu/with-engine
       (let [db (mt/db)]
         (testing "tables"
           ;; the JDBC driver answers with a reducible
@@ -36,7 +30,20 @@
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests sync-routed-database-test
   (mt/test-drivers #{:postgres}
-    (with-engine
-      (mt/with-temporary-setting-values [query-engine :datafusion]
-        (testing "a full sync of a routed database completes through the engine"
-          (is (some? (sync/sync-database! (mt/db) {:scan :schema}))))))))
+    (engine.tu/with-engine
+      (testing "a fresh sync of a routed database through the engine finds the same tables, fields and FKs as JDBC"
+        (let [jdbc-db     (mt/db)
+              table-ids   (t2/select-fn-set :id :model/Table :db_id (:id jdbc-db) :active true)
+              jdbc-counts {:tables (count table-ids)
+                           :fields (t2/count :model/Field :table_id [:in table-ids] :active true)
+                           :fks    (t2/count :model/Field :table_id [:in table-ids] :active true :fk_target_field_id [:not= nil])}]
+          (mt/with-temp [:model/Database db {:engine   :postgres
+                                              :details  (:details jdbc-db)
+                                              :settings {:query-engine "datafusion"}}]
+            (sync/sync-database! db {:scan :schema})
+            (let [table-ids (t2/select-fn-set :id :model/Table :db_id (:id db) :active true)]
+              (is (pos? (:fields jdbc-counts)))
+              (is (= jdbc-counts
+                     {:tables (count table-ids)
+                      :fields (if (seq table-ids) (t2/count :model/Field :table_id [:in table-ids] :active true) 0)
+                      :fks    (if (seq table-ids) (t2/count :model/Field :table_id [:in table-ids] :active true :fk_target_field_id [:not= nil]) 0)})))))))))

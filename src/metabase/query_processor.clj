@@ -10,6 +10,7 @@
   (:refer-clojure :exclude [select-keys])
   (:require
    [medley.core :as m]
+   [metabase.api.common :as api]
    [metabase.driver.util :as driver.u]
    [metabase.engine.routing :as engine.routing]
    [metabase.engine.shadow :as engine.shadow]
@@ -27,6 +28,7 @@
    [metabase.query-processor.reducible :as qp.reducible]
    [metabase.query-processor.schema :as qp.schema]
    [metabase.query-processor.setup :as qp.setup]
+   [metabase.request.core :as request]
    [metabase.tracing.core :as tracing]
    [metabase.util.log :as log]
    [metabase.util.malli :as mu]
@@ -35,10 +37,20 @@
 (declare process-query)
 
 (defn- shadow-rerun
-  "Run `query` again from scratch through one path, on the calling (fresh) thread."
-  [query force-mode]
+  "Run `query` again from scratch through one path, on the calling (fresh) thread, as the user who
+  ran it (so permissions and sandboxing apply) and not as a userland query (so no QueryExecution
+  row is saved for the rerun)."
+  [query user-id force-mode]
   (binding [engine.routing/*force* force-mode]
-    (process-query (dissoc query :info))))
+    (request/with-current-user user-id
+      (process-query (assoc-in query [:middleware :userland-query?] false)))))
+
+(defn- shadow-database
+  "The query's database and a metadata provider for it. Inside an API request the provider is the
+  request's cached one, so this costs no extra app-DB round trip there."
+  [query]
+  (let [mp (lib-be/application-database-metadata-provider (:database query))]
+    [mp (lib.metadata/database mp)]))
 
 (defn- engine-shadow-middleware
   "For databases in `shadow` query-engine mode: answer the query normally, then compare the JDBC
@@ -47,15 +59,15 @@
   (fn [query rff]
     (let [result (qp query rff)]
       (when (and (not= (:type query) :internal)
-                 (integer? (:database query))
-                 (not (:lib/type query)))
-        (let [mp       (lib-be/application-database-metadata-provider (:database query))
-              database (lib.metadata/database mp)]
+                 (integer? (:database query)))
+        (let [[mp database] (shadow-database query)
+              user-id       api/*current-user-id*]
           (when (engine.routing/shadow? query mp database (driver.u/database->driver (:database query)))
             (engine.shadow/run-in-background!
              query
              (fn []
-               (engine.shadow/compare-results (shadow-rerun query :jdbc) (shadow-rerun query :datafusion)))))))
+               (engine.shadow/compare-results (shadow-rerun query user-id :jdbc)
+                                              (shadow-rerun query user-id :datafusion)))))))
       result)))
 
 (def around-middleware

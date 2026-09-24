@@ -150,6 +150,7 @@ backend_sources: &backend_sources
   - "**deps.edn"
   - "enterprise/backend/src/**"
   - "src/**"
+  - "engine/**"
   - "modules/drivers/{*,*/{*,!(test)/**}}"
   - "resources/**"
   # Ratchet files drive project_ratchet_checks alone, so automation PRs that lower budgets

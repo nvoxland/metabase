@@ -6,6 +6,7 @@
    [metabase.engine.core :as engine]
    [metabase.engine.settings :as engine.settings]
    [metabase.engine.shadow :as engine.shadow]
+   [metabase.engine.test-util :as engine.tu]
    [metabase.query-processor :as qp]
    [metabase.test :as mt]
    [metabase.util.log :as log]))
@@ -35,16 +36,9 @@
                                  (every? true? (map same-value? row-a row-b))))
                           expected actual))))
 
-(defmacro ^:private with-engine [& body]
-  `(mt/with-temporary-setting-values [~'engine-transport :ffi]
-     (try
-       ~@body
-       (finally
-         (engine/stop!)))))
-
 (deftest ^:mb/engine-tests ^:mb/driver-tests routed-queries-match-jdbc-test
   (mt/test-drivers #{:postgres}
-    (with-engine
+    (engine.tu/with-engine
       (doseq [[description query]
               [["a plain select with order and limit"
                 (mt/mbql-query venues {:order-by [[:asc $id]] :limit 5})]
@@ -80,7 +74,7 @@
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests routing-binds-the-datafusion-driver-test
   (mt/test-drivers #{:postgres}
-    (with-engine
+    (engine.tu/with-engine
       (mt/with-temporary-setting-values [query-engine :datafusion]
         (is (= 1 (count (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1}))))))
         (is (some #(= (mt/id) (:database_id %)) (:pools (engine/pool-stats)))
@@ -90,13 +84,13 @@
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests native-queries-stay-on-jdbc-test
   (mt/test-drivers #{:postgres}
-    (with-engine
+    (engine.tu/with-engine
       (mt/with-temporary-setting-values [query-engine :datafusion]
         (is (= [[1]] (mt/rows (qp/process-query (mt/native-query {:query "SELECT 1"})))))))))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests unsupported-constructs-are-rejected-test
   (mt/test-drivers #{:postgres}
-    (with-engine
+    (engine.tu/with-engine
       (mt/with-temporary-setting-values [query-engine :datafusion]
         ;; run one routed query so the engine knows the database, then ask it to plan something Postgres can't run
         (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1})))
@@ -140,7 +134,7 @@
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests shadow-mode-test
   (mt/test-drivers #{:postgres}
-    (with-engine
+    (engine.tu/with-engine
       (engine.shadow/clear!)
       (mt/with-temporary-setting-values [query-engine :shadow]
         (testing "the driver answers the query"

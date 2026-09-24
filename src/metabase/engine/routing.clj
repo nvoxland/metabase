@@ -2,6 +2,7 @@
   "Decides whether a query runs through the native query engine. The database keeps its real engine
   (`:postgres`); only the driver the query processor binds for compiling and executing changes."
   (:require
+   [clojure.string :as str]
    [clojure.walk :as walk]
    [metabase.engine.settings :as engine.settings]
    [metabase.lib.metadata :as lib.metadata]
@@ -37,13 +38,34 @@
             (some #(native-card? metadata-provider % (conj seen card-id)) (source-card-ids query)))))))
 
 (defn- native-query?
-  "Whether a legacy or MBQL 5 query has a native stage, directly or through a source card. Native
-  SQL is the warehouse's own dialect, which the engine can't plan, so it stays on the driver."
+  "Whether a legacy or MBQL 5 query has a native stage anywhere (top level, a nested source query,
+  a join's source, or a source card), directly or through a source card. Native SQL is the
+  warehouse's own dialect, which the engine can't plan, so it stays on the driver."
   [query metadata-provider]
   (boolean
    (or (= (keyword (:type query)) :native)
-       (some #(= (:lib/type %) :mbql.stage/native) (:stages query))
+       (some (fn [x]
+               (and (map? x)
+                    (or (contains? x :native)
+                        (= (:lib/type x) :mbql.stage/native))))
+             (tree-seq coll? seq query))
        (some #(native-card? metadata-provider % #{}) (source-card-ids query)))))
+
+(def ^:private unsupported-detail-keys
+  "Connection details the Rust connectors don't implement yet. A database using any of them stays
+  on JDBC; the engine's connector would otherwise silently connect without them."
+  [:ssl-root-cert :ssl-client-cert :ssl-key :ssl-key-password :additional-options])
+
+(defn details-supported?
+  "Whether the engine's connector can honor every part of a database's connection details:
+  no SSH tunnel, no custom certificates, no JDBC-only options."
+  [details]
+  (and (not (:tunnel-enabled details))
+       (not (:ssl-use-client-auth details))
+       (every? (fn [k]
+                 (let [v (get details k)]
+                   (or (nil? v) (and (string? v) (str/blank? v)))))
+               unsupported-detail-keys)))
 
 (defn engine-mode
   "The `query-engine` setting for `database`: `:jdbc`, `:datafusion`, or `:shadow`."
@@ -58,8 +80,9 @@
 
 (defn- routable?
   "Whether `query` against `warehouse-driver` could run through the engine at all."
-  [query metadata-provider warehouse-driver]
+  [query metadata-provider database warehouse-driver]
   (and (contains? engine-warehouses warehouse-driver)
+       (details-supported? (:details database))
        (not (native-query? query metadata-provider))))
 
 (defn shadow?
@@ -68,7 +91,7 @@
   [query metadata-provider database warehouse-driver]
   (and (nil? *force*)
        (= :shadow (engine-mode database))
-       (routable? query metadata-provider warehouse-driver)))
+       (routable? query metadata-provider database warehouse-driver)))
 
 (defn effective-driver
   "The driver to bind for `query`. `candidate` is what the query processor would bind on its own;
@@ -80,7 +103,7 @@
     ;; In shadow mode the driver answers the query; the engine run happens in the background with `*force*` bound.
     (if (and (= candidate warehouse-driver)
              (= mode :datafusion)
-             (routable? query metadata-provider warehouse-driver))
+             (routable? query metadata-provider database warehouse-driver))
       :datafusion
       candidate)))
 
@@ -89,6 +112,7 @@
   engine (not in shadow mode, which keeps the driver as the source of truth), else its own driver."
   [database warehouse-driver]
   (if (and (contains? engine-warehouses warehouse-driver)
+           (details-supported? (:details database))
            (= :datafusion (engine-mode database)))
     :datafusion
     warehouse-driver))

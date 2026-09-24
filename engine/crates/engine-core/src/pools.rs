@@ -1,5 +1,7 @@
-//! Connection pools, one per (database, role, connection details). Details are hashed so a change
-//! in credentials or host produces a new pool and the old one drains.
+//! Connection pools, one per (database, connection details). Details are hashed so a change in
+//! credentials or host produces a new pool and the old one drains. Roles are not part of the key:
+//! the connector sets the role on every checkout and resets it on release, so one pool serves
+//! every impersonated user.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,14 +18,12 @@ use crate::error::{EngineError, ErrorKind, Result};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PoolKey {
     pub database_id: i64,
-    pub role: Option<String>,
     pub details_hash: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PoolStatsEntry {
     pub database_id: i64,
-    pub role: Option<String>,
     pub details_hash: String,
     pub connector: &'static str,
     #[serde(flatten)]
@@ -85,15 +85,13 @@ impl PoolRegistry {
         self.connectors.contains_key(kind)
     }
 
-    /// The pool for a registration and role, created on first use.
+    /// The pool for a registration, created on first use.
     pub async fn pool_for(
         &self,
         registration: &DatabaseRegistration,
-        role: Option<&str>,
     ) -> Result<(Arc<dyn Connector>, Arc<dyn Pool>)> {
         let key = PoolKey {
             database_id: registration.database_id,
-            role: role.map(str::to_string),
             details_hash: details_hash(&registration.details),
         };
         if let Some(entry) = self.pools.get(&key) {
@@ -107,7 +105,11 @@ impl PoolRegistry {
         let pool = connector
             .connect(&registration.details, &registration.pool)
             .await?;
-        tracing::info!(database_id = key.database_id, role = ?key.role, connector = connector.kind(), "opened connection pool");
+        tracing::info!(
+            database_id = key.database_id,
+            connector = connector.kind(),
+            "opened connection pool"
+        );
         self.pools.insert(
             key,
             Arc::new(Entry {
@@ -142,7 +144,6 @@ impl PoolRegistry {
             .filter(|e| database_id.is_none_or(|id| e.key().database_id == id))
             .map(|e| PoolStatsEntry {
                 database_id: e.key().database_id,
-                role: e.key().role.clone(),
                 details_hash: e.key().details_hash.clone(),
                 connector: e.value().connector.kind(),
                 stats: e.value().pool.stats(),
@@ -175,7 +176,7 @@ mod tests {
             pool: Default::default(),
         };
         let err = registry
-            .pool_for(&registration, None)
+            .pool_for(&registration)
             .await
             .err()
             .expect("an error");

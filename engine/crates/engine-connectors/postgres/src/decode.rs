@@ -16,7 +16,7 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Timelike, Utc};
 use engine_core::error::{EngineError, ErrorKind, Result};
-use tokio_postgres::types::Type;
+use tokio_postgres::types::{FromSql, Type};
 use tokio_postgres::Row;
 
 pub const DECIMAL_PRECISION: u8 = 38;
@@ -139,21 +139,10 @@ impl ColumnBuilder {
                 b.append_option(row.try_get::<_, Option<f64>>(index).map_err(err)?)
             }
             ColumnBuilder::Decimal(b) => {
-                let value = row
-                    .try_get::<_, Option<rust_decimal::Decimal>>(index)
-                    .map_err(err)?;
+                let value = row.try_get::<_, Option<PgNumeric>>(index).map_err(err)?;
                 match value {
-                    None => b.append_null(),
-                    Some(mut d) => {
-                        d.rescale(DECIMAL_SCALE as u32);
-                        if d.scale() != DECIMAL_SCALE as u32 {
-                            return Err(EngineError::new(
-                                ErrorKind::Warehouse,
-                                format!("column {column:?}: numeric value {d} does not fit Decimal128(38, 10)"),
-                            ));
-                        }
-                        b.append_value(d.mantissa());
-                    }
+                    None | Some(PgNumeric(None)) => b.append_null(),
+                    Some(PgNumeric(Some(mantissa))) => b.append_value(mantissa),
                 }
             }
             ColumnBuilder::Utf8(b) => {
@@ -296,5 +285,161 @@ impl RowDecoder {
         RecordBatch::try_new(Arc::clone(&self.schema), columns)
             .map(Some)
             .map_err(|e| EngineError::new(ErrorKind::Warehouse, format!("building batch: {e}")))
+    }
+}
+
+/// A Postgres `numeric` read straight from its binary wire format (base-10000 digit groups) into
+/// the mantissa of a `Decimal128(38, 10)`, so values with up to 38 significant digits survive
+/// exactly. `NaN` and the infinities have no Arrow decimal form and become NULL. More than ten
+/// fractional digits are rounded half away from zero.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PgNumeric(pub Option<i128>);
+
+const NUMERIC_NAN: u16 = 0xC000;
+const NUMERIC_PINF: u16 = 0xD000;
+const NUMERIC_NINF: u16 = 0xF000;
+const NUMERIC_NEG: u16 = 0x4000;
+const DECIMAL_MAX: i128 = 100_000_000_000_000_000_000_000_000_000_000_000_000; // 10^38
+
+impl PgNumeric {
+    fn parse(raw: &[u8]) -> std::result::Result<PgNumeric, String> {
+        if raw.len() < 8 {
+            return Err("numeric: truncated header".into());
+        }
+        let ndigits = u16::from_be_bytes([raw[0], raw[1]]) as usize;
+        let weight = i16::from_be_bytes([raw[2], raw[3]]) as i32;
+        let sign = u16::from_be_bytes([raw[4], raw[5]]);
+        if matches!(sign, NUMERIC_NAN | NUMERIC_PINF | NUMERIC_NINF) {
+            return Ok(PgNumeric(None));
+        }
+        if raw.len() < 8 + 2 * ndigits {
+            return Err("numeric: truncated digits".into());
+        }
+        let scale = DECIMAL_SCALE as i32;
+        let mut mantissa: i128 = 0;
+        for i in 0..ndigits {
+            let group = u16::from_be_bytes([raw[8 + 2 * i], raw[9 + 2 * i]]) as i128;
+            // this group's units digit sits at 10^(4 * (weight - i)); the mantissa carries 10^scale
+            let exponent = 4 * (weight - i as i32) + scale;
+            let contribution = if exponent >= 0 {
+                10i128
+                    .checked_pow(exponent as u32)
+                    .and_then(|scale| group.checked_mul(scale))
+                    .ok_or_else(|| "numeric: value does not fit Decimal128(38, 10)".to_string())?
+            } else {
+                // below the tenth fractional digit: round this group, drop the rest
+                let divisor = 10i128.pow((-exponent) as u32);
+                let (q, r) = (group / divisor, group % divisor);
+                if r * 2 >= divisor {
+                    q + 1
+                } else {
+                    q
+                }
+            };
+            mantissa = mantissa
+                .checked_add(contribution)
+                .ok_or_else(|| "numeric: value does not fit Decimal128(38, 10)".to_string())?;
+            if exponent < 0 {
+                break;
+            }
+        }
+        if mantissa >= DECIMAL_MAX {
+            return Err("numeric: value does not fit Decimal128(38, 10)".into());
+        }
+        Ok(PgNumeric(Some(if sign == NUMERIC_NEG {
+            -mantissa
+        } else {
+            mantissa
+        })))
+    }
+}
+
+impl<'a> FromSql<'a> for PgNumeric {
+    fn from_sql(
+        _ty: &Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        PgNumeric::parse(raw).map_err(Into::into)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::NUMERIC
+    }
+}
+
+#[cfg(test)]
+mod numeric_tests {
+    use super::*;
+
+    fn wire(weight: i16, sign: u16, dscale: u16, groups: &[u16]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend((groups.len() as u16).to_be_bytes());
+        out.extend(weight.to_be_bytes());
+        out.extend(sign.to_be_bytes());
+        out.extend(dscale.to_be_bytes());
+        for g in groups {
+            out.extend(g.to_be_bytes());
+        }
+        out
+    }
+
+    #[test]
+    fn decodes_integers_fractions_and_signs() {
+        // 1.5 = groups [1, 5000], weight 0
+        assert_eq!(
+            PgNumeric::parse(&wire(0, 0, 1, &[1, 5000])).unwrap(),
+            PgNumeric(Some(15_000_000_000))
+        );
+        // -12345.6789 = groups [1, 2345, 6789], weight 1
+        assert_eq!(
+            PgNumeric::parse(&wire(1, NUMERIC_NEG, 4, &[1, 2345, 6789])).unwrap(),
+            PgNumeric(Some(-123_456_789_000_000))
+        );
+        // 0.0001 = groups [1], weight -1
+        assert_eq!(
+            PgNumeric::parse(&wire(-1, 0, 4, &[1])).unwrap(),
+            PgNumeric(Some(1_000_000))
+        );
+        // zero has no groups
+        assert_eq!(
+            PgNumeric::parse(&wire(0, 0, 0, &[])).unwrap(),
+            PgNumeric(Some(0))
+        );
+    }
+
+    #[test]
+    fn keeps_more_digits_than_rust_decimal_could() {
+        // 10^27 = group [1000] at weight 6 (10000^6 = 10^24): 37 digits once scaled by 10^10
+        assert_eq!(
+            PgNumeric::parse(&wire(6, 0, 0, &[1000])).unwrap(),
+            PgNumeric(Some(10i128.pow(37)))
+        );
+    }
+
+    #[test]
+    fn rounds_past_the_tenth_fractional_digit() {
+        // weight -1: groups are 10^-4, 10^-8, 10^-12 units; [0, 0, 50] = 5e-11 rounds up to 1e-10
+        assert_eq!(
+            PgNumeric::parse(&wire(-1, 0, 11, &[0, 0, 50])).unwrap(),
+            PgNumeric(Some(1))
+        );
+        assert_eq!(
+            PgNumeric::parse(&wire(-1, 0, 11, &[0, 0, 49])).unwrap(),
+            PgNumeric(Some(0))
+        );
+        // and 5e-9 keeps its two significant units at scale 10
+        assert_eq!(
+            PgNumeric::parse(&wire(-1, 0, 9, &[0, 0, 5000])).unwrap(),
+            PgNumeric(Some(50))
+        );
+    }
+
+    #[test]
+    fn nan_and_overflow() {
+        assert_eq!(
+            PgNumeric::parse(&wire(0, NUMERIC_NAN, 0, &[])).unwrap(),
+            PgNumeric(None)
+        );
+        assert!(PgNumeric::parse(&wire(10, 0, 0, &[1])).is_err()); // 10^40
     }
 }
