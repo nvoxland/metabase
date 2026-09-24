@@ -11,6 +11,8 @@ workspace = true
 [dependencies]
 engine-core = { path = "../engine-core" }
 engine-connector-postgres = { path = "../engine-connectors/postgres" }
+engine-connector-mysql = { path = "../engine-connectors/mysql" }
+mysql_async.workspace = true
 arrow.workspace = true
 async-trait.workspace = true
 csv.workspace = true

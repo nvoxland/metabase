@@ -31,13 +31,14 @@
 
 (defn- db-type->arrow-type
   "A more precise Arrow type from the warehouse's own type name, when the name is unambiguous.
-  Keeps int4 columns as Int32 and real columns as Float32, the way JDBC returns them."
+  Keeps int4 columns as Int32 and real columns as Float32, the way JDBC returns them. Covers the
+  Postgres and MySQL spellings (MySQL's `tinyint(1)` is synced as `BIT`, a boolean)."
   [database-type]
   (case (some-> database-type u/lower-case-en)
-    ("int2" "smallint" "smallserial")                     "Int16"
-    ("int4" "integer" "int" "serial")                     "Int32"
+    ("int2" "smallint" "smallserial" "tinyint")           "Int16"
+    ("int4" "integer" "int" "serial" "mediumint" "year")  "Int32"
     ("int8" "bigint" "bigserial")                         "Int64"
-    ("float4" "real")                                     "Float32"
+    ("float4" "real" "float")                             "Float32"
     ("float8" "double precision" "double")                "Float64"
     nil))
 
@@ -60,7 +61,9 @@
     {:database_id     (:id database)
      :catalog_version (catalog-version tables fields)
      :connector       (name (:engine database))
-     :default_schema  (some :schema tables)
+     ;; a warehouse without schemas (MySQL) resolves bare table names in the database the details name
+     :default_schema  (or (some :schema tables)
+                          (some-> database :details ((some-fn :dbname :db))))
      :tables          (for [table tables]
                         {:schema  (:schema table)
                          :name    (:name table)

@@ -11,26 +11,27 @@
    [toucan2.core :as t2]))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests describe-through-engine-matches-jdbc-test
-  (mt/test-drivers #{:postgres}
+  (mt/test-drivers #{:postgres :mysql}
     (engine.tu/with-engine
-      (let [db (mt/db)]
+      (let [db        (mt/db)
+            warehouse driver/*driver*]
         (testing "tables"
           ;; the JDBC driver answers with a reducible
-          (is (= (into #{} (:tables (driver/describe-database :postgres db)))
+          (is (= (into #{} (:tables (driver/describe-database warehouse db)))
                  (into #{} (:tables (driver/describe-database :datafusion db))))))
         (testing "fields of one table"
-          (is (= (set (driver/describe-fields :postgres db :table-names ["venues"] :schema-names ["public"]))
-                 (set (driver/describe-fields :datafusion db :table-names ["venues"] :schema-names ["public"])))))
+          (is (= (set (driver/describe-fields warehouse db :table-names ["venues"]))
+                 (set (driver/describe-fields :datafusion db :table-names ["venues"])))))
         (testing "foreign keys"
           (let [metadata-db (lib-be/instance->metadata db :metadata/database)]
-            (is (= (set (driver/describe-fks :postgres metadata-db))
+            (is (= (set (driver/describe-fks warehouse metadata-db))
                    (set (driver/describe-fks :datafusion metadata-db))))))
         (testing "version"
-          (is (= (:version (driver/dbms-version :postgres db))
-                 (:version (driver/dbms-version :datafusion db)))))))))
+          (is (= (select-keys (driver/dbms-version warehouse db) [:flavor :semantic-version])
+                 (select-keys (driver/dbms-version :datafusion db) [:flavor :semantic-version]))))))))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests sync-routed-database-test
-  (mt/test-drivers #{:postgres}
+  (mt/test-drivers #{:postgres :mysql}
     (engine.tu/with-engine
       (testing "a fresh sync of a routed database through the engine finds the same tables, fields and FKs as JDBC"
         (let [jdbc-db     (mt/db)
@@ -39,7 +40,7 @@
                            :fields  (t2/count :model/Field :table_id [:in table-ids] :active true)
                            :fks     (t2/count :model/Field :table_id [:in table-ids] :active true :fk_target_field_id [:not= nil])
                            :indexed (t2/count :model/Field :table_id [:in table-ids] :active true :database_indexed true)}]
-          (mt/with-temp [:model/Database db {:engine   :postgres
+          (mt/with-temp [:model/Database db {:engine   driver/*driver*
                                               :details  (:details jdbc-db)
                                               :settings {:query-engine "datafusion"}}]
             (sync/sync-database! db {:scan :schema})

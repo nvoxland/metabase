@@ -104,9 +104,14 @@ async fn types_come_back_as_arrow() {
     assert_eq!(display(batch.column(0), 0), "1");
     assert_eq!(batch.column(3).as_string::<i32>().value(0), "x");
     assert!(batch.column(8).is_null(0));
-    // FROM_UNIXTIME is shown in the session zone (Los Angeles): 1970-01-01 16:00 as a DATETIME
+    // FROM_UNIXTIME is shown in the session zone (Los Angeles, 1970-01-01 16:00) and typed
+    // TIMESTAMP, which decodes back to the instant
+    assert_eq!(
+        schema.field(9).data_type(),
+        &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+    );
     let epoch = batch.column(9).as_primitive::<TimestampMicrosecondType>();
-    assert_eq!(epoch.value(0), 16 * 3_600_000_000);
+    assert_eq!(epoch.value(0), 86_400_000_000);
 }
 
 #[tokio::test]

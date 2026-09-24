@@ -1,6 +1,6 @@
 (ns metabase.engine.execute-test
-  "MBQL questions routed through the native query engine against a real Postgres, compared with the
-  JDBC path. Needs the engine library built and the Postgres test dataset (`DRIVERS=postgres`)."
+  "MBQL questions routed through the native query engine against a real Postgres or MySQL, compared
+  with the JDBC path. Needs the engine library built and the test datasets (`DRIVERS=postgres,mysql`)."
   (:require
    [clojure.test :refer :all]
    [metabase.driver.datafusion]
@@ -26,10 +26,11 @@
 
 (defn- same-value?
   "Equality that ignores the numeric representation: the engine types `AVG` as a double where
-  Postgres returns a numeric, and both are the same answer."
+  Postgres returns a numeric, and both are the same answer. MySQL rounds a decimal average to four
+  places on the JDBC path where the engine keeps the double, so numbers compare to that precision."
   [a b]
   (if (and (number? a) (number? b))
-    (== (double a) (double b))
+    (< (abs (- (double a) (double b))) 1e-4)
     (= a b)))
 
 (defn- same-rows? [expected actual]
@@ -40,7 +41,7 @@
                           expected actual))))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests routed-queries-match-jdbc-test
-  (mt/test-drivers #{:postgres}
+  (mt/test-drivers #{:postgres :mysql}
     (engine.tu/with-engine
       (doseq [[description query]
               [["a plain select with order and limit"
@@ -76,7 +77,7 @@
                 (str "expected " (pr-str (take 3 expected)) " got " (pr-str (take 3 actual))))))))))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests routing-binds-the-datafusion-driver-test
-  (mt/test-drivers #{:postgres}
+  (mt/test-drivers #{:postgres :mysql}
     (engine.tu/with-engine
       (engine.tu/with-query-engine :datafusion
         (is (= 1 (count (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1}))))))
@@ -86,13 +87,13 @@
         (is (= 1 (count (mt/rows (qp/process-query (mt/mbql-query venues {:limit 1}))))))))))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests native-queries-stay-on-jdbc-test
-  (mt/test-drivers #{:postgres}
+  (mt/test-drivers #{:postgres :mysql}
     (engine.tu/with-engine
       (mt/with-temporary-setting-values [query-engine :datafusion]
         (is (= [[1]] (mt/rows (qp/process-query (mt/native-query {:query "SELECT 1"})))))))))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests unsupported-constructs-are-rejected-test
-  (mt/test-drivers #{:postgres}
+  (mt/test-drivers #{:postgres :mysql}
     (engine.tu/with-engine
       (engine.tu/with-query-engine :datafusion
         ;; give the engine the database's catalog, then ask it to plan something Postgres can't run

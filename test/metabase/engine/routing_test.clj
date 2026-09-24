@@ -23,7 +23,9 @@
     (is (false? (engine.routing/details-supported? {:host "localhost" :tunnel-enabled true})))
     (is (false? (engine.routing/details-supported? {:host "localhost" :ssl-root-cert {:source "uploaded" :value "..."}})))
     (is (false? (engine.routing/details-supported? {:host "localhost" :ssl-use-client-auth true})))
-    (is (false? (engine.routing/details-supported? {:host "localhost" :additional-options "prepareThreshold=0"})))))
+    (is (false? (engine.routing/details-supported? {:host "localhost" :additional-options "prepareThreshold=0"})))
+    (is (false? (engine.routing/details-supported? {:host "localhost" :ssl true :ssl-cert "-----BEGIN CERTIFICATE-----"})))
+    (is (false? (engine.routing/details-supported? {:host "localhost" :use-auth-provider true :auth-provider "aws-iam"})))))
 
 (deftest ^:parallel nested-field-column-detection-test
   (let [mp (lib.tu/mock-metadata-provider

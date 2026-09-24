@@ -92,6 +92,22 @@ impl DialectPolicy {
         self.warehouse != Warehouse::MySql
     }
 
+    /// `GROUP BY GROUPING SETS / CUBE / ROLLUP (...)` (MySQL has only `WITH ROLLUP`).
+    pub fn supports_grouping_sets(&self) -> bool {
+        self.warehouse != Warehouse::MySql
+    }
+
+    /// Aggregate functions the warehouse knows under another name than DataFusion's, or whose
+    /// DataFusion name means something else there: `(datafusion name, warehouse name)`.
+    pub fn aggregate_renames(&self) -> &'static [(&'static str, &'static str)] {
+        match self.warehouse {
+            // Postgres has `var_samp`, not `var`
+            Warehouse::Postgres => &[("var", "var_samp")],
+            // MySQL's `STDDEV` is the population one
+            Warehouse::MySql => &[("stddev", "stddev_samp"), ("var", "var_samp")],
+        }
+    }
+
     pub fn warehouse(&self) -> Warehouse {
         self.warehouse
     }

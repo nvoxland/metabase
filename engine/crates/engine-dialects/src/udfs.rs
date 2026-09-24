@@ -6,9 +6,10 @@ use std::sync::Arc;
 
 use datafusion::arrow::datatypes::{DataType, Field, FieldRef, TimeUnit};
 use datafusion::common::{not_impl_err, plan_err, Result, ScalarValue};
+use datafusion::logical_expr::function::AccumulatorArgs;
 use datafusion::logical_expr::{
-    ColumnarValue, ReturnFieldArgs, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature,
-    Volatility,
+    Accumulator, AggregateUDF, AggregateUDFImpl, ColumnarValue, ReturnFieldArgs,
+    ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
 };
 
 /// `mb_cast(x, 'TYPE')`: a cast the plan names differently from its argument. DataFusion gives
@@ -197,6 +198,53 @@ impl ScalarUDFImpl for MbTimeZoneDirection {
             self.name
         )
     }
+}
+
+/// An aggregate function under the name a dialect knows it by. DataFusion calls its sample
+/// standard deviation `stddev` and its sample variance `var`; MySQL's `STDDEV` is the population
+/// one and it has no `VAR`, Postgres has no `var`. The planner swaps the function for this
+/// wrapper, which is never executed either.
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct RenamedAggregate {
+    inner: Arc<AggregateUDF>,
+    name: String,
+}
+
+impl AggregateUDFImpl for RenamedAggregate {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        self.inner.signature()
+    }
+
+    fn return_type(&self, arg_types: &[DataType]) -> Result<DataType> {
+        self.inner.return_type(arg_types)
+    }
+
+    fn is_nullable(&self) -> bool {
+        self.inner.is_nullable()
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        self.inner.coerce_types(arg_types)
+    }
+
+    fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
+        not_impl_err!(
+            "{} is unparsed for the warehouse, never executed by the engine",
+            self.name
+        )
+    }
+}
+
+/// `inner` under `name`.
+pub fn renamed_aggregate(inner: Arc<AggregateUDF>, name: &str) -> Arc<AggregateUDF> {
+    Arc::new(AggregateUDF::new_from_impl(RenamedAggregate {
+        inner,
+        name: name.to_string(),
+    }))
 }
 
 /// Every engine UDF, for registration in a session.

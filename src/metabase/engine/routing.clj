@@ -12,8 +12,9 @@
 (def ^:private dialect-warehouses
   "Warehouses the engine has a dialect for. A warehouse needs one whether it is reached through a
   Rust connector or the JDBC bridge; `engine-bridge-warehouses` only changes how one of these is
-  reached, it can't add a warehouse the engine can't unparse for."
-  #{:postgres})
+  reached, it can't add a warehouse the engine can't unparse for. `:mysql` covers MariaDB, which
+  Metabase reaches through the same driver."
+  #{:postgres :mysql})
 
 (defn engine-warehouses
   "Warehouses the engine can run queries against."
@@ -100,7 +101,7 @@
 (def ^:private unsupported-detail-keys
   "Connection details the Rust connectors don't implement yet. A database using any of them stays
   on JDBC; the engine's connector would otherwise silently connect without them."
-  [:ssl-root-cert :ssl-client-cert :ssl-key :ssl-key-password :additional-options])
+  [:ssl-root-cert :ssl-client-cert :ssl-key :ssl-key-password :ssl-cert :additional-options :auth-provider])
 
 (defn details-supported?
   "Whether the engine's connector can honor every part of a database's connection details:
@@ -108,6 +109,7 @@
   [details]
   (and (not (:tunnel-enabled details))
        (not (:ssl-use-client-auth details))
+       (not (:use-auth-provider details))
        (every? (fn [k]
                  (let [v (get details k)]
                    (or (nil? v) (and (string? v) (str/blank? v)))))

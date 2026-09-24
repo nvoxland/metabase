@@ -37,13 +37,21 @@ pub struct ColumnDef {
     pub arrow: DataType,
     /// The Postgres column type.
     pub postgres: &'static str,
+    /// The MySQL column type.
+    pub mysql: &'static str,
 }
 
-fn col(name: &'static str, arrow: DataType, postgres: &'static str) -> ColumnDef {
+fn col(
+    name: &'static str,
+    arrow: DataType,
+    postgres: &'static str,
+    mysql: &'static str,
+) -> ColumnDef {
     ColumnDef {
         name,
         arrow,
         postgres,
+        mysql,
     }
 }
 
@@ -54,25 +62,35 @@ pub fn dataset() -> Vec<TableDef> {
         TableDef {
             name: "products",
             columns: vec![
-                col("id", DataType::Int64, "bigint"),
-                col("title", DataType::Utf8, "text"),
-                col("category", DataType::Utf8, "text"),
-                col("price", DataType::Decimal128(10, 2), "numeric(10, 2)"),
-                col("rating", DataType::Float64, "double precision"),
-                col("active", DataType::Boolean, "boolean"),
-                col("created_at", ts.clone(), "timestamptz"),
+                col("id", DataType::Int64, "bigint", "bigint"),
+                col("title", DataType::Utf8, "text", "text"),
+                col("category", DataType::Utf8, "text", "text"),
+                col(
+                    "price",
+                    DataType::Decimal128(10, 2),
+                    "numeric(10, 2)",
+                    "decimal(10, 2)",
+                ),
+                col("rating", DataType::Float64, "double precision", "double"),
+                col("active", DataType::Boolean, "boolean", "boolean"),
+                col("created_at", ts.clone(), "timestamptz", "timestamp(6) null"),
             ],
         },
         TableDef {
             name: "orders",
             columns: vec![
-                col("id", DataType::Int64, "bigint"),
-                col("product_id", DataType::Int64, "bigint"),
-                col("quantity", DataType::Int64, "bigint"),
-                col("total", DataType::Decimal128(10, 2), "numeric(10, 2)"),
-                col("note", DataType::Utf8, "text"),
-                col("ordered_on", DataType::Date32, "date"),
-                col("created_at", ts, "timestamptz"),
+                col("id", DataType::Int64, "bigint", "bigint"),
+                col("product_id", DataType::Int64, "bigint", "bigint"),
+                col("quantity", DataType::Int64, "bigint", "bigint"),
+                col(
+                    "total",
+                    DataType::Decimal128(10, 2),
+                    "numeric(10, 2)",
+                    "decimal(10, 2)",
+                ),
+                col("note", DataType::Utf8, "text", "text"),
+                col("ordered_on", DataType::Date32, "date", "date"),
+                col("created_at", ts, "timestamptz", "timestamp(6) null"),
             ],
         },
     ]
@@ -215,12 +233,13 @@ impl AsyncDB for DataFusionDb {
 
 // ------------------------------------------------------------------ the candidate
 
-/// The engine planning and unparsing for Postgres, and Postgres executing.
+/// The engine planning and unparsing for a warehouse, and that warehouse executing.
 pub struct EngineDb {
     /// `None` once shut down. The engine owns a tokio runtime, which must be dropped off any
     /// runtime thread; `shutdown` and `Drop` move it to a blocking thread.
     engine: Option<Arc<Engine>>,
     session: u64,
+    candidate: Candidate,
 }
 
 impl Drop for EngineDb {
@@ -236,30 +255,73 @@ fn arrow_type_name(t: &DataType) -> String {
     format!("{t:?}")
 }
 
-fn postgres_type_name(pg: &str) -> String {
-    pg.split('(').next().unwrap_or(pg).trim().to_string()
+fn warehouse_type_name(declared: &str) -> String {
+    declared
+        .split('(')
+        .next()
+        .unwrap_or(declared)
+        .trim()
+        .to_string()
+}
+
+/// A warehouse the harness can run the engine against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Candidate {
+    Postgres,
+    MySql,
+}
+
+impl Candidate {
+    /// The engine's connector kind (and catalog connector name).
+    pub fn connector(self) -> &'static str {
+        match self {
+            Candidate::Postgres => "postgres",
+            Candidate::MySql => "mysql",
+        }
+    }
+
+    /// The sqllogictest engine name, for `skipif` / `onlyif` in the files.
+    pub fn engine_name(self) -> &'static str {
+        match self {
+            Candidate::Postgres => "engine+postgres",
+            Candidate::MySql => "engine+mysql",
+        }
+    }
+
+    fn column_type(self, column: &ColumnDef) -> &'static str {
+        match self {
+            Candidate::Postgres => column.postgres,
+            Candidate::MySql => column.mysql,
+        }
+    }
 }
 
 impl EngineDb {
-    /// Start an engine over `postgres_details` (the connector's JSON details) with the dataset's
-    /// catalog registered. Runs off the caller's runtime: the engine owns a runtime of its own
-    /// and blocks the calling thread, as it does under the JVM.
-    pub async fn connect(postgres_details: serde_json::Value) -> Result<EngineDb, HarnessError> {
-        tokio::task::spawn_blocking(move || EngineDb::new(postgres_details))
+    /// Start an engine over `details` (the connector's JSON details) for `candidate` with the
+    /// dataset's catalog registered. Runs off the caller's runtime: the engine owns a runtime of
+    /// its own and blocks the calling thread, as it does under the JVM.
+    pub async fn connect(
+        candidate: Candidate,
+        details: serde_json::Value,
+    ) -> Result<EngineDb, HarnessError> {
+        tokio::task::spawn_blocking(move || EngineDb::new(candidate, details))
             .await
             .map_err(|e| HarnessError(e.to_string()))?
     }
 
     /// Synchronous construction; must not run on a tokio worker thread (see `connect`).
-    pub fn new(postgres_details: serde_json::Value) -> Result<EngineDb, HarnessError> {
+    pub fn new(candidate: Candidate, details: serde_json::Value) -> Result<EngineDb, HarnessError> {
         let engine = Engine::with_connectors(
             EngineConfig::default(),
-            vec![Arc::new(engine_connector_postgres::PostgresConnector)],
+            vec![
+                Arc::new(engine_connector_postgres::PostgresConnector),
+                Arc::new(engine_connector_mysql::MySqlConnector),
+            ],
         )?;
         let snapshot = CatalogSnapshot {
             database_id: 1,
             catalog_version: "slt".into(),
-            connector: "postgres".into(),
+            connector: candidate.connector().into(),
             default_schema: Some(SCHEMA.into()),
             tables: dataset()
                 .iter()
@@ -273,7 +335,7 @@ impl EngineDb {
                             name: c.name.into(),
                             arrow_type: arrow_type_name(&c.arrow),
                             nullable: true,
-                            db_type: Some(postgres_type_name(c.postgres)),
+                            db_type: Some(warehouse_type_name(candidate.column_type(c))),
                         })
                         .collect(),
                 })
@@ -283,8 +345,8 @@ impl EngineDb {
         expect_ok(engine.handle(Request::RegisterDatabase {
             registration: DatabaseRegistration {
                 database_id: 1,
-                connector: "postgres".into(),
-                details: postgres_details,
+                connector: candidate.connector().into(),
+                details,
                 pool: PoolConfig::default(),
             },
         }))?;
@@ -295,10 +357,11 @@ impl EngineDb {
         Ok(EngineDb {
             engine: Some(engine),
             session,
+            candidate,
         })
     }
 
-    /// The Postgres SQL the engine would send for `sql`, for diagnosing a difference.
+    /// The warehouse SQL the engine would send for `sql`, for diagnosing a difference.
     pub fn unparse(&self, sql: &str) -> Result<String, HarnessError> {
         let response = self.engine()?.handle(Request::PlanAndUnparse {
             session_id: self.session,
@@ -361,7 +424,7 @@ impl AsyncDB for EngineDb {
     }
 
     fn engine_name(&self) -> &str {
-        "engine+postgres"
+        self.candidate.engine_name()
     }
 }
 
@@ -394,23 +457,7 @@ pub async fn load_postgres(config: &tokio_postgres::Config) -> Result<(), Harnes
             ))
             .await
             .map_err(|e| HarnessError(e.to_string()))?;
-        let path = slt_dir().join("data").join(format!("{}.csv", table.name));
-        let mut reader = csv::Reader::from_path(&path).map_err(|e| HarnessError(e.to_string()))?;
-        let mut rows = Vec::new();
-        for record in reader.records() {
-            let record = record.map_err(|e| HarnessError(e.to_string()))?;
-            let values: Vec<String> = record
-                .iter()
-                .map(|v| {
-                    if v.is_empty() {
-                        "NULL".to_string()
-                    } else {
-                        format!("'{}'", v.replace('\'', "''"))
-                    }
-                })
-                .collect();
-            rows.push(format!("({})", values.join(", ")));
-        }
+        let rows = csv_rows(&table, Candidate::Postgres)?;
         if !rows.is_empty() {
             client
                 .batch_execute(&format!(
@@ -425,7 +472,110 @@ pub async fn load_postgres(config: &tokio_postgres::Config) -> Result<(), Harnes
     Ok(())
 }
 
-/// Whether a missing Postgres is a failure rather than a skip (`MB_ENGINE_TESTS_REQUIRED`, as the
+/// The CSV rows of a table as SQL value tuples for `candidate`'s literal syntax.
+fn csv_rows(table: &TableDef, candidate: Candidate) -> Result<Vec<String>, HarnessError> {
+    let path = slt_dir().join("data").join(format!("{}.csv", table.name));
+    let mut reader = csv::Reader::from_path(&path).map_err(|e| HarnessError(e.to_string()))?;
+    let mut rows = Vec::new();
+    for record in reader.records() {
+        let record = record.map_err(|e| HarnessError(e.to_string()))?;
+        let values: Vec<String> = record
+            .iter()
+            .zip(&table.columns)
+            .map(|(v, column)| {
+                if v.is_empty() {
+                    return "NULL".to_string();
+                }
+                match (candidate, &column.arrow) {
+                    // MySQL's strict mode takes neither `true` nor a trailing `Z`
+                    (Candidate::MySql, DataType::Boolean) => {
+                        (if v == "true" { "1" } else { "0" }).to_string()
+                    }
+                    (Candidate::MySql, DataType::Timestamp(..)) => {
+                        format!("'{}'", v.trim_end_matches('Z').replace('T', " "))
+                    }
+                    _ => format!("'{}'", v.replace('\'', "''")),
+                }
+            })
+            .collect();
+        rows.push(format!("({})", values.join(", ")));
+    }
+    Ok(rows)
+}
+
+/// Create the dataset's tables in the `slt` database of the MySQL server (next to the one the
+/// details name) and load the CSVs. Timestamps are loaded in UTC.
+pub async fn load_mysql(details: &serde_json::Value) -> Result<(), HarnessError> {
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(details["host"].as_str().unwrap_or("localhost"))
+        .tcp_port(details["port"].as_u64().unwrap_or(3306) as u16)
+        .db_name(details["dbname"].as_str().map(str::to_string))
+        .user(details["user"].as_str().map(str::to_string))
+        .pass(details["password"].as_str().map(str::to_string));
+    let mut conn = mysql_async::Conn::new(opts)
+        .await
+        .map_err(|e| HarnessError(e.to_string()))?;
+    async fn run(conn: &mut mysql_async::Conn, sql: String) -> Result<(), HarnessError> {
+        use mysql_async::prelude::Queryable;
+        conn.query_drop(sql)
+            .await
+            .map_err(|e| HarnessError(e.to_string()))
+    }
+    run(&mut conn, "SET SESSION time_zone = '+00:00'".into()).await?;
+    run(
+        &mut conn,
+        format!("CREATE DATABASE IF NOT EXISTS `{SCHEMA}`"),
+    )
+    .await?;
+    for table in dataset() {
+        let columns: Vec<String> = table
+            .columns
+            .iter()
+            .map(|c| format!("`{}` {}", c.name, c.mysql))
+            .collect();
+        run(
+            &mut conn,
+            format!("DROP TABLE IF EXISTS `{SCHEMA}`.`{}`", table.name),
+        )
+        .await?;
+        run(
+            &mut conn,
+            format!(
+                "CREATE TABLE `{SCHEMA}`.`{}` ({})",
+                table.name,
+                columns.join(", ")
+            ),
+        )
+        .await?;
+        let rows = csv_rows(&table, Candidate::MySql)?;
+        if !rows.is_empty() {
+            run(
+                &mut conn,
+                format!(
+                    "INSERT INTO `{SCHEMA}`.`{}` VALUES {}",
+                    table.name,
+                    rows.join(", ")
+                ),
+            )
+            .await?;
+        }
+    }
+    conn.disconnect()
+        .await
+        .map_err(|e| HarnessError(e.to_string()))?;
+    Ok(())
+}
+
+/// The MySQL (or MariaDB) to run against: `ENGINE_TEST_MYSQL_DETAILS`, else the local development
+/// server (`localhost:3306`, database `lakes`, root, no password).
+pub fn mysql_details() -> serde_json::Value {
+    if let Ok(json) = std::env::var("ENGINE_TEST_MYSQL_DETAILS") {
+        return serde_json::from_str(&json).expect("ENGINE_TEST_MYSQL_DETAILS is JSON");
+    }
+    serde_json::json!({"host": "localhost", "port": 3306, "dbname": "lakes", "user": "root", "password": "", "ssl": false})
+}
+
+/// Whether a missing warehouse is a failure rather than a skip (`MB_ENGINE_TESTS_REQUIRED`, as the
 /// Clojure engine tests use).
 pub fn postgres_required() -> bool {
     std::env::var("MB_ENGINE_TESTS_REQUIRED").is_ok_and(|v| v == "true")

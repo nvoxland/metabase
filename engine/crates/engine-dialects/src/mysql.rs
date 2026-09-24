@@ -355,6 +355,36 @@ impl Dialect for MetabaseMySqlDialect {
             "trunc" if args.len() == 1 => Ok(Some(call("TRUNCATE", vec![sql(0)?, number(0)]))),
             "trunc" if args.len() == 2 => Ok(Some(call("TRUNCATE", vec![sql(0)?, sql(1)?]))),
             "random" => Ok(Some(call("RAND", vec![]))),
+            // DataFusion names `trim` `btrim`, and takes the characters as a second argument
+            "btrim" | "trim" | "ltrim" | "rtrim" if !args.is_empty() && args.len() <= 2 => {
+                let trim_where = match func_name {
+                    "ltrim" => ast::TrimWhereField::Leading,
+                    "rtrim" => ast::TrimWhereField::Trailing,
+                    _ => ast::TrimWhereField::Both,
+                };
+                Ok(Some(ast::Expr::Trim {
+                    expr: Box::new(sql(0)?),
+                    trim_where: if args.len() == 2 {
+                        Some(trim_where)
+                    } else {
+                        None
+                    },
+                    trim_what: if args.len() == 2 {
+                        Some(Box::new(sql(1)?))
+                    } else {
+                        None
+                    },
+                    trim_characters: None,
+                }))
+            }
+            // DataFusion's concat skips NULL arguments; MySQL's CONCAT returns NULL for them
+            "concat" => {
+                let mut sql_args = vec![string_literal("")];
+                for arg in args {
+                    sql_args.push(unparser.expr_to_sql(arg)?);
+                }
+                Ok(Some(call("CONCAT_WS", sql_args)))
+            }
             "regexp_like" if args.len() == 2 || args.len() == 3 => {
                 Ok(Some(ast::Expr::Nested(Box::new(ast::Expr::RLike {
                     negated: false,

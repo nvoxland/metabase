@@ -43,10 +43,25 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      mariadb:
+        image: mariadb:11
+        ports:
+          - "3306:3306"
+        env:
+          MARIADB_ROOT_PASSWORD: password
+          MARIADB_DATABASE: lakes
+          # named time zones for CONVERT_TZ and the session zone
+          MARIADB_MYSQL_LOCALHOST_USER: '1'
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
-      # The live connector tests and the sqllogictest harness (engine-slt) run against this server;
-      # locally they skip when it is unreachable, here that is a failure.
+      # The live connector tests and the sqllogictest harness (engine-slt) run against these servers;
+      # locally they skip when one is unreachable, here that is a failure.
       ENGINE_TEST_POSTGRES_DETAILS: '{"host":"localhost","port":5432,"dbname":"metabase_1","user":"metabase","password":"password","ssl":false}'
+      ENGINE_TEST_MYSQL_DETAILS: '{"host":"127.0.0.1","port":3306,"dbname":"lakes","user":"root","password":"password","ssl":false}'
       MB_ENGINE_TESTS_REQUIRED: 'true'
     steps:
       - uses: actions/checkout@v6
@@ -64,6 +79,11 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Build the shared library
         run: cargo build --workspace
+      - name: Load the MariaDB time zone tables
+        # the connector sets the session zone by name and renders CONVERT_TZ with names
+        run: >-
+          docker exec $(docker ps -q --filter ancestor=mariadb:11)
+          sh -c "mariadb-tzinfo-to-sql /usr/share/zoneinfo | mariadb -uroot -ppassword mysql"
       - name: Test
         run: cargo test --workspace
       - name: Only mb_engine_ symbols are exported
@@ -92,11 +112,26 @@ jobs:
           POSTGRES_PASSWORD: password
           POSTGRES_DB: metabase_1
           POSTGRES_HOST_AUTH_METHOD: trust
+      mariadb:
+        image: mariadb:11
+        ports:
+          - "3306:3306"
+        env:
+          MARIADB_ROOT_PASSWORD: password
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     env:
       CI: 'true'
-      DRIVERS: postgres
+      DRIVERS: postgres,mysql
       MB_POSTGRESQL_TEST_USER: metabase
       MB_POSTGRESQL_TEST_PASSWORD: password
+      MB_MYSQL_TEST_HOST: 127.0.0.1
+      MB_MYSQL_TEST_PORT: '3306'
+      MB_MYSQL_TEST_USER: root
+      MB_MYSQL_TEST_PASSWORD: password
       MB_ENGINE_TESTS_REQUIRED: 'true'
     steps:
       - uses: actions/checkout@v6
@@ -112,6 +147,10 @@ jobs:
         working-directory: engine
       - name: Prepare back-end environment
         uses: ./.github/actions/prepare-backend
+      - name: Load the MariaDB time zone tables
+        run: >-
+          docker exec $(docker ps -q --filter ancestor=mariadb:11)
+          sh -c "mariadb-tzinfo-to-sql /usr/share/zoneinfo | mariadb -uroot -ppassword mysql"
       - name: Run the engine tests
         run: ./bin/test-agent :only-tags '[:mb/engine-tests]'
       - name: Gap measure (query-processor suites through the engine)

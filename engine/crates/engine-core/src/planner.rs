@@ -73,6 +73,7 @@ impl Planner {
         let plan = self.analyze(sql).await?;
         let plan = qualify_table_scans(plan, &self.state.config_options().catalog.default_schema)?;
         let plan = resolve_engine_udfs(plan, &self.state)?;
+        let plan = rename_aggregates(plan, self.policy.aggregate_renames())?;
         let plan = merge_nested_projections(plan)?;
         let plan = alias_columns_over_derived_sort(plan)?;
         let plan = if self.policy.supports_nulls_ordering() {
@@ -157,6 +158,10 @@ impl Planner {
                             rejected = Some("aggregate FILTER (WHERE ...)".to_string());
                             return Ok(TreeNodeRecursion::Stop);
                         }
+                    }
+                    if matches!(e, Expr::GroupingSet(_)) && !self.policy.supports_grouping_sets() {
+                        rejected = Some("GROUPING SETS".to_string());
+                        return Ok(TreeNodeRecursion::Stop);
                     }
                     let name = match e {
                         Expr::ScalarFunction(f) => Some(f.name().to_string()),
@@ -289,6 +294,43 @@ fn resolve_engine_udfs(plan: LogicalPlan, state: &SessionState) -> Result<Logica
         .data)
 }
 
+/// Call aggregate functions by the name the warehouse knows them under (see
+/// [`DialectPolicy::aggregate_renames`]), keeping the plan's own names for the output columns.
+fn rename_aggregates(
+    plan: LogicalPlan,
+    renames: &[(&'static str, &'static str)],
+) -> Result<LogicalPlan> {
+    if renames.is_empty() {
+        return Ok(plan);
+    }
+    Ok(plan
+        .transform_down_with_subqueries(|node| {
+            let name_preserver = NamePreserver::new(&node);
+            node.map_expressions(|expr| {
+                let original = name_preserver.save(&expr);
+                expr.transform_up(|e| {
+                    Ok(match e {
+                        Expr::AggregateFunction(mut a)
+                            if renames.iter().any(|(from, _)| *from == a.func.name()) =>
+                        {
+                            let to = renames
+                                .iter()
+                                .find(|(from, _)| *from == a.func.name())
+                                .map(|(_, to)| *to)
+                                .unwrap_or_default();
+                            a.func = udfs::renamed_aggregate(Arc::clone(&a.func), to);
+                            Transformed::yes(Expr::AggregateFunction(a))
+                        }
+                        other => Transformed::no(other),
+                    })
+                })
+                .map(|t| t.update_data(|e| original.restore(e)))
+            })?
+            .map_data(|p| p.recompute_schema())
+        })?
+        .data)
+}
+
 /// Spell `NULLS FIRST` / `NULLS LAST` out for a warehouse without the syntax: an `IS NULL` sort
 /// key ahead of any sort whose null placement differs from MySQL's own (nulls first ascending,
 /// last descending).
@@ -301,11 +343,10 @@ fn emulate_nulls_ordering(plan: LogicalPlan) -> Result<LogicalPlan> {
                 for s in sort.expr {
                     let native_nulls_first = s.asc;
                     if s.nulls_first != native_nulls_first {
-                        exprs.push(SortExpr::new(
-                            s.expr.clone().is_null(),
-                            !s.nulls_first,
-                            false,
-                        ));
+                        // MySQL takes an aggregate's alias as a sort key but not inside an
+                        // expression, so the key names what the alias stands for
+                        let key = resolve_sort_key(&s.expr, &sort.input);
+                        exprs.push(SortExpr::new(key.is_null(), !s.nulls_first, false));
                         changed = true;
                     }
                     exprs.push(s);
@@ -320,6 +361,37 @@ fn emulate_nulls_ordering(plan: LogicalPlan) -> Result<LogicalPlan> {
             other => Ok(Transformed::no(other)),
         })?
         .data)
+}
+
+/// The expression a sort key column stands for, looking through the projection (and the
+/// aggregate under it) it sorts over; the column itself when nothing resolves.
+fn resolve_sort_key(expr: &Expr, input: &LogicalPlan) -> Expr {
+    let Expr::Column(column) = expr else {
+        return expr.clone();
+    };
+    let mut resolved = expr.clone();
+    let mut plan = input;
+    if let LogicalPlan::Projection(projection) = plan {
+        if let Some(e) = projection
+            .expr
+            .iter()
+            .find(|e| e.schema_name().to_string() == column.name)
+        {
+            resolved = e.clone().unalias();
+        }
+        plan = projection.input.as_ref();
+    }
+    if let (Expr::Column(inner), LogicalPlan::Aggregate(aggregate)) = (&resolved, plan) {
+        if let Some(e) = aggregate
+            .aggr_expr
+            .iter()
+            .chain(aggregate.group_expr.iter())
+            .find(|e| e.schema_name().to_string() == inner.name)
+        {
+            resolved = e.clone().unalias();
+        }
+    }
+    resolved
 }
 
 /// Name every scanned table with the schema the catalog resolved it in. A bare name in the SQL
@@ -646,6 +718,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mysql_null_ordering_key_over_an_aggregate_alias_names_the_aggregate() {
+        assert_eq!(
+            mysql_sql(r#"SELECT "note", sum("quantity") AS q FROM "orders" GROUP BY "note" ORDER BY q ASC, "note" DESC NULLS LAST"#).await,
+            "SELECT `orders`.`note`, sum(`orders`.`quantity`) AS `q` FROM `lakes`.`orders` GROUP BY `orders`.`note` ORDER BY sum(`orders`.`quantity`) IS NULL ASC, `q` ASC, `orders`.`note` DESC"
+        );
+    }
+
+    #[tokio::test]
+    async fn sample_statistics_are_called_what_each_warehouse_calls_them() {
+        assert_eq!(
+            mysql_sql(r#"SELECT stddev("total") AS s, var_samp("total") AS v, stddev_pop("total") AS p FROM "orders""#).await,
+            "SELECT stddev_samp(`orders`.`total`) AS `s`, var_samp(`orders`.`total`) AS `v`, stddev_pop(`orders`.`total`) AS `p` FROM `lakes`.`orders`"
+        );
+        let postgres = planner()
+            .plan_and_unparse(
+                r#"SELECT stddev("Total"), var_samp("Total") FROM "public"."Orders""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            postgres.warehouse_sql,
+            r#"SELECT stddev("Orders"."Total"), var_samp("Orders"."Total") AS "var_samp(public.Orders.Total)" FROM "public"."Orders""#
+        );
+        assert_eq!(postgres.schema[1].name, "var_samp(public.Orders.Total)");
+    }
+
+    #[tokio::test]
+    async fn mysql_concat_skips_nulls_as_datafusion_does() {
+        assert_eq!(
+            mysql_sql(r#"SELECT concat("note", '/', "id") AS c FROM "orders""#).await,
+            "SELECT CONCAT_WS('', `orders`.`note`, '/', CAST(`orders`.`id` AS CHAR)) AS `c` FROM `lakes`.`orders`"
+        );
+    }
+
+    #[tokio::test]
     async fn mysql_string_functions_render_their_own_spellings() {
         assert_eq!(
             mysql_sql(r#"SELECT strpos("note", 'x') AS s, starts_with("note", 'ab') AS b, length("note") AS l, regexp_like("note", '^a') AS r, regexp_like("note", '^a', 'i') AS ri, regexp_match("note", '[0-9]+')[1] AS m, mb_cast("total", 'TEXT') AS c, mb_cast("note", 'BIGINT') AS i FROM "orders""#).await,
@@ -667,6 +775,10 @@ mod tests {
             (
                 r#"SELECT approx_percentile_cont("total", 0.5) FROM "orders""#,
                 "function approx_percentile_cont",
+            ),
+            (
+                r#"SELECT "note", count(*) FROM "orders" GROUP BY GROUPING SETS (("note"), ())"#,
+                "GROUPING SETS",
             ),
         ] {
             let err = mysql_planner()

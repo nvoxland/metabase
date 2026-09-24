@@ -7,6 +7,7 @@
   delegated to the database's own driver, because the database keeps its real engine."
   (:require
    [clojure.core.async :as a]
+   [clojure.string :as str]
    [medley.core :as m]
    [metabase.driver :as driver]
    [metabase.driver-api.core :as driver-api]
@@ -81,6 +82,21 @@
                               :window-functions/cumulative    true
                               :window-functions/offset        true}]
   (defmethod driver/database-supports? [:datafusion feature] [_driver _feature _db] supported?))
+
+;;; Features that depend on the warehouse behind the engine rather than the engine: what the plan can say is one
+;;; thing, what the warehouse can run another (MySQL has no schemas, no FULL JOIN, no GROUPING SETS, no percentiles).
+(doseq [feature [:schemas
+                 :full-join
+                 :percentile-aggregations
+                 :native-pivot-tables
+                 :window-functions/offset
+                 :set-timezone
+                 :regex]]
+  (defmethod driver/database-supports? [:datafusion feature]
+    [_driver feature database]
+    (if-let [warehouse (some-> database :engine keyword)]
+      (driver/database-supports? warehouse feature database)
+      true)))
 
 (defmethod driver/db-start-of-week :datafusion
   [_driver]
@@ -269,14 +285,15 @@
 
 (defn- numbered-placeholders
   "Rewrite JDBC-style `?` placeholders as `$1`, `$2`, ... outside string literals and quoted identifiers
-  (a doubled quote inside either toggles twice, so it needs no special case)."
+  (a doubled quote inside either toggles twice, so it needs no special case). Backticks are MySQL's
+  identifier quotes, and a column alias like `pk?` is not a placeholder."
   [sql]
   (let [out (StringBuilder.)]
     (loop [chars (seq sql) quote nil n 0]
       (if-let [c (first chars)]
         (cond
           (= c quote)                        (do (.append out c) (recur (rest chars) nil n))
-          (and (nil? quote) (#{\' \"} c))    (do (.append out c) (recur (rest chars) c n))
+          (and (nil? quote) (#{\' \" \`} c)) (do (.append out c) (recur (rest chars) c n))
           (and (nil? quote) (= c \?))        (do (.append out (str "$" (inc n))) (recur (rest chars) nil (inc n)))
           :else                              (do (.append out c) (recur (rest chars) quote n)))
         (str out)))))
@@ -318,17 +335,61 @@
 (defn- warehouse-driver-of [database]
   (keyword (:engine database)))
 
-(defmethod driver/dbms-version :datafusion
-  [_driver database]
+(defmulti ^:private dbms-version*
+  "The warehouse's version, the way the JDBC path reports it, fetched through the engine."
+  {:arglists '([warehouse database])}
+  (fn [warehouse _database] warehouse))
+
+(defmethod dbms-version* :postgres
+  [_warehouse database]
   (let [[{:keys [version]}] (metadata-query! database ["SELECT current_setting('server_version') AS version"])
         [major minor]       (map parse-long (re-seq #"\d+" (str version)))]
     {:flavor           "PostgreSQL"
      :version          version
      :semantic-version (into [] (remove nil?) [major minor])}))
 
-(def ^:private syncable-tables-sql
-  "The same listing as the Postgres driver's `get-tables-sql`, with the privilege checks the JDBC path makes in a
-  second query folded in. Foreign tables get no writability verdict, as on the JDBC path."
+(defmethod dbms-version* :mysql
+  [_warehouse database]
+  (let [[{:keys [version]}] (metadata-query! database ["SELECT VERSION() AS version"])
+        version             (str version)
+        mariadb?            (re-find #"(?i)mariadb" version)
+        ;; older MariaDB servers announce themselves as `5.5.5-10.6.12-MariaDB`
+        [major minor]       (map parse-long (re-seq #"\d+" (str/replace version #"^5\.5\.5-" "")))]
+    {:flavor           (if mariadb? "MariaDB" "MySQL")
+     :version          version
+     :semantic-version (into [] (remove nil?) [major minor])}))
+
+(defmethod driver/dbms-version :datafusion
+  [_driver database]
+  (dbms-version* (warehouse-driver-of database) database))
+
+(defmulti ^:private syncable-tables-sql
+  "The listing of syncable tables for a warehouse: `schema`, `name`, `type`, `description`, `estimated_row_count`,
+  `can_select`, `is_writable`, in the warehouse's own dialect (it runs without planning)."
+  {:arglists '([warehouse])}
+  identity)
+
+(defmethod syncable-tables-sql :mysql
+  [_warehouse]
+  ;; The same shape as the JDBC path's `DatabaseMetaData` listing: no schema, no row estimate, and no writability
+  ;; verdict (JDBC parses `SHOW GRANTS` on MySQL and gives up on MariaDB; here both give up, so actions on a routed
+  ;; MySQL database wait for a grants query through the engine). Readability isn't checked either way: a table the
+  ;; user can't read fails at query time rather than being hidden by sync.
+  "SELECT NULL AS `schema`,
+          table_name AS `name`,
+          table_type AS `type`,
+          NULLIF(table_comment, '') AS description,
+          TRUE AS can_select,
+          NULL AS is_writable
+   FROM information_schema.tables
+   WHERE table_schema = DATABASE()
+     AND table_type IN ('BASE TABLE', 'VIEW', 'SYSTEM VERSIONED')
+   ORDER BY table_name")
+
+(defmethod syncable-tables-sql :postgres
+  [_warehouse]
+  ;; The same listing as the Postgres driver's `get-tables-sql`, with the privilege checks the JDBC path makes in a
+  ;; second query folded in. Foreign tables get no writability verdict, as on the JDBC path.
   "SELECT n.nspname AS schema,
           c.relname AS name,
           CASE c.relkind WHEN 'r' THEN 'TABLE' WHEN 'p' THEN 'PARTITIONED TABLE' WHEN 'v' THEN 'VIEW'
@@ -354,14 +415,16 @@
         [inclusion
          exclusion]         (driver.s/db-details->schema-filter-patterns database)
         syncable-schema?    (fn [schema]
-                              (and (not (contains? excluded schema))
-                                   (not (re-find #"^metabase_cache.*" schema))
-                                   (driver.s/include-schema? inclusion exclusion schema)))]
+                              ;; a warehouse without schemas has nothing to filter on
+                              (or (nil? schema)
+                                  (and (not (contains? excluded schema))
+                                       (not (re-find #"^metabase_cache.*" schema))
+                                       (driver.s/include-schema? inclusion exclusion schema))))]
     {:tables (into #{}
                    (comp (filter (comp syncable-schema? :schema))
                          (filter :can_select)
                          (map #(dissoc % :type :can_select)))
-                   (metadata-query! database [syncable-tables-sql]))}))
+                   (metadata-query! database [(syncable-tables-sql (warehouse-driver-of database))]))}))
 
 (defmethod driver/describe-fields :datafusion
   [_driver database & {:keys [schema-names table-names] :as opts}]
@@ -384,20 +447,37 @@
     (metadata-query! database (sql-jdbc.sync/describe-fks-sql (warehouse-driver-of database)
                                                               (assoc opts :details (driver.conn/effective-details database))))))
 
+(defn- index-sql?
+  "Whether `warehouse` lists indexes with SQL of its own (Postgres). The others read JDBC metadata, which only the
+  driver's own connection can do."
+  [warehouse]
+  (not= (get-method sql-jdbc.sync/describe-indexes-sql warehouse)
+        (get-method sql-jdbc.sync/describe-indexes-sql :default)))
+
 (defmethod driver/describe-indexes :datafusion
   [_driver database & {:keys [schema-names table-names] :as opts}]
-  (if (or (and schema-names (perf/empty? schema-names))
+  (let [warehouse (warehouse-driver-of database)]
+    (cond
+      (or (and schema-names (perf/empty? schema-names))
           (and table-names (perf/empty? table-names)))
-    []
-    (eduction (map #(perf/select-keys % [:table-schema :table-name :field-name]))
-              (metadata-query! database (sql-jdbc.sync/describe-indexes-sql (warehouse-driver-of database)
-                                                                            (assoc opts :details (driver.conn/effective-details database)))))))
+      []
+
+      (index-sql? warehouse)
+      (eduction (map #(perf/select-keys % [:table-schema :table-name :field-name]))
+                (metadata-query! database (sql-jdbc.sync/describe-indexes-sql warehouse
+                                                                              (assoc opts :details (driver.conn/effective-details database)))))
+
+      :else
+      (apply driver/describe-indexes warehouse database (mapcat identity opts)))))
 
 (defmethod driver/describe-table-indexes :datafusion
   [driver database table]
-  (into #{}
-        (map (fn [{:keys [field-name]}] {:type :normal-column-index :value field-name}))
-        (driver/describe-indexes driver database :schema-names [(:schema table)] :table-names [(:name table)])))
+  (let [warehouse (warehouse-driver-of database)]
+    (if (index-sql? warehouse)
+      (into #{}
+            (map (fn [{:keys [field-name]}] {:type :normal-column-index :value field-name}))
+            (driver/describe-indexes driver database :schema-names [(:schema table)] :table-names [(:name table)]))
+      (driver/describe-table-indexes warehouse database table))))
 
 ;;; Sync steps with no engine equivalent yet defer to the warehouse driver.
 (defmethod driver/table-exists? :datafusion

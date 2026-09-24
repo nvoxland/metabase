@@ -43,6 +43,8 @@ SELECT "active", count(*) FROM "products" GROUP BY "active" ORDER BY "active"
 false 2
 true 6
 
+# MySQL has no aggregate FILTER; the engine refuses it there (the compiler spells count-where as a CASE)
+skipif engine+mysql
 query I
 SELECT count(*) FILTER (WHERE "note" IS NULL) AS "no_note" FROM "orders"
 ----
