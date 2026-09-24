@@ -4,10 +4,10 @@
 
 use std::sync::Arc;
 
-use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::execution::context::SessionState;
 use datafusion::execution::SessionStateBuilder;
-use datafusion::logical_expr::{Expr, LogicalPlan, WindowFunctionDefinition};
+use datafusion::logical_expr::{Expr, LogicalPlan, Projection, WindowFunctionDefinition};
 use datafusion::sql::parser::Statement as DFStatement;
 use datafusion::sql::sqlparser::ast::Statement as SqlStatement;
 use datafusion::sql::unparser::Unparser;
@@ -64,6 +64,7 @@ impl Planner {
     /// plan's Arrow schema for execution.
     pub async fn plan(&self, sql: &str) -> Result<Planned> {
         let plan = self.analyze(sql).await?;
+        let plan = merge_nested_projections(plan)?;
         self.reject_unsupported(&plan)?;
         let statement = Unparser::new(self.policy.dialect()).plan_to_sql(&plan)?;
         let mut warehouse_sql = statement.to_string();
@@ -120,6 +121,13 @@ impl Planner {
                 rejected = Some(c.to_string());
                 return Ok(TreeNodeRecursion::Stop);
             }
+            // sqlparser can't tell an identifier that contains a backslash before a quote from one
+            // that is already escaped, and prints it unescaped; the SQL it would produce is not the
+            // identifier we were given, so refuse it rather than send a string we can't vouch for.
+            if let Some(name) = unprintable_identifier(node) {
+                rejected = Some(format!("identifier {name:?} (backslash before a quote)"));
+                return Ok(TreeNodeRecursion::Stop);
+            }
             node.apply_expressions(|expr| {
                 expr.apply(|e| {
                     let name = match e {
@@ -146,6 +154,78 @@ impl Planner {
             None => Ok(()),
         }
     }
+}
+
+/// The first identifier in this node's output schema, table reference, or alias that the unparser
+/// would print incorrectly (see `reject_unsupported`).
+fn unprintable_identifier(node: &LogicalPlan) -> Option<String> {
+    fn bad(name: &str) -> bool {
+        name.contains("\\\"") || name.contains("\\'") || name.contains("\\`")
+    }
+    if let LogicalPlan::SubqueryAlias(a) = node {
+        if bad(a.alias.table()) {
+            return Some(a.alias.table().to_string());
+        }
+    }
+    for (qualifier, field) in node.schema().iter() {
+        if bad(field.name()) {
+            return Some(field.name().to_string());
+        }
+        if let Some(q) = qualifier {
+            for part in [Some(q.table()), q.schema(), q.catalog()]
+                .into_iter()
+                .flatten()
+            {
+                if bad(part) {
+                    return Some(part.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Collapse a projection that only picks columns of the projection directly beneath it into one
+/// projection. The unparser wraps the inner one as a derived table (`derived_projection`) but keeps
+/// the outer columns qualified by the base table, which the warehouse then can't resolve. This is
+/// the one optimizer-like rewrite the pushed plan gets; it never changes what the query computes.
+fn merge_nested_projections(plan: LogicalPlan) -> Result<LogicalPlan> {
+    let merged = plan.transform_up(|node| {
+        let LogicalPlan::Projection(outer) = &node else {
+            return Ok(Transformed::no(node));
+        };
+        let LogicalPlan::Projection(inner) = outer.input.as_ref() else {
+            return Ok(Transformed::no(node));
+        };
+        let mut exprs = Vec::with_capacity(outer.expr.len());
+        for expr in &outer.expr {
+            let (column, out_name) = match expr {
+                Expr::Column(c) => (c, c.name.clone()),
+                Expr::Alias(a) => match a.expr.as_ref() {
+                    Expr::Column(c) => (c, a.name.clone()),
+                    _ => return Ok(Transformed::no(node)),
+                },
+                _ => return Ok(Transformed::no(node)),
+            };
+            let Some(index) = inner.schema.index_of_column(column).ok() else {
+                return Ok(Transformed::no(node));
+            };
+            let source = inner.expr[index].clone();
+            let same_name = match &source {
+                Expr::Column(c) => c.name == out_name,
+                Expr::Alias(a) => a.name == out_name,
+                _ => false,
+            };
+            exprs.push(if same_name {
+                source
+            } else {
+                source.unalias().alias(out_name)
+            });
+        }
+        let projection = Projection::try_new(exprs, Arc::clone(&inner.input))?;
+        Ok(Transformed::yes(LogicalPlan::Projection(projection)))
+    })?;
+    Ok(merged.data)
 }
 
 fn ensure_query(statement: &DFStatement) -> Result<()> {
@@ -322,6 +402,49 @@ mod tests {
         assert_eq!(
             result.warehouse_sql,
             r#"SELECT substr("Products"."Title", CAST(1 AS INTEGER), CAST(3 AS INTEGER)) AS "s" FROM "public"."Products""#
+        );
+    }
+
+    #[tokio::test]
+    async fn identifiers_with_a_backslash_before_a_quote_are_rejected() {
+        // `""` is a quote inside a quoted identifier; the backslash before it is what sqlparser mishandles
+        let err = planner()
+            .plan_and_unparse(r#"SELECT "Title" AS "a\""b" FROM "public"."Products""#, &[])
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::Unsupported);
+        assert!(err.message.contains("identifier"), "{}", err.message);
+        // a quote on its own is fine
+        let ok = planner()
+            .plan_and_unparse(r#"SELECT "Title" AS "a""b" FROM "public"."Products""#, &[])
+            .await
+            .unwrap();
+        assert!(
+            ok.warehouse_sql.contains(r#"AS "a""b""#),
+            "{}",
+            ok.warehouse_sql
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_projections_merge_instead_of_becoming_a_derived_table() {
+        // a Metabase stage that selects from an expressions stage: the unparser alone emits
+        // `"Products"."Title"` inside a `derived_projection` subquery, which Postgres can't resolve
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT "s"."Title" AS "t", "s"."one" FROM (SELECT "Title", "one" FROM (SELECT "Title", "ID", 1 AS "one" FROM "public"."Products" WHERE "ID" > 1)) AS "s""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert!(
+            !result.warehouse_sql.contains("derived_projection"),
+            "{}",
+            result.warehouse_sql
+        );
+        assert_eq!(
+            result.warehouse_sql,
+            r#"SELECT "s"."Title" AS "t", "s"."one" FROM (SELECT "Products"."Title", 1 AS "one" FROM "public"."Products" WHERE ("Products"."ID" > 1)) AS "s""#
         );
     }
 

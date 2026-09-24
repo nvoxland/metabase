@@ -116,6 +116,19 @@ jobs:
         uses: ./.github/actions/prepare-backend
       - name: Run the engine tests
         run: ./bin/test-agent :only-tags '[:mb/engine-tests]'
+      - name: Gap measure (query-processor suites through the engine)
+        # Informational until the engine passes them: how much of the query processor's own test
+        # suite runs unchanged through the engine against Postgres. Read the summary line.
+        continue-on-error: true
+        env:
+          MB_QUERY_ENGINE: datafusion
+        run: >-
+          ./bin/test-agent :only '[metabase.query-processor.aggregation-test
+          metabase.query-processor.breakout-test
+          metabase.query-processor.filter-test
+          metabase.query-processor.expressions-test
+          metabase.query-processor.date-bucketing-test
+          metabase.query-processor.explicit-joins-test]'
 
   build-native:
     name: Build ${{ matrix.platform }}

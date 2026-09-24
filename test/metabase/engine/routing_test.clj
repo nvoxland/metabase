@@ -1,7 +1,9 @@
 (ns metabase.engine.routing-test
   (:require
    [clojure.test :refer :all]
-   [metabase.engine.routing :as engine.routing]))
+   [metabase.engine.routing :as engine.routing]
+   [metabase.lib.test-metadata :as meta]
+   [metabase.lib.test-util :as lib.tu]))
 
 (deftest ^:parallel native-query-detection-test
   (let [native? #(#'engine.routing/native-query? % nil)]
@@ -22,3 +24,21 @@
     (is (false? (engine.routing/details-supported? {:host "localhost" :ssl-root-cert {:source "uploaded" :value "..."}})))
     (is (false? (engine.routing/details-supported? {:host "localhost" :ssl-use-client-auth true})))
     (is (false? (engine.routing/details-supported? {:host "localhost" :additional-options "prepareThreshold=0"})))))
+
+(deftest ^:parallel nested-field-column-detection-test
+  (let [mp (lib.tu/mock-metadata-provider
+            meta/metadata-provider
+            {:fields [{:id            1000
+                       :table-id      (meta/id :venues)
+                       :name          "data → count"
+                       :display-name  "data → count"
+                       :base-type     :type/Integer
+                       :database-type "jsonb"
+                       :nfc-path      ["data" "count"]}]})
+        nfc? #(#'engine.routing/nested-field-column-query? % mp)]
+    (testing "a query touching a JSON path column stays on JDBC"
+      (is (true? (nfc? {:type :query :query {:source-table (meta/id :venues) :fields [[:field 1000 nil]]}})))
+      (is (true? (nfc? {:lib/type :mbql/query :stages [{:lib/type :mbql.stage/mbql :source-table (meta/id :venues)
+                                                        :filters [[:= {} [:field {} 1000] 5]]}]}))))
+    (testing "ordinary fields are fine"
+      (is (false? (nfc? {:type :query :query {:source-table (meta/id :venues) :fields [[:field (meta/id :venues :name) nil]]}}))))))

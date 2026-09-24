@@ -51,6 +51,27 @@
              (tree-seq coll? seq query))
        (some #(native-card? metadata-provider % #{}) (source-card-ids query)))))
 
+(defn- field-ids
+  "Every field id referenced by `:field` clauses anywhere in a legacy or MBQL 5 query."
+  [query]
+  (let [ids (volatile! #{})]
+    ;; legacy `[:field id opts]` and MBQL 5 `[:field opts id]`
+    (walk/postwalk (fn [x]
+                     (when (and (vector? x) (= :field (first x)))
+                       (when-let [id (first (filter integer? (rest x)))]
+                         (vswap! ids conj id)))
+                     x)
+                   query)
+    @ids))
+
+(defn- nested-field-column-query?
+  "Whether the query references a nested-field column (a JSON path Metabase unfolded at sync time
+  into its own Field). The engine compiler has no JSON path support yet, so those stay on JDBC."
+  [query metadata-provider]
+  (boolean (some (fn [id]
+                   (some-> (lib.metadata/field metadata-provider id) :nfc-path seq))
+                 (field-ids query))))
+
 (def ^:private unsupported-detail-keys
   "Connection details the Rust connectors don't implement yet. A database using any of them stays
   on JDBC; the engine's connector would otherwise silently connect without them."
@@ -83,7 +104,8 @@
   [query metadata-provider database warehouse-driver]
   (and (contains? engine-warehouses warehouse-driver)
        (details-supported? (:details database))
-       (not (native-query? query metadata-provider))))
+       (not (native-query? query metadata-provider))
+       (not (nested-field-column-query? query metadata-provider))))
 
 (defn shadow?
   "Whether `query` should also be run through both paths in the background and compared: the

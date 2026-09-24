@@ -83,15 +83,22 @@
   (for [profile ["debug" "release"]]
     (.getAbsolutePath (io/file "engine" "target" profile (library-file-name)))))
 
+(defn- development-build []
+  (some (fn [path] (when (.exists (io/file path)) path)) (development-build-paths)))
+
 (defn resolve-library-path
-  "Find the engine library: an explicit path or `MB_ENGINE_NATIVE_LIBRARY_PATH`, then the copy
-  bundled in the jar, then a development build under `engine/target`. Returns nil when none exists."
+  "Find the engine library: an explicit path or `MB_ENGINE_NATIVE_LIBRARY_PATH`; in a source
+  checkout (`engine/Cargo.toml` present) a development build under `engine/target`, which is what
+  the developer just compiled; then the copy bundled in the jar; then a development build anyway.
+  Returns nil when none exists."
   [explicit-path]
   (or (:path @library)
       (some (fn [path] (when (and (seq path) (.exists (io/file path))) path))
             [explicit-path (System/getenv "MB_ENGINE_NATIVE_LIBRARY_PATH")])
+      (when (.exists (io/file "engine" "Cargo.toml"))
+        (development-build))
       (extract-bundled-library)
-      (some (fn [path] (when (.exists (io/file path)) path)) (development-build-paths))))
+      (development-build)))
 
 ;;; --------------------------------------------------- binding ---------------------------------------------------------
 
