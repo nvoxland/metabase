@@ -139,7 +139,9 @@
 
 (defmethod sql.qp/date [:datafusion :day]
   [_ _ expr]
-  (h2x/maybe-cast (h2x/database-type expr) (h2x/->date expr)))
+  ;; not `CAST(CAST(x AS DATE) AS <original type>)` as Postgres does: the cast back plans as an unzoned nanosecond
+  ;; timestamp, while `date_trunc` keeps the column's own type
+  (date-trunc :day expr))
 
 (defmethod sql.qp/date [:datafusion :day-of-week]
   [driver _unit expr]
