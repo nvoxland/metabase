@@ -45,7 +45,7 @@
 
 ;;; Features the engine dialect supports today. Anything absent falls back to the `:sql` defaults. Constructs the
 ;;; engine can plan but a warehouse can't run are rejected by the engine at query time, not here.
-(doseq [[feature supported?] {:convert-timezone               false ; needs timezone-aware unparsing; tracked for M4
+(doseq [[feature supported?] {:convert-timezone               true
                               :datetime-diff                  true
                               ;; sync: the warehouse driver's metadata SQL runs through the engine (see below)
                               :describe-fields                true
@@ -92,13 +92,31 @@
    :checkout_timeout_ms 10000
    :connect_timeout_ms  (driver.settings/db-connection-timeout-ms)})
 
+(def ^:private stamp-ttl-ms
+  "How long a catalog stamp is trusted before the app DB is asked again. The stamp is two aggregate
+  queries over the database's fields; once per query would double app-DB load under traffic."
+  10000)
+
+(defonce ^:private stamps
+  ;; database id -> {:stamp .. :at ms}
+  (atom {}))
+
+(defn- catalog-stamp [database]
+  (let [now (System/currentTimeMillis)
+        {:keys [stamp at]} (get @stamps (:id database))]
+    (if (and stamp (< (- now at) stamp-ttl-ms))
+      stamp
+      (let [fresh (engine.catalog/stamp database)]
+        (swap! stamps assoc (:id database) {:stamp fresh :at now})
+        fresh))))
+
 (defn- ensure-registered!
   "Make sure the engine has the database's connection details and current catalog. Checks a cheap
   metadata stamp on every query and only builds the full snapshot when it changed."
   [database]
   ;; The transport is part of the stamp so a restarted engine (which starts empty) gets registered again.
   (let [details (driver.conn/effective-details database)
-        stamp   {:stamp [(engine.catalog/stamp database) (hash details)] :transport (engine/transport)}]
+        stamp   {:stamp [(catalog-stamp database) (hash details)] :transport (engine/transport)}]
     (when (not= (engine/registration (:id database)) stamp)
       (let [snapshot (engine.catalog/snapshot database)]
         (log/infof "Registering database %d with the native query engine (%s)" (:id database) (:catalog_version snapshot))
@@ -129,6 +147,7 @@
 (defn forget-database!
   "Drop what the engine knows about a database (after its details or metadata change)."
   [database-id]
+  (swap! stamps dissoc database-id)
   (engine/forget-database! database-id))
 
 ;;; ---------------------------------------------------- execution -------------------------------------------------------

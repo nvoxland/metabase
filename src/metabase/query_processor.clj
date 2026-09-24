@@ -16,6 +16,7 @@
    [metabase.engine.shadow :as engine.shadow]
    [metabase.lib-be.core :as lib-be]
    [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.metadata.protocols :as lib.metadata.protocols]
    [metabase.lib.schema.info :as lib.schema.info]
    [metabase.query-processor.compile :as qp.compile]
    [metabase.query-processor.debug :as qp.debug]
@@ -43,13 +44,20 @@
   [query user-id force-mode]
   (binding [engine.routing/*force* force-mode]
     (request/with-current-user user-id
-      (process-query (assoc-in query [:middleware :userland-query?] false)))))
+      (process-query (-> query
+                         ;; a rerun must neither be served from the cache (the comparison would be vacuous) nor fill it
+                         ;; (an engine result would then answer real requests while the database is only shadowed)
+                         (dissoc :cache-strategy)
+                         (assoc-in [:middleware :ignore-cached-results?] true)
+                         (assoc-in [:middleware :userland-query?] false))))))
 
 (defn- shadow-database
-  "The query's database and a metadata provider for it. Inside an API request the provider is the
-  request's cached one, so this costs no extra app-DB round trip there."
+  "The query's database and a metadata provider for it: the one the query processor's setup already
+  attached to the query when there is one, else the request's (cached) application-database one."
   [query]
-  (let [mp (lib-be/application-database-metadata-provider (:database query))]
+  (let [mp (if (lib.metadata.protocols/metadata-providerable? query)
+             (lib.metadata/->metadata-provider query)
+             (lib-be/application-database-metadata-provider (:database query)))]
     [mp (lib.metadata/database mp)]))
 
 (defn- engine-shadow-middleware

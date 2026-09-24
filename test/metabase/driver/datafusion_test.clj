@@ -134,7 +134,10 @@
                                  :limit       2}))
    (fn [] (mt/mbql-query venues {:aggregation [[:median $price] [:percentile $price 0.9]]
                                  :breakout    [$category_id]
-                                 :limit       5}))])
+                                 :limit       5}))
+   (fn [] (mt/mbql-query users {:expressions {"seoul" [:convert-timezone $last_login "Asia/Seoul" "UTC"]}
+                                :fields      [$id [:expression "seoul"]]
+                                :limit       2}))])
 
 (deftest ^:mb/engine-tests corpus-plans-for-postgres-test
   (mt/test-drivers #{:h2}

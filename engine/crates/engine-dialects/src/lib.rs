@@ -262,6 +262,26 @@ impl MetabasePostgresDialect {
     }
 }
 
+impl MetabasePostgresDialect {
+    /// `mb_at_time_zone(x, 'zone')` as `(x AT TIME ZONE 'zone')`, parenthesized so nesting reads
+    /// unambiguously.
+    fn at_time_zone(&self, unparser: &Unparser, args: &[Expr]) -> DFResult<Option<ast::Expr>> {
+        if args.len() != 2 {
+            return Ok(None);
+        }
+        let Expr::Literal(datafusion::common::ScalarValue::Utf8(Some(zone)), _) = &args[1] else {
+            return Ok(None);
+        };
+        let timestamp = unparser.expr_to_sql(&args[0])?;
+        Ok(Some(ast::Expr::Nested(Box::new(ast::Expr::AtTimeZone {
+            timestamp: Box::new(timestamp),
+            time_zone: Box::new(ast::Expr::Value(
+                ast::Value::SingleQuotedString(zone.clone()).into(),
+            )),
+        }))))
+    }
+}
+
 impl Dialect for MetabasePostgresDialect {
     fn identifier_quote_style(&self, identifier: &str) -> Option<char> {
         self.inner.identifier_quote_style(identifier)
@@ -322,6 +342,7 @@ impl Dialect for MetabasePostgresDialect {
                 args,
                 ast::DataType::Time(None, ast::TimezoneInfo::None),
             ),
+            udfs::MB_AT_TIME_ZONE => self.at_time_zone(unparser, args),
             _ => self
                 .inner
                 .scalar_function_to_sql_overrides(unparser, func_name, args),
@@ -461,6 +482,7 @@ const POSTGRES_FUNCTIONS: &[&str] = &[
     "regr_sxy",
     "percentile_cont",
     udfs::MB_TO_TIME,
+    udfs::MB_AT_TIME_ZONE,
     "percentile_disc",
     // window
     "row_number",

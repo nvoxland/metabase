@@ -34,6 +34,21 @@
               (log/infof "Native query engine started over %s" (name (engine.settings/engine-transport)))
               (reset! transport* t))))))
 
+(defn running?
+  "Whether the engine has been started in this process (nothing here starts it)."
+  []
+  (some? @transport*))
+
+(defn available?
+  "Whether the engine could be started: the native library can be found (in-process transport),
+  or a sidecar is configured. Cheap; used by routing so a database routed to a missing engine
+  falls back to its driver instead of failing every query."
+  []
+  (case (engine.settings/engine-transport)
+    :ffi     (some? (engine.ffi/resolve-library-path (engine.settings/engine-native-library-path)))
+    :sidecar (some? (engine.settings/engine-sidecar-url))
+    false))
+
 (defn stop!
   "Shut the engine down. The next call starts it again."
   []
@@ -99,10 +114,12 @@
   (swap! registrations assoc database-id stamp))
 
 (defn forget-database!
-  "Drop what the engine knows about a database: its registration memo and its pools and catalog."
+  "Drop what the engine knows about a database: its registration memo and, when the engine is
+  running, its pools and catalog. Never starts the engine (this runs from event handlers)."
   [database-id]
   (swap! registrations dissoc database-id)
-  (invalidate-database! database-id))
+  (when (running?)
+    (invalidate-database! database-id)))
 
 (defn create-session!
   "Open a session for `context` (`{:database_id ...}` plus user, timezone, remark, ...). Returns the

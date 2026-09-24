@@ -116,7 +116,12 @@ async fn run_do_get(engine: Arc<Engine>) {
             .connect(&details, &Default::default())
             .await
             .unwrap();
-        if connector.ping(pool.as_ref()).await.is_err() {
+        let probe = engine_core::connector::Query {
+            sql: "SELECT 1".into(),
+            params: vec![],
+            settings: Default::default(),
+        };
+        if connector.execute(pool.as_ref(), probe).await.is_err() {
             eprintln!("skipping: no Postgres reachable");
             return;
         }

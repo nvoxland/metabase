@@ -4,19 +4,21 @@
   (:require
    [clojure.string :as str]
    [clojure.walk :as walk]
+   [metabase.engine.core :as engine]
    [metabase.engine.settings :as engine.settings]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.settings.core :as setting]))
 
-(def ^:private native-warehouses
-  "Warehouses the engine has a dialect and a Rust connector for."
+(def ^:private dialect-warehouses
+  "Warehouses the engine has a dialect for. A warehouse needs one whether it is reached through a
+  Rust connector or the JDBC bridge; `engine-bridge-warehouses` only changes how one of these is
+  reached, it can't add a warehouse the engine can't unparse for."
   #{:postgres})
 
 (defn engine-warehouses
-  "Warehouses the engine can run queries against: those with a Rust connector, plus the ones the
-  JDBC bridge is configured for (their dialect must still exist in the engine)."
+  "Warehouses the engine can run queries against."
   []
-  (into native-warehouses (engine.settings/bridge-warehouses)))
+  dialect-warehouses)
 
 (defn- source-card-ids
   "Every card the query draws from, in any stage or join (`:source-card` in MBQL 5, `card__N` legacy)."
@@ -115,6 +117,8 @@
   "Whether `query` against `warehouse-driver` could run through the engine at all."
   [query metadata-provider database warehouse-driver]
   (and (contains? (engine-warehouses) warehouse-driver)
+       ;; a database routed to an engine this process can't start keeps working on its driver
+       (engine/available?)
        (details-supported? (:details database))
        (not (native-query? query metadata-provider))
        (not (nested-field-column-query? query metadata-provider))))
@@ -147,6 +151,7 @@
   engine (not in shadow mode, which keeps the driver as the source of truth), else its own driver."
   [database warehouse-driver]
   (if (and (contains? (engine-warehouses) warehouse-driver)
+           (engine/available?)
            (details-supported? (:details database))
            (= :datafusion (engine-mode database)))
     :datafusion

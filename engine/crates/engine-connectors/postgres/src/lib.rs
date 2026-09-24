@@ -21,9 +21,7 @@ use deadpool_postgres::{
     Manager, ManagerConfig, Object, Pool as DeadPool, RecyclingMethod, Runtime,
 };
 use engine_core::api::PoolConfig;
-use engine_core::connector::{
-    ColumnDesc, Connector, ExecuteHandle, Pool, PoolStats, Query, SessionSettings, TableDesc,
-};
+use engine_core::connector::{Connector, ExecuteHandle, Pool, PoolStats, Query, SessionSettings};
 use engine_core::error::{EngineError, ErrorKind, Result};
 use engine_dialects::Warehouse;
 use futures::Stream;
@@ -428,91 +426,6 @@ impl Connector for PostgresConnector {
                 Err(e)
             }
         }
-    }
-
-    async fn execute_statement(&self, pool: &dyn Pool, query: Query) -> Result<u64> {
-        let pg = pg_pool(pool)?;
-        let client = pg.pool.get().await.map_err(pool_error)?;
-        let setup = session_setup_sql(&SessionSettings {
-            read_only: false,
-            ..query.settings.clone()
-        });
-        if !setup.is_empty() {
-            client
-                .batch_execute(&setup)
-                .await
-                .map_err(|e| warehouse_error(e, false))?;
-        }
-        let statement = client
-            .prepare(&query.sql)
-            .await
-            .map_err(|e| warehouse_error(e, false))?;
-        let params: Vec<params::BoundParam> = query
-            .params
-            .iter()
-            .zip(statement.params())
-            .enumerate()
-            .map(|(i, (p, ty))| params::bind(i, p, ty))
-            .collect::<Result<_>>()?;
-        let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params
-            .iter()
-            .map(|p| p.as_ref() as &(dyn tokio_postgres::types::ToSql + Sync))
-            .collect();
-        let affected = client
-            .execute(&statement, &refs)
-            .await
-            .map_err(|e| warehouse_error(e, false));
-        let _ = client.batch_execute(SESSION_RESET_SQL).await;
-        affected
-    }
-
-    async fn describe(&self, pool: &dyn Pool, schema: Option<&str>) -> Result<Vec<TableDesc>> {
-        let pg = pg_pool(pool)?;
-        let client = pg.pool.get().await.map_err(pool_error)?;
-        let sql = "SELECT table_schema, table_name, column_name, data_type, is_nullable = 'YES', ordinal_position::int4
-                   FROM information_schema.columns
-                   WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-                     AND ($1::text IS NULL OR table_schema = $1)
-                   ORDER BY table_schema, table_name, ordinal_position";
-        let rows = client
-            .query(sql, &[&schema])
-            .await
-            .map_err(|e| warehouse_error(e, false))?;
-        let mut tables: Vec<TableDesc> = Vec::new();
-        for row in rows {
-            let table_schema: String = row.get(0);
-            let table_name: String = row.get(1);
-            let column = ColumnDesc {
-                name: row.get(2),
-                db_type: row.get(3),
-                nullable: row.get(4),
-                position: row.get::<_, i32>(5) as usize,
-            };
-            match tables.last_mut() {
-                Some(t)
-                    if t.name == table_name
-                        && t.schema.as_deref() == Some(table_schema.as_str()) =>
-                {
-                    t.columns.push(column)
-                }
-                _ => tables.push(TableDesc {
-                    schema: Some(table_schema),
-                    name: table_name,
-                    columns: vec![column],
-                }),
-            }
-        }
-        Ok(tables)
-    }
-
-    async fn ping(&self, pool: &dyn Pool) -> Result<()> {
-        let pg = pg_pool(pool)?;
-        let client = pg.pool.get().await.map_err(pool_error)?;
-        client
-            .simple_query("SELECT 1")
-            .await
-            .map(|_| ())
-            .map_err(|e| warehouse_error(e, false))
     }
 }
 

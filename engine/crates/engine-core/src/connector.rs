@@ -45,21 +45,6 @@ pub struct PoolStats {
     pub waiting: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TableDesc {
-    pub schema: Option<String>,
-    pub name: String,
-    pub columns: Vec<ColumnDesc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ColumnDesc {
-    pub name: String,
-    pub db_type: String,
-    pub nullable: bool,
-    pub position: usize,
-}
-
 #[async_trait]
 pub trait Pool: Send + Sync {
     fn as_any(&self) -> &dyn Any;
@@ -73,7 +58,4 @@ pub trait Connector: Send + Sync {
     fn warehouse(&self) -> Warehouse;
     async fn connect(&self, details: &Value, config: &PoolConfig) -> Result<Arc<dyn Pool>>;
     async fn execute(&self, pool: &dyn Pool, query: Query) -> Result<ExecuteHandle>;
-    async fn execute_statement(&self, pool: &dyn Pool, query: Query) -> Result<u64>;
-    async fn describe(&self, pool: &dyn Pool, schema: Option<&str>) -> Result<Vec<TableDesc>>;
-    async fn ping(&self, pool: &dyn Pool) -> Result<()>;
 }

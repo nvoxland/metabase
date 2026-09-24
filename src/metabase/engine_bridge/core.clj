@@ -11,6 +11,7 @@
   (:require
    [clojure.core.async :as a]
    [clojure.string :as str]
+   [metabase.driver :as driver]
    [metabase.driver.sql-jdbc.execute :as sql-jdbc.execute]
    [metabase.driver.util :as driver.u]
    [metabase.engine-bridge.db :as engine-bridge.db]
@@ -21,7 +22,7 @@
   (:import
    (java.math BigDecimal RoundingMode)
    (java.nio.charset StandardCharsets)
-   (java.sql PreparedStatement ResultSet)
+   (java.sql PreparedStatement ResultSet Statement)
    (java.time Instant LocalDate LocalDateTime LocalTime OffsetDateTime ZonedDateTime ZoneOffset)
    (org.apache.arrow.flight CallStatus FlightProducer$CallContext FlightProducer$ServerStreamListener FlightServer
                             Location NoOpFlightProducer Ticket)
@@ -175,11 +176,17 @@
      database
      {:session-timezone (:time_zone settings)}
      (fn [conn]
+       ;; the engine decided the impersonation role for this statement; apply it the way the JDBC path does
+       (when-let [role (:role settings)]
+         (driver/set-role! driver conn role))
        (let [jdbc-params (mapv param->jdbc params)]
          (with-open [stmt (sql-jdbc.execute/statement-or-prepared-statement driver conn sql jdbc-params canceled)
-                     rs   (if (instance? PreparedStatement stmt)
-                            (sql-jdbc.execute/execute-prepared-statement! driver stmt)
-                            (sql-jdbc.execute/execute-statement! driver stmt sql))]
+                     rs   (do
+                            (when-let [ms (:statement_timeout_ms settings)]
+                              (.setQueryTimeout ^Statement stmt (int (max 1 (quot ms 1000)))))
+                            (if (instance? PreparedStatement stmt)
+                              (sql-jdbc.execute/execute-prepared-statement! driver stmt)
+                              (sql-jdbc.execute/execute-statement! driver stmt sql)))]
            (stream-result-set! driver rs allocator listener)))))))
 
 (defn- producer

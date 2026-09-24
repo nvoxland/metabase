@@ -25,8 +25,11 @@ async fn pool() -> Option<Arc<dyn engine_core::connector::Pool>> {
         .connect(&details(), &PoolConfig::default())
         .await
         .unwrap();
-    match connector.ping(pool.as_ref()).await {
-        Ok(()) => Some(pool),
+    match connector
+        .execute(pool.as_ref(), query("SELECT 1", vec![]))
+        .await
+    {
+        Ok(_) => Some(pool),
         Err(e) => {
             eprintln!("skipping: no Postgres reachable ({})", e.message);
             None
@@ -214,17 +217,6 @@ async fn streams_a_million_rows_in_batches() {
     }
     assert_eq!(rows, 1_000_000);
     assert!(batches >= 122, "{batches} batches");
-}
-
-#[tokio::test]
-async fn describe_lists_tables_and_columns() {
-    let Some(pool) = pool().await else { return };
-    let tables = PostgresConnector
-        .describe(pool.as_ref(), Some("public"))
-        .await
-        .unwrap();
-    assert!(!tables.is_empty());
-    assert!(tables.iter().all(|t| !t.columns.is_empty()));
 }
 
 #[tokio::test]

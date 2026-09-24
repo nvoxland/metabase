@@ -20,7 +20,7 @@ use async_trait::async_trait;
 use datafusion::error::DataFusionError;
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use engine_core::api::PoolConfig;
-use engine_core::connector::{Connector, ExecuteHandle, Pool, PoolStats, Query, TableDesc};
+use engine_core::connector::{Connector, ExecuteHandle, Pool, PoolStats, Query};
 use engine_core::error::{EngineError, ErrorKind, Result};
 use engine_dialects::Warehouse;
 use futures::{Stream, StreamExt, TryStreamExt};
@@ -216,21 +216,6 @@ impl Connector for JdbcBridgeConnector {
             stream: Box::pin(RecordBatchStreamAdapter::new(schema, batches)),
             cancel,
         })
-    }
-
-    async fn execute_statement(&self, _pool: &dyn Pool, _query: Query) -> Result<u64> {
-        Err(EngineError::unsupported(
-            "statements without a result set",
-            "jdbc-bridge",
-        ))
-    }
-
-    async fn describe(&self, _pool: &dyn Pool, _schema: Option<&str>) -> Result<Vec<TableDesc>> {
-        Err(EngineError::unsupported("describe", "jdbc-bridge"))
-    }
-
-    async fn ping(&self, pool: &dyn Pool) -> Result<()> {
-        bridge_pool(pool).map(|_| ())
     }
 }
 

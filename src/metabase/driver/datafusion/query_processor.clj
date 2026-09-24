@@ -13,8 +13,10 @@
    [metabase.driver.common :as driver.common]
    [metabase.driver.sql.query-processor :as sql.qp]
    [metabase.driver.sql.query-processor.format :as sql.qp.format]
+   [metabase.driver.sql.query-processor.util :as sql.qp.u]
+   [metabase.driver.sql.util :as sql.u]
+   [metabase.util.date-2 :as u.date]
    [metabase.util.honey-sql-2 :as h2x]
-   [metabase.util.i18n :refer [tru]]
    [metabase.util.malli :as mu]))
 
 (set! *warn-on-reflection* true)
@@ -251,9 +253,24 @@
   [driver [_ _opts arg]]
   (sql.qp/->honeysql driver [:percentile {} arg 0.5]))
 
-;;; `:convert-timezone` is declared unsupported (`database-supports?`), but a query built for the warehouse driver can
-;;; still carry one; say so plainly instead of failing deep in the compiler.
+;;; `convertTimezone`, as Postgres does it (`TIMEZONE(zone, ts)`), through the engine's `mb_at_time_zone`, which every
+;;; dialect renders as `ts AT TIME ZONE 'zone'`: a zoned timestamp becomes the wall-clock time in the zone, an unzoned
+;;; one is read as wall-clock time in the source zone first.
 (defmethod sql.qp/->honeysql [:datafusion :convert-timezone]
-  [_driver _clause]
-  (throw (ex-info (tru "The native query engine does not support convertTimezone yet.")
-                  {:type driver-api/qp.error-type.unsupported-feature})))
+  [driver [_ _opts arg target-timezone source-timezone]]
+  (let [expr         (sql.qp/->honeysql driver (cond-> arg
+                                                 (string? arg) u.date/parse))
+        timestamptz? (or (sql.qp.u/field-with-tz? arg)
+                         (h2x/is-of-type? expr "timestamptz")
+                         (h2x/is-of-type? expr "timestamp with time zone"))
+        _            (sql.u/validate-convert-timezone-args timestamptz? target-timezone source-timezone)
+        ;; a date has no clock to shift; make it a timestamp first so the source zone applies to midnight
+        expr         (cond-> expr
+                       (or (instance? java.time.LocalDate expr)
+                           (h2x/is-of-type? expr "date"))
+                       h2x/->timestamp)
+        at-zone      (fn [zone e] [:mb_at_time_zone e (h2x/literal zone)])
+        expr         (at-zone target-timezone (if timestamptz?
+                                                expr
+                                                (at-zone source-timezone expr)))]
+    (h2x/with-database-type-info expr "timestamp")))

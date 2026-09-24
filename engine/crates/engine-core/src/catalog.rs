@@ -20,6 +20,9 @@ use crate::api::{CatalogSnapshot, ColumnSnapshot, TableSnapshot};
 use crate::error::{EngineError, ErrorKind, Result};
 
 /// The catalog name every session sees. Warehouse schemas sit underneath it.
+/// Field metadata key carrying the warehouse's own type name for a column.
+pub const DB_TYPE_METADATA: &str = "metabase.db_type";
+
 pub const CATALOG_NAME: &str = "warehouse";
 pub const DEFAULT_SCHEMA: &str = "public";
 
@@ -203,7 +206,16 @@ impl SnapshotTable {
 
 fn column_to_field(column: &ColumnSnapshot) -> Result<Field> {
     let data_type = parse_arrow_type(&column.arrow_type)?;
-    Ok(Field::new(&column.name, data_type, column.nullable))
+    let mut field = Field::new(&column.name, data_type, column.nullable);
+    if let Some(db_type) = &column.db_type {
+        // Rides along to the result schema for column references, so the JVM can restore types
+        // Arrow has no equivalent for (uuid, timetz) from the warehouse type name.
+        field.set_metadata(std::collections::HashMap::from([(
+            DB_TYPE_METADATA.to_string(),
+            db_type.clone(),
+        )]));
+    }
+    Ok(field)
 }
 
 /// Parse an Arrow type from its `Display` form (`Int64`, `Utf8`, `Timestamp(Microsecond, None)`).

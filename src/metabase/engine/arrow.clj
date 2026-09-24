@@ -72,6 +72,12 @@
       (.setScale stripped 0)
       stripped)))
 
+(defn- db-type
+  "The warehouse's own type name for a column, when the catalog snapshot carried it (see
+  `DB_TYPE_METADATA` in the engine's catalog)."
+  [^FieldVector vector]
+  (some-> vector .getField .getMetadata (.get "metabase.db_type")))
+
 (defn- timestamp-fn
   "Accessor for any timestamp vector: `nanos-per-unit` scales the stored integer to nanoseconds; a
   zoned column (Arrow carries the zone, always UTC from the engine) becomes an `OffsetDateTime`,
@@ -98,7 +104,11 @@
       Float8Vector          (fn [i] (when-not (null? i) (.get ^Float8Vector vector (int i))))
       Float4Vector          (fn [i] (when-not (null? i) (double (.get ^Float4Vector vector (int i)))))
       DecimalVector         (fn [i] (when-not (null? i) (strip-zeros (.getObject ^DecimalVector vector (int i)))))
-      VarCharVector         (fn [i] (when-not (null? i) (String. (.get ^VarCharVector vector (int i)) StandardCharsets/UTF_8)))
+      VarCharVector         (let [text (fn [^long i] (String. (.get ^VarCharVector vector (int i)) StandardCharsets/UTF_8))]
+                              ;; the catalog tags columns with the warehouse's type name; restore what Arrow can't carry
+                              (if (= "uuid" (db-type vector))
+                                (fn [i] (when-not (null? i) (java.util.UUID/fromString (text i))))
+                                (fn [i] (when-not (null? i) (text i)))))
       BitVector             (fn [i] (when-not (null? i) (= 1 (.get ^BitVector vector (int i)))))
       DateDayVector         (fn [i] (when-not (null? i) (LocalDate/ofEpochDay (.get ^DateDayVector vector (int i)))))
       TimeStampSecTZVector   (timestamp-fn vector 1000000000 true)

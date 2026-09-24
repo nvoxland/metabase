@@ -6,9 +6,9 @@
    (java.time LocalDateTime LocalTime OffsetDateTime ZoneOffset)
    (org.apache.arrow.memory RootAllocator)
    (org.apache.arrow.vector TimeNanoVector TimeStampMicroTZVector TimeStampMilliVector TimeStampNanoTZVector
-                            TimeStampNanoVector VectorSchemaRoot)
+                            TimeStampNanoVector VarCharVector VectorSchemaRoot)
    (org.apache.arrow.vector.types TimeUnit)
-   (org.apache.arrow.vector.types.pojo ArrowType$Time ArrowType$Timestamp Field FieldType)))
+   (org.apache.arrow.vector.types.pojo ArrowType$Time ArrowType$Timestamp ArrowType$Utf8 Field FieldType)))
 
 (set! *warn-on-reflection* true)
 
@@ -23,6 +23,20 @@
 
 (defn- field ^Field [name arrow-type]
   (Field. name (FieldType/nullable arrow-type) nil))
+
+(deftest ^:parallel uuid-columns-test
+  (testing "a text column the catalog tagged as uuid comes back as java.util.UUID, like the JDBC driver"
+    (with-open [allocator (RootAllocator.)
+                tagged    (VarCharVector. (Field. "u" (FieldType. true (ArrowType$Utf8.) nil {"metabase.db_type" "uuid"}) nil) allocator)
+                plain     (VarCharVector. (Field. "t" (FieldType/nullable (ArrowType$Utf8.)) nil) allocator)]
+      (doseq [^org.apache.arrow.vector.FieldVector v [tagged plain]] (.allocateNew v))
+      (.setSafe tagged 0 (.getBytes "d6b02fa2-bf7b-4b32-80d5-060b649c9859" "UTF-8"))
+      (.setSafe plain 0 (.getBytes "d6b02fa2-bf7b-4b32-80d5-060b649c9859" "UTF-8"))
+      (doseq [^org.apache.arrow.vector.FieldVector v [tagged plain]] (.setValueCount v 1))
+      (with-open [root (VectorSchemaRoot. ^java.util.List [tagged plain])]
+        (.setRowCount root 1)
+        (is (= [#uuid "d6b02fa2-bf7b-4b32-80d5-060b649c9859" "d6b02fa2-bf7b-4b32-80d5-060b649c9859"]
+               ((engine.arrow/row-thunk (one-batch root)))))))))
 
 (deftest ^:parallel timestamp-units-test
   (testing "every Arrow timestamp unit becomes the java.time value the JDBC drivers would return"

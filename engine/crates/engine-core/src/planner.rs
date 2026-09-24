@@ -301,7 +301,7 @@ mod tests {
                 ]},
                 {"schema": "public", "name": "Products", "columns": [
                     {"name": "ID", "type": "Int64", "nullable": false},
-                    {"name": "Title", "type": "Utf8"}
+                    {"name": "Title", "type": "Utf8", "db_type": "text"}
                 ]}
             ]
         }))
@@ -483,6 +483,44 @@ mod tests {
             r#"SELECT CAST("Products"."Title" AS TIME) AS "t" FROM "public"."Products""#
         );
         assert_eq!(result.schema[0].arrow_type, "Time64(µs)");
+    }
+
+    #[tokio::test]
+    async fn mb_at_time_zone_unparses_as_at_time_zone_and_flips_zonedness() {
+        let result = planner()
+            .plan_and_unparse(
+                r#"SELECT mb_at_time_zone("Created At", 'Asia/Seoul') AS "wall", mb_at_time_zone(mb_at_time_zone("Created At", 'Asia/Seoul'), 'UTC') AS "back" FROM "public"."Orders""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.warehouse_sql,
+            r#"SELECT ("Orders"."Created At" AT TIME ZONE 'Asia/Seoul') AS "wall", (("Orders"."Created At" AT TIME ZONE 'Asia/Seoul') AT TIME ZONE 'UTC') AS "back" FROM "public"."Orders""#
+        );
+        assert_eq!(result.schema[0].arrow_type, "Timestamp(µs)");
+        assert_eq!(result.schema[1].arrow_type, "Timestamp(µs, \"UTC\")");
+    }
+
+    #[tokio::test]
+    async fn warehouse_type_names_ride_along_as_field_metadata() {
+        // the test catalog gives "Title" a db_type (see `planner()`); a bare column reference keeps it
+        let plan = planner()
+            .analyze(r#"SELECT "Title", upper("Title") AS "u" FROM "public"."Products""#)
+            .await
+            .unwrap();
+        let fields = plan.schema().fields();
+        assert_eq!(
+            fields[0]
+                .metadata()
+                .get(crate::catalog::DB_TYPE_METADATA)
+                .map(String::as_str),
+            Some("text")
+        );
+        assert!(fields[1]
+            .metadata()
+            .get(crate::catalog::DB_TYPE_METADATA)
+            .is_none());
     }
 
     #[tokio::test]
