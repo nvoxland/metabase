@@ -6,6 +6,8 @@ This is the state of the DataFusion-based query engine on the `hackathon-datafus
 
 The engine runs Metabase queries against Postgres and MySQL (including MariaDB) through one compiler, one planner, and one set of rewrite rules, with results streamed back as Arrow. Against the full driver test suites it is close to the JDBC path: 3 engine-attributable failures of about 3,640 Postgres tests, and a small set of known differences on MySQL. On a generated 11-million-row dataset it returns identical results to JDBC on every benchmark query, runs small queries within a millisecond of JDBC, and runs large joins and downloads about two to three times faster. Most of that speedup comes from Postgres being allowed to do more, not from DataFusion.
 
+Its biggest advantage isn't speed. Today Metabase users choose between MBQL, which is portable and governed but limited to what the query builder can express, and native SQL, which is full SQL but in each warehouse's own dialect and outside Metabase's row and column security. The engine offers a third option: full SQL in one dialect, checked against Metabase's metadata and translated for each warehouse.
+
 Much of the engine is still a prototype. Plan-level security isn't implemented, native SQL questions still run on JDBC, the packaging has never run in CI, and a growing layer of plan rewrites compensates for how DataFusion's unparser writes SQL.
 
 ## What was built
@@ -174,7 +176,7 @@ So what was rebuilt is Metabase's own JDBC glue, once per connector, not the ven
 Each option below is estimated against the baseline of 15,500 to 19,500 added lines and about 4,100 removed.
 
 - **ADBC drivers and a shared connector toolkit.** An ADBC driver returns Arrow and takes Arrow parameters, so row conversion and parameter binding (about half of each connector) mostly disappear, leaving about 100 lines of type adjustments. A shared toolkit would hold the generic half of each connector's main file (session lifecycle, cancellation, the row cap, streaming with back-pressure), about 600 lines once, leaving about 150 warehouse-specific lines per connector. With about 300 lines to integrate the ADBC driver manager, the five connectors come to 2,300 to 3,300 lines instead of 4,700 to 6,200. The catch: official Apache ADBC drivers cover Postgres, Snowflake, BigQuery, SQLite, and Flight SQL. MySQL, ClickHouse, and others come from the ADBC Driver Foundry under mixed licenses, or stay native and use only the toolkit. ADBC drivers are also C or Go libraries, one more native artifact per platform, with a blocking API.
-- **Dialects scoped to what MBQL emits.** In the MySQL dialect, about a third of the override arms (`strpos`, `starts_with`, `ends_with`, `ln`, `trunc`, `random`, `regexp_like`, `regexp_replace`, trims with explicit characters) render functions the MBQL compiler never emits, and by a manual reading only about 40 of its 97 allowlisted functions are ones MBQL uses. Scoping would cut 20 to 30 percent of each dialect, bringing the dialects to 4,100 to 6,200 lines. The cost is the design decision that the whole DataFusion SQL surface is available: engine-dialect native SQL and AI-generated SQL would hit rejections more often. The rejection is safe, but it is a smaller product.
+- **Dialects scoped to what MBQL emits.** In the MySQL dialect, about a third of the override arms (`strpos`, `starts_with`, `ends_with`, `ln`, `trunc`, `random`, `regexp_like`, `regexp_replace`, trims with explicit characters) render functions the MBQL compiler never emits, and by a manual reading only about 40 of its 97 allowlisted functions are ones MBQL uses. Scoping would cut 20 to 30 percent of each dialect, bringing the dialects to 4,100 to 6,200 lines. The cost is the engine's main advantage (see [Does DataFusion earn its place?](#does-datafusion-earn-its-place)): scoped dialects give full SQL in one dialect only as far as MBQL reaches, so native and AI-generated SQL in the engine dialect would be rejected wherever it goes further. The rejection is safe, but it gives up most of what the engine is for, so this option is listed for completeness rather than recommended.
 - **Always use the bridge.** No native connectors at all: every warehouse runs through its vendor JDBC driver behind the bridge. That removes the connectors (4,700 to 6,200 lines) and the per-warehouse sync dispatch (about 500), since bridged databases sync on their own driver. It also keeps the JDBC row readers (about 220 fewer lines removed). What remains is the single compiler, the dialects, plan-level policy, and the harness. The costs are an extra loopback hop and two Arrow conversions per query, and the bridge's performance hasn't been benchmarked. The streaming and parallel-query gains in the benchmark would also depend on how the bridge reads results.
 
 | Scenario | Added | Removed | Net growth |
@@ -186,11 +188,38 @@ Each option below is estimated against the baseline of 15,500 to 19,500 added li
 | Always the bridge | 10,300–12,800 | ~3,900 | +6,400–8,900 |
 | Always the bridge, with scoped dialects | 8,900–11,000 | ~3,900 | +5,000–7,100 |
 
-Even the smallest version is larger than today's code. The case for the engine is consistency, testability, and plan-level security, not less code. Among the options, always using the bridge cuts the most code and keeps those benefits, but it leaves performance as an open question. ADBC with a shared toolkit keeps native performance and removes about half the connector code, on warehouses where an ADBC driver exists.
+Even the smallest version is larger than today's code. The case for the engine is full SQL in one dialect, consistency, testability, and plan-level security, not less code. Among the options, always using the bridge cuts the most code and keeps those benefits, but it leaves performance as an open question. ADBC with a shared toolkit keeps native performance and removes about half the connector code, on warehouses where an ADBC driver exists.
 
 ## Does DataFusion earn its place?
 
-This section compares three ways to reach the same goals: the design as built (DataFusion planning and executing, with native or ADBC connectors where they exist and the JDBC bridge for the long tail), a reorganization of the existing Clojure code, and Apache Calcite planning in the JVM with execution staying on JDBC.
+### The main advantage: full SQL in one dialect
+
+Today there are two ways to query in Metabase, and each has a hard trade-off:
+
+- **MBQL** is portable across warehouses and governed: sandboxing, permissions, and analysis all work on it. It is limited to what the query builder can express, with no CTEs, no unions, no arbitrary subqueries, and limited window functions.
+- **Native SQL** is full SQL, but in each warehouse's own dialect. It can't move between databases, it is analyzed only best-effort (sqlglot and Macaw), and, as Metabase's documentation says, it bypasses row and column security.
+
+A SQL planner in front of every warehouse removes that trade-off. SQL written once, in one dialect, is parsed and type-checked against Metabase's metadata, can carry plan-level security, and is translated for each warehouse. That reaches well beyond the query editor:
+
+- **Metabot** generates one dialect instead of fourteen.
+- **Transforms, snippets, and models** become portable between databases.
+- **Instance analytics** SQL is written once instead of in three dialects.
+- **Dependency tracking and workspace remapping** work from an exact plan instead of best-effort parsing.
+
+The prototype's best evidence is the sqllogictest harness: the same 70 SQL queries run unchanged on Postgres and MariaDB and return the same answers as DataFusion.
+
+Four caveats keep this from being "any SQL on any database":
+
+- **One dialect, but capability still varies by warehouse.** Constructs a warehouse can't run are rejected with an error naming them: on MySQL, percentiles, `FULL JOIN`, `GROUPING SETS`, and aggregate `FILTER`. That's better than a vendor syntax error, but it isn't universal.
+- **Vendor-specific features sit outside the dialect.** Postgres `jsonb` operators, PostGIS, Snowflake `VARIANT` and `FLATTEN`, and BigQuery ML need the passthrough the design plans for, with its own permission.
+- **The semantics are DataFusion's, not the warehouse's.** People who write Postgres or MySQL SQL will meet differences in NULL ordering, integer division, and time zones. Those need to be a stated product principle and documented.
+- **The prototype doesn't expose it yet.** Native questions still run on JDBC in the warehouse's dialect, and the editor has no engine-dialect mode.
+
+This advantage comes from having a SQL planner with multi-dialect output. It is not unique to DataFusion: Calcite provides it too.
+
+### Three ways to get there
+
+The rest of this section compares three ways to reach the same goals: the design as built (DataFusion planning and executing, with native or ADBC connectors where they exist and the JDBC bridge for the long tail), a reorganization of the existing Clojure code, and Apache Calcite planning in the JVM with execution staying on JDBC.
 
 ### What each capability needs
 
@@ -207,9 +236,9 @@ This section compares three ways to reach the same goals: the design as built (D
 | Arrow from the warehouse to Metabase: streaming, cheaper decoding | No | No | Yes |
 | Local compute over Arrow: post-processing, caching, Parquet, uploads, bounded fallbacks when a warehouse lacks a feature | No | Weak | Yes |
 
-The first five rows don't need a new engine. MBQL is already a structured, typed query plan, and a Clojure refactor could give it one compiler, tested semantics, and one place for capabilities. The benchmark's largest speedups also came from two JDBC-path details (`setMaxRows` blocking Postgres parallel query, and buffering whole results) that can be fixed in Clojure. Most of the engine's rewrite layer exists to correct how DataFusion's unparser writes SQL, and it wouldn't be needed there.
+The first five rows don't need a new engine. MBQL is already a structured, typed query plan, and a Clojure refactor could give it one compiler, tested semantics, and one place for capabilities. But a refactor stops at MBQL: it does nothing for the main advantage above, so it is an alternative only if full SQL in one dialect isn't a goal. The benchmark's largest speedups also came from two JDBC-path details (`setMaxRows` blocking Postgres parallel query, and buffering whole results) that can be fixed in Clojure. Most of the engine's rewrite layer exists to correct how DataFusion's unparser writes SQL, and it wouldn't be needed there.
 
-The next three rows need a SQL planner, and Calcite provides one as well as DataFusion does.
+The next three rows are the main advantage. They need a SQL planner, and Calcite provides one as well as DataFusion does, with more dialects.
 
 The last two rows are what only DataFusion provides: an Arrow data path from the warehouse, and a real engine to compute over it. The prototype realizes little of that yet. It converts Arrow back into Clojure rows at the end, and none of the post-processing, caching, or exports has moved into the engine. The download benchmark shows the data-path gain is real (a 500k-row download in 235 ms against 743 ms), but part of that gap is the JDBC path's buffering, which a Clojure fix would also remove.
 
@@ -235,14 +264,14 @@ Neither is free. Calcite's unparser would need the same kind of dialect fixes th
 
 ### What decides it
 
-- **If the goal is MBQL consistency and maintainability**, a Clojure refactor gets most of it, with no Rust, no native builds, and no connector code.
-- **If the goal is also governing native and AI-generated SQL, with plan-level security**, Metabase needs a SQL planner. Calcite in front of the existing JDBC execution is the alternative to prototype against: it covers those rows without the native boundary or connectors, and with more dialects.
+- **Full SQL in one dialect, with plan-level security, is the reason to do this at all.** It needs a SQL planner. Calcite in front of the existing JDBC execution is the alternative to prototype against: it delivers this without the native boundary or connectors, and with more dialects.
+- **If the only goal were MBQL consistency and maintainability**, a Clojure refactor would get most of it with no Rust, no native builds, and no connector code. It would leave the choice between MBQL and native SQL exactly as it is today.
 - **If Metabase will compute over Arrow itself** (post-processing, caching, exports, Parquet, fallbacks for missing warehouse features), DataFusion is the right foundation, and it covers everything above as well. Its costs are worth paying if that roadmap is real. If it isn't, the Arrow data path and local engine are capabilities the product wouldn't use.
 
 ## Recommended next steps
 
 1. Push the branch and get the engine CI jobs, including the per-platform native builds and the Alpine image, running for real.
-2. Decide the product questions: NULL ordering on MySQL, timestamps from parsed text, and whether the native editor gets an engine-dialect mode.
+2. Decide the product questions: whether the native editor, Metabot, and transforms get an engine-dialect mode (the main advantage depends on it), how warehouse-only features reach users through passthrough, NULL ordering on MySQL, and timestamps from parsed text.
 3. Fix the JDBC path's two handicaps (`setMaxRows` disabling parallel query, buffering whole results) independently of the engine, so the comparison reflects the engine itself.
 4. Upstream the unparser fixes to DataFusion and retire the matching rewrites.
 5. Run the benchmark on MySQL and add it to CI with a regression threshold.
