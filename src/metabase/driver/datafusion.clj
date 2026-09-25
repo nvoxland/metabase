@@ -51,8 +51,6 @@
                               :datetime-diff                  true
                               ;; sync: the warehouse driver's metadata SQL runs through the engine (see below)
                               :describe-fields                true
-                              :describe-indexes               true
-                              :index-info                     true
                               :metadata/key-constraints       true
                               :expression-literals            true
                               :expressions                    true
@@ -78,6 +76,9 @@
 ;;; Features that depend on the warehouse behind the engine rather than the engine: what the plan can say is one
 ;;; thing, what the warehouse can run another (MySQL has no schemas, no FULL JOIN, no GROUPING SETS, no percentiles).
 (doseq [feature [:schemas
+                 ;; index sync happens only where the warehouse driver does it (see `describe-indexes` below)
+                 :describe-indexes
+                 :index-info
                  :full-join
                  :percentile-aggregations
                  :native-pivot-tables
@@ -447,8 +448,7 @@
   "Whether `warehouse` lists indexes with SQL of its own (Postgres). The others read JDBC metadata, which only the
   driver's own connection can do."
   [warehouse]
-  (not= (get-method sql-jdbc.sync/describe-indexes-sql warehouse)
-        (get-method sql-jdbc.sync/describe-indexes-sql :default)))
+  (some? (get-method sql-jdbc.sync/describe-indexes-sql warehouse)))
 
 (defmethod driver/describe-indexes :datafusion
   [_driver database & {:keys [schema-names table-names] :as opts}]
