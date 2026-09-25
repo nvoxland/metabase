@@ -190,34 +190,40 @@ Even the smallest version is larger than today's code. The case for the engine i
 
 ## Does DataFusion earn its place?
 
-The cheapest end state above sends every query through the JDBC bridge. In that design DataFusion never executes anything: it parses SQL, checks it against Metabase's metadata, rewrites the plan, and writes SQL for the warehouse. The question is what that buys over reorganizing the existing Clojure code.
+This section compares three ways to reach the same goals: the design as built (DataFusion planning and executing, with native or ADBC connectors where they exist and the JDBC bridge for the long tail), a reorganization of the existing Clojure code, and Apache Calcite planning in the JVM with execution staying on JDBC.
 
-For MBQL queries, not much. MBQL is already a structured, typed query plan, so compiling it to SQL text for DataFusion to parse back into a plan is a round trip, not a new capability. With the bridge, the Arrow data plane becomes overhead: rows go from JDBC to Arrow in the JVM, into Rust, back out as Arrow, and into Clojure rows. And the benchmark's speedups came from two JDBC-path details (`setMaxRows` blocking Postgres parallel query, and buffering whole results) that can be fixed in Clojure.
+### What each capability needs
 
-| Capability | Needs DataFusion? | Alternative |
-| --- | --- | --- |
-| One compiler for MBQL across warehouses | No | Refactor the `sql.qp` overrides into a shared semantic layer (the same idea as the engine's `mb_*` functions) and a small rendering table per dialect |
-| Consistent semantics across warehouses, tested | No | The sqllogictest harness ported to Clojure, checking warehouses against each other or a reference such as DuckDB |
-| Capabilities in one place, structured rejections | No | A per-dialect capability table in place of scattered feature flags; MBQL clauses are a closed set |
-| Row cap, cancellation, streaming, parallel plans | No | Fix the JDBC execution path |
-| Sandboxing for MBQL | No | Already done in Clojure, by rewriting MBQL |
-| Validating native or AI-generated SQL against the catalog | A SQL planner | Apache Calcite, in the JVM |
-| One SQL dialect for native and AI SQL, translated per warehouse | A parser and unparser | Calcite, or sqlglot (slow and prone to hanging on GraalPy today) |
-| Plan-level security on SQL people write: row filters, column masks, table allowlists, SELECT-only guaranteed | A planner | Calcite |
-| Local compute on Arrow: post-processing, caching, Parquet, uploads, cross-source work | Yes | Calcite is weak here; Clojure can't do it |
+| Capability | Clojure refactor | Calcite and JDBC | DataFusion as built |
+| --- | --- | --- | --- |
+| One compiler for MBQL across warehouses | Yes: refactor the `sql.qp` overrides into a shared semantic layer (the idea behind the engine's `mb_*` functions) and a small rendering table per dialect | Yes | Yes |
+| Consistent semantics across warehouses, tested | Yes, with the harness ported to Clojure and a reference such as DuckDB | Partly: its execution is too weak to serve as the reference, so it needs one too | Yes: DataFusion is the reference the harness already uses |
+| Capabilities in one place, structured rejections | Yes: a per-dialect capability table in place of scattered feature flags; MBQL clauses are a closed set | Yes | Yes |
+| Row cap, cancellation, parallel plans | Yes, by fixing the JDBC execution path | Yes, the same way | Yes, in each connector |
+| Sandboxing for MBQL | Already done, by rewriting MBQL | Could move into the plan | Could move into the plan |
+| Validating native or AI-generated SQL against the catalog | No | Yes | Yes |
+| One SQL dialect for native and AI SQL, translated per warehouse | No (sqlglot on GraalPy is best-effort, slow, and prone to hanging) | Yes, about 40 dialects | Yes, 7 upstream dialects plus Metabase's own |
+| Plan-level security on SQL people write: row filters, column masks, table allowlists, SELECT-only guaranteed | No | Yes | Yes |
+| Arrow from the warehouse to Metabase: streaming, cheaper decoding | No | No | Yes |
+| Local compute over Arrow: post-processing, caching, Parquet, uploads, bounded fallbacks when a warehouse lacks a feature | No | Weak | Yes |
 
-So with the bridge everywhere, DataFusion's value rests on three things: governing SQL that people and AI write, plan-level security, and a future where Metabase computes over Arrow itself. The first two need a SQL planner, but not necessarily DataFusion.
+The first five rows don't need a new engine. MBQL is already a structured, typed query plan, and a Clojure refactor could give it one compiler, tested semantics, and one place for capabilities. The benchmark's largest speedups also came from two JDBC-path details (`setMaxRows` blocking Postgres parallel query, and buffering whole results) that can be fixed in Clojure. Most of the engine's rewrite layer exists to correct how DataFusion's unparser writes SQL, and it wouldn't be needed there.
+
+The next three rows need a SQL planner, and Calcite provides one as well as DataFusion does.
+
+The last two rows are what only DataFusion provides: an Arrow data path from the warehouse, and a real engine to compute over it. The prototype realizes little of that yet. It converts Arrow back into Clojure rows at the end, and none of the post-processing, caching, or exports has moved into the engine. The download benchmark shows the data-path gain is real (a 500k-row download in 235 ms against 743 ms), but part of that gap is the JDBC path's buffering, which a Clojure fix would also remove.
 
 ### DataFusion or Calcite
 
 [Apache Calcite](https://calcite.apache.org/) is an open-source Java library for parsing, validating, optimizing, and translating SQL. It isn't a database. It's the SQL layer other systems build on, including Apache Hive, Flink, Druid, Drill, and Phoenix. It parses SQL, validates it against a catalog you supply (names, types, implicit casts), turns it into relational algebra that can be inspected and rewritten with rules, optimizes it, and unparses a plan back to SQL for about 40 dialects. It can also execute queries through adapters, but that part is weaker.
 
-The design doc set Calcite aside because it executes poorly, falls back to in-memory processing, and doesn't speak Arrow. With the bridge everywhere, the engine doesn't execute either, so that objection mostly disappears. What's left, parsing, validating against the catalog, rewriting the plan, and unparsing per dialect, is Calcite's core job.
+The design doc set Calcite aside because it executes poorly, falls back to in-memory processing, and doesn't speak Arrow. That still holds for execution. It doesn't rule out Calcite as a planner in front of the existing JDBC execution, which is what the middle column above describes.
 
 | | DataFusion | Calcite |
 | --- | --- | --- |
 | Runs in | Rust, behind a native boundary (FFI or a sidecar) | The JVM, as a library |
 | Packaging | Native builds per platform (glibc, musl, aarch64, macOS) | A jar |
+| Execution | Its own connectors, returning Arrow | The existing JDBC path, unchanged |
 | Unparser dialects | 7 upstream (Postgres, MySQL, SQLite, DuckDB, BigQuery, Snowflake, default) | About 40, including SQL Server, Oracle, Vertica, Hive, Presto, ClickHouse, and Redshift |
 | Local execution | Fast, Arrow-native, a real engine | Weak; fine for small results, not a compute engine |
 | Semantic reference for testing | Yes: it runs queries, and the harness uses it as the reference | Only through its weaker execution |
@@ -225,13 +231,13 @@ The design doc set Calcite aside because it executes poorly, falls back to in-me
 | Learning curve | Rust, DataFusion's plan and unparser internals | Calcite's type system and relational-algebra APIs, which are large and steep |
 | Release coupling | DataFusion, Arrow, and Flight upgrade in lockstep every 6 to 10 weeks | A single library, on a slower cadence |
 
-Neither is free. Calcite's unparser would need the same kind of dialect fixes this prototype needed for DataFusion, and its rewrites are as intricate. DataFusion carries the native platform cost for every deployment.
+Neither is free. Calcite's unparser would need the same kind of dialect fixes this prototype needed for DataFusion, and its rewrites would be as intricate. DataFusion carries the native platform cost and the connector code described above.
 
 ### What decides it
 
-- **If the goal is MBQL consistency and maintainability**, a Clojure refactor gets most of it, with no Rust, no native builds, and no connector code. Most of the engine's rewrite layer would be unnecessary, since it exists to correct how DataFusion's unparser writes SQL.
-- **If the goal is governing native and AI-generated SQL, with the bridge everywhere**, the engine needs a SQL planner, and Calcite in the JVM is the alternative to prototype against, because the bridge removes the reason it was ruled out.
-- **If Metabase will compute over Arrow itself** (post-processing, caching, Parquet, cross-source work), DataFusion is clearly the right foundation. But that argues for native or ADBC connectors rather than the bridge everywhere, so the Arrow path is real end to end.
+- **If the goal is MBQL consistency and maintainability**, a Clojure refactor gets most of it, with no Rust, no native builds, and no connector code.
+- **If the goal is also governing native and AI-generated SQL, with plan-level security**, Metabase needs a SQL planner. Calcite in front of the existing JDBC execution is the alternative to prototype against: it covers those rows without the native boundary or connectors, and with more dialects.
+- **If Metabase will compute over Arrow itself** (post-processing, caching, exports, Parquet, fallbacks for missing warehouse features), DataFusion is the right foundation, and it covers everything above as well. Its costs are worth paying if that roadmap is real. If it isn't, the Arrow data path and local engine are capabilities the product wouldn't use.
 
 ## Recommended next steps
 
@@ -242,5 +248,5 @@ Neither is free. Calcite's unparser would need the same kind of dialect fixes th
 5. Run the benchmark on MySQL and add it to CI with a regression threshold.
 6. Benchmark the bridge against native connectors, and try an ADBC driver for Postgres, before choosing the connector strategy for the remaining warehouses.
 7. Decide what the engine is for: MBQL consistency only, governing native and AI SQL, or local compute over Arrow. That choice decides between a Clojure refactor, a SQL planner in the JVM, and DataFusion with native connectors.
-8. If the answer is governing SQL with the bridge everywhere, spike Calcite on the same sqllogictest files and driver suites before committing further to either.
+8. Unless local compute over Arrow is on the roadmap, spike Calcite as a planner in front of the JDBC path, on the same sqllogictest files and driver suites, before committing further to either.
 9. Implement plan-level policy, starting with row filters, in whichever planner wins.
