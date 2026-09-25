@@ -25,6 +25,16 @@ fn as_string(value: &Value) -> Option<String> {
     }
 }
 
+/// A timestamp as Metabase writes them. With an offset it is an instant, given back as its UTC
+/// wall clock with `Some(offset)`; without one it is a bare wall clock (`None`).
+fn parse_timestamp_with_offset(s: &str) -> Option<(NaiveDateTime, Option<i32>)> {
+    let s = s.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some((dt.naive_utc(), Some(dt.offset().local_minus_utc())));
+    }
+    parse_timestamp(s).map(|t| (t, None))
+}
+
 fn parse_timestamp(s: &str) -> Option<NaiveDateTime> {
     let s = s.trim();
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
@@ -57,6 +67,20 @@ fn zoned(naive: NaiveDateTime, session_tz: Option<&str>) -> Option<DateTime<Utc>
             let tz: arrow::array::timezone::Tz = tz.parse().ok()?;
             Some(tz.from_local_datetime(&naive).single()?.with_timezone(&Utc))
         }
+    }
+}
+
+/// The instant a `timestamptz` parameter names: with an offset, the one it says (`naive` is then
+/// its UTC wall clock); without one, the bare wall clock read in the session's zone, as Postgres
+/// reads the literal the JDBC path inlines.
+fn instant(
+    naive: NaiveDateTime,
+    offset: Option<i32>,
+    session_tz: Option<&str>,
+) -> Option<DateTime<Utc>> {
+    match offset {
+        Some(_) => Some(DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)),
+        None => zoned(naive, session_tz),
     }
 }
 
@@ -118,8 +142,9 @@ pub fn bind(
         }
         Type::TIMESTAMPTZ => {
             let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
-            let naive = parse_timestamp(s).ok_or_else(|| invalid(index, ty, v))?;
-            Box::new(zoned(naive, session_tz).ok_or_else(|| invalid(index, ty, v))?)
+            let (naive, offset) =
+                parse_timestamp_with_offset(s).ok_or_else(|| invalid(index, ty, v))?;
+            Box::new(instant(naive, offset, session_tz).ok_or_else(|| invalid(index, ty, v))?)
         }
         Type::TIME => {
             let s = v.as_str().ok_or_else(|| invalid(index, ty, v))?;
@@ -369,6 +394,28 @@ mod tests {
         let utc = zoned(naive, None).unwrap();
         assert_eq!(utc.to_rfc3339(), "2024-01-01T00:00:00+00:00");
         assert!(zoned(naive, Some("Nowhere/Land")).is_none());
+    }
+
+    #[test]
+    fn an_offset_makes_a_timestamptz_parameter_an_instant_whatever_the_session_zone() {
+        let (naive, offset) = parse_timestamp_with_offset("2019-02-11T00:00:00-08:00").unwrap();
+        assert_eq!(offset, Some(-8 * 3600));
+        // the instant 08:00Z, not the wall clock re-read in Tokyo
+        assert_eq!(
+            instant(naive, offset, Some("Asia/Tokyo"))
+                .unwrap()
+                .to_rfc3339(),
+            "2019-02-11T08:00:00+00:00"
+        );
+        // a bare wall clock takes the session zone
+        let (naive, offset) = parse_timestamp_with_offset("2019-02-11T00:00:00").unwrap();
+        assert_eq!(offset, None);
+        assert_eq!(
+            instant(naive, offset, Some("America/Los_Angeles"))
+                .unwrap()
+                .to_rfc3339(),
+            "2019-02-11T08:00:00+00:00"
+        );
     }
 
     #[test]
