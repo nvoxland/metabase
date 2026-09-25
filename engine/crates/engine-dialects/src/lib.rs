@@ -509,6 +509,11 @@ impl Dialect for MetabasePostgresDialect {
             udfs::MB_TRUNC if args.len() == 1 => {
                 Ok(Some(call("trunc", vec![unparser.expr_to_sql(&args[0])?])))
             }
+            // Postgres' `to_timestamp(double)` is a timestamptz: the instant itself
+            udfs::MB_FROM_UNIX if args.len() == 1 => Ok(Some(call(
+                "to_timestamp",
+                vec![unparser.expr_to_sql(&args[0])?],
+            ))),
             _ => self
                 .inner
                 .scalar_function_to_sql_overrides(unparser, func_name, args),
@@ -656,6 +661,7 @@ const POSTGRES_FUNCTIONS: &[&str] = &[
     udfs::MB_WALL_TO_ZONED,
     udfs::MB_INT_DIV,
     udfs::MB_TRUNC,
+    udfs::MB_FROM_UNIX,
     "percentile_disc",
     // window
     "row_number",

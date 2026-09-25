@@ -55,8 +55,10 @@
 
 (defmethod sql.qp/unix-timestamp->honeysql [:datafusion :seconds]
   [_driver _unit expr]
-  ;; `to_timestamp(seconds)` means the same thing in DataFusion and Postgres.
-  (h2x/with-database-type-info [:to_timestamp expr] "timestamptz"))
+  ;; An epoch is an instant. DataFusion's own `to_timestamp(seconds)` types its result as a zone-less UTC wall clock,
+  ;; which Metabase would read in the report time zone; the engine's `mb_from_unix` is typed zoned and each dialect
+  ;; renders it as the instant (`to_timestamp` on Postgres, `FROM_UNIXTIME` in the session zone on MySQL).
+  (h2x/with-database-type-info [:mb_from_unix expr] "timestamptz"))
 
 (defn- extract [unit expr]
   [::h2x/extract unit expr])
@@ -240,17 +242,21 @@
   [driver [_ _opts value]]
   (named-cast "TEXT" "text" (sql.qp/->honeysql driver value)))
 
+(defmethod sql.qp/->integer :datafusion
+  [_driver value]
+  ;; Metabase's integer conversions round (the JDBC path's cast does on every warehouse, and inline values go through
+  ;; `Math/round`); a plain engine cast truncates, so a number is rounded first, through a double so DataFusion's
+  ;; `round` accepts any numeric type. Text parses as it is; an integer has nothing to round.
+  (named-cast "BIGINT" "bigint"
+              (if (or (string? value)
+                      (h2x/database-or-effective-type-isa? value "text" :type/Text)
+                      (h2x/database-or-effective-type-isa? value "bigint" :type/Integer))
+                value
+                [:round (named-cast "DOUBLE" "double precision" value)])))
+
 (defmethod sql.qp/->honeysql [:datafusion :integer]
   [driver [_ _opts value]]
-  ;; Metabase's `integer()` rounds a number (the JDBC path's cast does on every warehouse, and inline values go through
-  ;; `Math/round`); a plain engine cast truncates, so a number is rounded first. Text is parsed as it is.
-  (let [expr (sql.qp/->honeysql driver value)]
-    (named-cast "BIGINT" "bigint"
-                (if (or (h2x/database-or-effective-type-isa? expr "double precision" :type/Float)
-                        (h2x/database-or-effective-type-isa? expr "numeric" :type/Decimal)
-                        (and (number? expr) (not (integer? expr))))
-                  [:round expr]
-                  expr))))
+  (sql.qp/->integer driver (sql.qp/->honeysql driver value)))
 
 (defmethod sql.qp/->honeysql [:datafusion :float]
   [driver [_ _opts value]]

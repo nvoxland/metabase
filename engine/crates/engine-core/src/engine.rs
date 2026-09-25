@@ -20,6 +20,9 @@ use crate::pools::PoolRegistry;
 use crate::schema_cast::SchemaCastStream;
 use crate::stream::{BlockingReader, StreamEntry, StreamStatsSnapshot};
 
+/// Schema metadata key carrying the warehouse SQL a result stream ran.
+pub const WAREHOUSE_SQL_METADATA: &str = "metabase.warehouse_sql";
+
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -293,6 +296,7 @@ impl Engine {
     ) -> Result<u64> {
         let session = self.session(session_id)?;
         let planned = session.planner.plan(sql).await?;
+        let warehouse_sql = planned.warehouse_sql.clone();
         let registration = self
             .databases
             .get(&session.context.database_id)
@@ -319,15 +323,19 @@ impl Engine {
             .execute(
                 pool.as_ref(),
                 Query {
-                    sql: planned.warehouse_sql,
+                    sql: warehouse_sql.clone(),
                     params,
                     settings,
                 },
             )
             .await?;
+        // the SQL that ran rides on the schema, so Metabase can show it as the query's native form
+        let schema = Arc::new(planned.schema.as_ref().clone().with_metadata(
+            std::collections::HashMap::from([(WAREHOUSE_SQL_METADATA.to_string(), warehouse_sql)]),
+        ));
         let stream = SchemaCastStream::new(
             handle.stream,
-            &planned.schema,
+            &schema,
             session.context.report_timezone.as_deref(),
         );
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);

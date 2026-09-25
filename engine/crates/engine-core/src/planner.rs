@@ -75,6 +75,7 @@ impl Planner {
         let plan = resolve_engine_udfs(plan, &self.state)?;
         let plan = rename_aggregates(plan, self.policy.aggregate_renames())?;
         let plan = merge_nested_projections(plan)?;
+        let plan = keep_limit_with_sort(plan)?;
         let plan = alias_columns_over_derived_sort(plan)?;
         let plan = if self.policy.supports_nulls_ordering() {
             plan
@@ -439,6 +440,35 @@ fn resolve_sort_key(expr: &Expr, input: &LogicalPlan) -> Expr {
     resolved
 }
 
+/// `LIMIT` over a projection over a sort becomes projection over `LIMIT` over sort. The unparser
+/// turns a projection that drops sorted columns into a derived table with the `ORDER BY` inside
+/// and would leave the `LIMIT` outside; MySQL then ignores the inner `ORDER BY`, and Postgres
+/// only honors it by habit. With the limit next to the sort, both keep the order the limit cuts.
+/// A projection is per row, so the limit means the same on either side of it.
+fn keep_limit_with_sort(plan: LogicalPlan) -> Result<LogicalPlan> {
+    Ok(plan
+        .transform_up_with_subqueries(|node| {
+            let LogicalPlan::Limit(limit) = &node else {
+                return Ok(Transformed::no(node));
+            };
+            let LogicalPlan::Projection(projection) = limit.input.as_ref() else {
+                return Ok(Transformed::no(node));
+            };
+            if !matches!(projection.input.as_ref(), LogicalPlan::Sort(_)) {
+                return Ok(Transformed::no(node));
+            }
+            let inner_limit = LogicalPlan::Limit(datafusion::logical_expr::Limit {
+                skip: limit.skip.clone(),
+                fetch: limit.fetch.clone(),
+                input: Arc::clone(&projection.input),
+            });
+            Ok(Transformed::yes(LogicalPlan::Projection(
+                Projection::try_new(projection.expr.clone(), Arc::new(inner_limit))?,
+            )))
+        })?
+        .data)
+}
+
 /// Name every scanned table with the schema the catalog resolved it in. A bare name in the SQL
 /// resolved against the catalog's default schema; sent bare to the warehouse it would resolve
 /// against the connection's search path instead, which need not agree.
@@ -507,7 +537,12 @@ fn alias_columns_over_derived_sort(plan: LogicalPlan) -> Result<LogicalPlan> {
         let LogicalPlan::Projection(outer) = &node else {
             return Ok(Transformed::no(node));
         };
-        let LogicalPlan::Sort(sort) = outer.input.as_ref() else {
+        // a limit kept with its sort (see `keep_limit_with_sort`) sits between the two
+        let (limit, sort_plan) = match outer.input.as_ref() {
+            LogicalPlan::Limit(limit) => (Some(limit), limit.input.as_ref()),
+            other => (None, other),
+        };
+        let LogicalPlan::Sort(sort) = sort_plan else {
             return Ok(Transformed::no(node));
         };
         let LogicalPlan::Projection(inner) = sort.input.as_ref() else {
@@ -518,7 +553,36 @@ fn alias_columns_over_derived_sort(plan: LogicalPlan) -> Result<LogicalPlan> {
         if outer.expr.len() >= inner.expr.len() {
             return Ok(Transformed::no(node));
         }
-        let mut inner_exprs = inner.expr.clone();
+        // The derived table exposes only uniquely named columns: each sort key as a whole under an
+        // alias of its own (two joined tables' `id` columns would otherwise collide, which MySQL
+        // refuses; and an alias can only be sorted on bare, not inside an expression, on Postgres)
+        // and the copies the outer projection reads.
+        let mut inner_exprs = Vec::new();
+        let mut sort_exprs = Vec::with_capacity(sort.expr.len());
+        for (k, s) in sort.expr.iter().enumerate() {
+            let key_name = format!("__mb_s{k}");
+            // the sort names the inner projection's outputs; inside that projection they are the
+            // expressions themselves
+            let resolved = s
+                .expr
+                .clone()
+                .transform(|e| {
+                    Ok(match e {
+                        Expr::Column(c) => match inner.schema.index_of_column(&c) {
+                            Ok(i) => Transformed::yes(inner.expr[i].clone().unalias()),
+                            Err(_) => Transformed::no(Expr::Column(c)),
+                        },
+                        other => Transformed::no(other),
+                    })
+                })?
+                .data;
+            inner_exprs.push(resolved.alias(&key_name));
+            sort_exprs.push(SortExpr::new(
+                Expr::Column(Column::new_unqualified(&key_name)),
+                s.asc,
+                s.nulls_first,
+            ));
+        }
         let mut outer_exprs = Vec::with_capacity(outer.expr.len());
         for (i, expr) in outer.expr.iter().enumerate() {
             let (column, out_name) = match expr {
@@ -539,10 +603,18 @@ fn alias_columns_over_derived_sort(plan: LogicalPlan) -> Result<LogicalPlan> {
         let inner =
             LogicalPlan::Projection(Projection::try_new(inner_exprs, Arc::clone(&inner.input))?);
         let sorted = LogicalPlan::Sort(datafusion::logical_expr::Sort {
-            expr: sort.expr.clone(),
+            expr: sort_exprs,
             input: Arc::new(inner),
             fetch: sort.fetch,
         });
+        let sorted = match limit {
+            Some(limit) => LogicalPlan::Limit(datafusion::logical_expr::Limit {
+                skip: limit.skip.clone(),
+                fetch: limit.fetch.clone(),
+                input: Arc::new(sorted),
+            }),
+            None => sorted,
+        };
         let projection = Projection::try_new(outer_exprs, Arc::new(sorted))?;
         Ok(Transformed::yes(LogicalPlan::Projection(projection)))
     })?;
@@ -806,6 +878,46 @@ mod tests {
         assert_eq!(
             postgres.warehouse_sql,
             r#"SELECT CAST(trunc("Orders"."Total") AS BIGINT) AS "a" FROM "public"."Orders""#
+        );
+    }
+
+    #[tokio::test]
+    async fn an_epoch_is_an_instant_on_every_warehouse() {
+        let result = mysql_planner()
+            .plan_and_unparse(r#"SELECT mb_from_unix("quantity") AS t FROM "orders""#, &[])
+            .await
+            .unwrap();
+        assert_eq!(
+            result.warehouse_sql,
+            "SELECT FROM_UNIXTIME(CAST(`orders`.`quantity` AS DECIMAL(20,6))) AS `t` FROM `lakes`.`orders`"
+        );
+        assert_eq!(result.schema[0].arrow_type, "Timestamp(µs, \"UTC\")");
+        let postgres = planner()
+            .plan_and_unparse(
+                r#"SELECT mb_from_unix("Total") AS t FROM "public"."Orders""#,
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            postgres.warehouse_sql,
+            r#"SELECT to_timestamp("Orders"."Total") AS "t" FROM "public"."Orders""#
+        );
+    }
+
+    #[tokio::test]
+    async fn a_limit_stays_with_the_sort_it_cuts() {
+        assert_eq!(
+            mysql_sql(r#"SELECT "total" + 1 AS t FROM "orders" ORDER BY "note" ASC LIMIT 3 OFFSET 1"#).await,
+            "SELECT `__mb_c0` AS `t` FROM (SELECT `orders`.`note` AS `__mb_s0`, (`orders`.`total` + CAST(1 AS DOUBLE)) AS `__mb_c0` FROM `lakes`.`orders` ORDER BY `orders`.`note` IS NULL ASC, `__mb_s0` ASC LIMIT 3 OFFSET 1) AS `derived_limit`"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_sort_key_over_an_aggregate_output_is_the_expression_itself() {
+        assert_eq!(
+            mysql_sql(r#"SELECT sum("quantity") AS s FROM "orders" GROUP BY "note" ORDER BY "note" ASC NULLS FIRST LIMIT 2"#).await,
+            "SELECT `__mb_c0` AS `s` FROM (SELECT `orders`.`note` AS `__mb_s0`, sum(`orders`.`quantity`) AS `__mb_c0` FROM `lakes`.`orders` GROUP BY `orders`.`note` ORDER BY `__mb_s0` ASC LIMIT 2) AS `derived_limit`"
         );
     }
 
@@ -1153,7 +1265,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             result.warehouse_sql,
-            r#"SELECT "__mb_c0" AS "ID", "__mb_c1" AS "title" FROM (SELECT "o"."ID", "p"."Title" AS "title", "o"."Created At", "o"."ID" AS "__mb_c0", "p"."Title" AS "__mb_c1" FROM "public"."Orders" AS "o" LEFT OUTER JOIN "public"."Products" AS "p" ON ("o"."Product ID" = "p"."ID") ORDER BY date_trunc('day', "o"."Created At") DESC NULLS FIRST) AS "derived_sort" LIMIT 2"#
+            r#"SELECT "__mb_c0" AS "ID", "__mb_c1" AS "title" FROM (SELECT date_trunc('day', "o"."Created At") AS "__mb_s0", "o"."ID" AS "__mb_c0", "p"."Title" AS "__mb_c1" FROM "public"."Orders" AS "o" LEFT OUTER JOIN "public"."Products" AS "p" ON ("o"."Product ID" = "p"."ID") ORDER BY "__mb_s0" DESC NULLS FIRST LIMIT 2) AS "derived_limit""#
         );
         assert_eq!(
             result

@@ -160,34 +160,44 @@ fn requested_role(settings: &SessionSettings) -> Option<&str> {
         .filter(|r| !r.eq_ignore_ascii_case("none"))
 }
 
+/// Put a checked-out connection into the state one statement needs. Returns the time zone the
+/// session ended up in: the one asked for, or UTC when the server doesn't know it (a zone its
+/// time zone tables lack, or a deprecated alias such as `US/Pacific`), which the JDBC path
+/// tolerates the same way rather than failing every query.
 async fn set_up_session(
     conn: &mut Conn,
     settings: &SessionSettings,
     flavor: Flavor,
     role_set: &dashmap::DashSet<u32>,
-) -> Result<()> {
+) -> Result<String> {
     // Back to the login state (the user's default role, no session variables) when an earlier
     // statement on this connection activated a role and this one wants none; the variables are
     // set again below either way.
     if requested_role(settings).is_none() && role_set.remove(&conn.id()).is_some() {
         conn.reset().await.map_err(|e| warehouse_error(e, false))?;
     }
+    let mut zone = session_time_zone(settings).to_string();
     for statement in session_setup_sql(settings, flavor) {
         if let Err(e) = conn.query_drop(&statement).await {
-            let mut err = warehouse_error(e, false);
             if statement.starts_with("SET SESSION time_zone") {
-                err.message = format!(
-                    "{} (the MySQL server may lack its time zone tables; load them with mysql_tzinfo_to_sql)",
-                    err.message
+                tracing::warn!(
+                    zone = %zone,
+                    error = %e,
+                    "MySQL doesn't know the report time zone (load its time zone tables with mysql_tzinfo_to_sql); the session runs in UTC"
                 );
+                zone = "+00:00".to_string();
+                conn.query_drop("SET SESSION time_zone = '+00:00'")
+                    .await
+                    .map_err(|e| warehouse_error(e, false))?;
+                continue;
             }
-            return Err(err);
+            return Err(warehouse_error(e, false));
         }
     }
     if requested_role(settings).is_some() {
         role_set.insert(conn.id());
     }
-    Ok(())
+    Ok(zone)
 }
 
 async fn detect_flavor(pool: &mysql_async::Pool) -> Result<Flavor> {
@@ -250,15 +260,6 @@ impl Connector for MySqlConnector {
 
     async fn execute(&self, pool: &dyn Pool, query: Query) -> Result<ExecuteHandle> {
         let my = my_pool(pool)?;
-        let session_tz: Tz = session_time_zone(&query.settings).parse().map_err(|e| {
-            EngineError::new(
-                ErrorKind::InvalidRequest,
-                format!(
-                    "unknown report time zone {:?}: {e}",
-                    query.settings.time_zone
-                ),
-            )
-        })?;
         let mut conn = tokio::time::timeout(my.checkout_timeout, my.pool.get_conn())
             .await
             .map_err(|_| {
@@ -275,7 +276,10 @@ impl Connector for MySqlConnector {
                 }
                 e
             })?;
-        set_up_session(&mut conn, &query.settings, my.flavor, &my.role_set).await?;
+        let zone = set_up_session(&mut conn, &query.settings, my.flavor, &my.role_set).await?;
+        // the zone the server runs the session in is the one values are read back from; a name the
+        // server knows but this process doesn't is read as UTC, the closest thing to the JDBC path
+        let session_tz: Tz = zone.parse().unwrap_or_else(|_| "UTC".parse().expect("UTC"));
 
         let (sql, order) = placeholders::to_question_marks(&query.sql);
         let mut bound = Vec::with_capacity(order.len());

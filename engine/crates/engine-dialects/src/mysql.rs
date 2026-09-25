@@ -382,6 +382,25 @@ impl Dialect for MetabaseMySqlDialect {
             "trunc" if args.len() == 1 => Ok(Some(call("TRUNCATE", vec![sql(0)?, number(0)]))),
             "trunc" if args.len() == 2 => Ok(Some(call("TRUNCATE", vec![sql(0)?, sql(1)?]))),
             "random" => Ok(Some(call("RAND", vec![]))),
+            // DataFusion names `trim` `btrim`; MySQL's one-argument `ltrim`/`rtrim` mean the same
+            // and pass through, and characters to strip go through `TRIM(side chars FROM x)`
+            "btrim" | "trim" if args.len() == 1 => Ok(Some(call("TRIM", vec![sql(0)?]))),
+            // the unparser's own rendering of a one-sided trim drops the side
+            "ltrim" if args.len() == 1 => Ok(Some(call("LTRIM", vec![sql(0)?]))),
+            "rtrim" if args.len() == 1 => Ok(Some(call("RTRIM", vec![sql(0)?]))),
+            "btrim" | "trim" | "ltrim" | "rtrim" if args.len() == 2 => {
+                let trim_where = match func_name {
+                    "ltrim" => ast::TrimWhereField::Leading,
+                    "rtrim" => ast::TrimWhereField::Trailing,
+                    _ => ast::TrimWhereField::Both,
+                };
+                Ok(Some(ast::Expr::Trim {
+                    expr: Box::new(sql(0)?),
+                    trim_where: Some(trim_where),
+                    trim_what: Some(Box::new(sql(1)?)),
+                    trim_characters: None,
+                }))
+            }
             // DataFusion names `trim` `btrim`, and takes the characters as a second argument
             "btrim" | "trim" | "ltrim" | "rtrim" if !args.is_empty() && args.len() <= 2 => {
                 let trim_where = match func_name {
@@ -430,14 +449,44 @@ impl Dialect for MetabaseMySqlDialect {
             "regexp_replace" => Err(not_impl("regexp_replace of the first match only")),
             "regexp_match" => Err(not_impl("regexp_match outside a `[1]` subscript")),
             "array_element" => self.first_regex_match(unparser, args),
-            "split_part" if args.len() == 3 => Ok(Some(call(
-                "SUBSTRING_INDEX",
-                vec![
-                    call("SUBSTRING_INDEX", vec![sql(0)?, sql(1)?, sql(2)?]),
-                    sql(1)?,
-                    number(-1),
-                ],
-            ))),
+            // `SUBSTRING_INDEX` hands back the whole remainder for a position past the last part,
+            // where DataFusion gives ''; the part count is spelled out to tell the two apart
+            "split_part" if args.len() == 3 => {
+                let parts = binary(
+                    binary(
+                        binary(
+                            call("CHAR_LENGTH", vec![sql(0)?]),
+                            ast::BinaryOperator::Minus,
+                            call(
+                                "CHAR_LENGTH",
+                                vec![call("REPLACE", vec![sql(0)?, sql(1)?, string_literal("")])],
+                            ),
+                        ),
+                        ast::BinaryOperator::Divide,
+                        call("CHAR_LENGTH", vec![sql(1)?]),
+                    ),
+                    ast::BinaryOperator::Plus,
+                    number(1),
+                );
+                let part = call(
+                    "SUBSTRING_INDEX",
+                    vec![
+                        call("SUBSTRING_INDEX", vec![sql(0)?, sql(1)?, sql(2)?]),
+                        sql(1)?,
+                        number(-1),
+                    ],
+                );
+                Ok(Some(ast::Expr::Case {
+                    operand: None,
+                    conditions: vec![ast::CaseWhen {
+                        condition: binary(sql(2)?, ast::BinaryOperator::Gt, parts),
+                        result: string_literal(""),
+                    }],
+                    else_result: Some(Box::new(part)),
+                    case_token: ast::helpers::attached_token::AttachedToken::empty(),
+                    end_token: ast::helpers::attached_token::AttachedToken::empty(),
+                }))
+            }
             udfs::MB_CAST => self.named_cast(unparser, args),
             udfs::MB_BYTES_TO_TEXT if args.len() == 1 => Ok(Some(ast::Expr::Convert {
                 is_try: false,
@@ -458,6 +507,15 @@ impl Dialect for MetabaseMySqlDialect {
             udfs::MB_AT_TIME_ZONE => Err(not_impl(
                 "AT TIME ZONE on a value of unknown type (the planner resolves the direction)",
             )),
+            // shown in the session zone as a DATETIME; the plan's zoned type reads it back from
+            // that zone into the instant
+            udfs::MB_FROM_UNIX if args.len() == 1 => Ok(Some(call(
+                "FROM_UNIXTIME",
+                vec![cast(
+                    sql(0)?,
+                    ast::DataType::Decimal(ast::ExactNumberInfo::PrecisionAndScale(20, 6)),
+                )],
+            ))),
             udfs::MB_TRUNC if args.len() == 1 => {
                 Ok(Some(call("TRUNCATE", vec![sql(0)?, number(0)])))
             }
@@ -538,6 +596,7 @@ pub const MYSQL_FUNCTIONS: &[&str] = &[
     "least",
     "mb_int_div",
     "mb_trunc",
+    "mb_from_unix",
     // strings
     "lower",
     "upper",

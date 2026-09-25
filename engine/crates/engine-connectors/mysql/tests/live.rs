@@ -231,3 +231,12 @@ async fn cancelling_stops_a_streaming_statement() {
     assert!(ended_with_error, "a cancelled statement ends with an error");
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
 }
+
+#[tokio::test]
+async fn an_unknown_report_zone_runs_the_session_in_utc() {
+    let Some(pool) = pool().await else { return };
+    let mut q = query("SELECT @@session.time_zone AS tz", vec![]);
+    q.settings.time_zone = Some("Nowhere/Land".into());
+    let batches = rows(pool.as_ref(), q).await;
+    assert_eq!(batches[0].column(0).as_string::<i32>().value(0), "+00:00");
+}

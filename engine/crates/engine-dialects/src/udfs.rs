@@ -228,6 +228,37 @@ impl ScalarUDFImpl for MbTrunc {
     }
 }
 
+/// `mb_from_unix(seconds)`: the instant `seconds` (possibly fractional) after the epoch, typed
+/// zoned. DataFusion's `to_timestamp` types its result zone-less (a UTC wall clock), which
+/// Metabase would then read in the report time zone; an epoch is an instant.
+pub const MB_FROM_UNIX: &str = "mb_from_unix";
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct MbFromUnix {
+    signature: Signature,
+}
+
+impl ScalarUDFImpl for MbFromUnix {
+    fn name(&self) -> &str {
+        MB_FROM_UNIX
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Timestamp(
+            TimeUnit::Microsecond,
+            Some("UTC".into()),
+        ))
+    }
+
+    fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        not_impl_err!("{MB_FROM_UNIX} is unparsed for the warehouse, never executed by the engine")
+    }
+}
+
 /// An aggregate function under the name a dialect knows it by. DataFusion calls its sample
 /// standard deviation `stddev` and its sample variance `var`; MySQL's `STDDEV` is the population
 /// one and it has no `VAR`, Postgres has no `var`. The planner swaps the function for this
@@ -291,6 +322,9 @@ pub fn metabase_udfs() -> Vec<Arc<ScalarUDF>> {
             signature: Signature::any(2, Volatility::Immutable),
         })),
         Arc::new(ScalarUDF::new_from_impl(MbTrunc {
+            signature: Signature::any(1, Volatility::Immutable),
+        })),
+        Arc::new(ScalarUDF::new_from_impl(MbFromUnix {
             signature: Signature::any(1, Volatility::Immutable),
         })),
         Arc::new(ScalarUDF::new_from_impl(MbTimeZoneDirection {

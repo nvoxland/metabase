@@ -74,6 +74,12 @@
   [batches]
   (mapv field->column (.getFields (-schema batches))))
 
+(defn warehouse-sql
+  "The SQL the engine sent to the warehouse for this result, when the engine attached it to the
+  schema (`metabase.warehouse_sql`, see the engine's `execute`)."
+  [batches]
+  (get (.getCustomMetadata (-schema batches)) "metabase.warehouse_sql"))
+
 (defn- strip-zeros ^java.math.BigDecimal [^java.math.BigDecimal d]
   (let [stripped (.stripTrailingZeros d)]
     (if (neg? (.scale stripped))

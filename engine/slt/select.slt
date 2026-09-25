@@ -108,3 +108,9 @@ SELECT "id", "quantity" / 3 AS "q3", "quantity" % 3 AS "r3" FROM "orders" WHERE 
 3 1 1
 4 0 1
 5 3 1
+
+query I
+SELECT "id" FROM "orders" ORDER BY "note" DESC, "id" LIMIT 2 OFFSET 1
+----
+4
+6

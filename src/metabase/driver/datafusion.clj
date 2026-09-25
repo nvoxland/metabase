@@ -246,6 +246,15 @@
         (u/ignore-exceptions (engine/destroy-session! session))
         (throw e)))))
 
+(defn- native-form
+  "The warehouse SQL as a native form: with its `$1`, `$2`, ... placeholders as JDBC's `?` when they appear in
+  order (the driver's native path binds by position), else as the engine sent it."
+  [warehouse-sql params]
+  (let [numbers (map (comp parse-long second) (re-seq #"\$(\d+)" warehouse-sql))]
+    (if (= numbers (range 1 (inc (count numbers))))
+      {:query (str/replace warehouse-sql #"\$\d+" "?") :params (vec params)}
+      {:query warehouse-sql :params (vec params)})))
+
 (defmethod driver/execute-reducible-query :datafusion
   [driver {{sql :query, params :params} :native, :as outer-query} _context respond]
   (let [database         (driver-api/database (driver-api/metadata-provider))
@@ -269,7 +278,11 @@
             (catch Throwable e
               (log/warn e "Couldn't cancel engine query"))))))
     (try
-      (respond {:cols (engine.arrow/cols reader)}
+      (respond (cond-> {:cols (engine.arrow/cols reader)}
+                 ;; what ran on the warehouse is the query's native form (the compiled engine-dialect SQL isn't
+                 ;; something the warehouse driver could run again)
+                 (engine.arrow/warehouse-sql reader)
+                 (assoc :native_form (native-form (engine.arrow/warehouse-sql reader) (:params (:native outer-query)))))
                (driver-api/reducible-rows (engine.arrow/row-thunk reader) canceled-chan))
       (finally
         (close!)
