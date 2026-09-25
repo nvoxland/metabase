@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::datatypes::{DataType, FieldRef};
 use datafusion::common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, DFSchema, TableReference};
 use datafusion::execution::context::SessionState;
@@ -74,6 +74,7 @@ impl Planner {
         let plan = qualify_table_scans(plan, &self.state.config_options().catalog.default_schema)?;
         let plan = resolve_engine_udfs(plan, &self.state)?;
         let plan = rename_aggregates(plan, self.policy.aggregate_renames())?;
+        let plan = uncast_compared_columns(plan)?;
         let plan = merge_nested_projections(plan)?;
         let plan = keep_limit_with_sort(plan)?;
         let plan = alias_columns_over_derived_sort(plan)?;
@@ -328,6 +329,148 @@ fn resolve_engine_udfs(plan: LogicalPlan, state: &SessionState) -> Result<Logica
                                     ScalarFunction::new_udf(Arc::clone(&wall_to_zoned), f.args),
                                 )),
                                 Err(_) => Transformed::no(Expr::ScalarFunction(f)),
+                            }
+                        }
+                        other => Transformed::no(other),
+                    })
+                })
+                .map(|t| t.update_data(|e| original.restore(e)))
+            })?
+            .map_data(|p| p.recompute_schema())
+        })?
+        .data)
+}
+
+/// Whether casting `from` to `to` only widens a number: an integer to a wider integer, or any
+/// number to a float or a decimal. A narrowing cast, or a fraction to an integer, changes values
+/// and is the query's own.
+fn widens(from: &DataType, to: &DataType) -> bool {
+    fn int_bits(t: &DataType) -> Option<u8> {
+        Some(match t {
+            DataType::Int8 | DataType::UInt8 => 8,
+            DataType::Int16 | DataType::UInt16 => 16,
+            DataType::Int32 | DataType::UInt32 => 32,
+            DataType::Int64 | DataType::UInt64 => 64,
+            _ => return None,
+        })
+    }
+    let numeric = |t: &DataType| int_bits(t).is_some() || is_fraction(t);
+    match (int_bits(from), int_bits(to)) {
+        (Some(f), Some(t)) => f <= t,
+        (_, Some(_)) => false,
+        _ => numeric(from) && is_fraction(to),
+    }
+}
+
+/// The operand under `expr` when `expr` is a widening cast (see [`widens`]), with the type it was
+/// widened to. A comparison means the same without it: the warehouse compares mixed numeric
+/// widths itself.
+fn widened_column(expr: &Expr, schema: &DFSchema) -> Option<(Expr, FieldRef)> {
+    let Expr::Cast(Cast { expr: inner, field }) = expr else {
+        return None;
+    };
+    let from = inner.get_type(schema).ok()?;
+    widens(&from, field.data_type()).then(|| (inner.as_ref().clone(), Arc::clone(field)))
+}
+
+/// A parameter keeps the type the plan gave it once the column it is compared with loses its
+/// cast: the warehouse would otherwise infer the column's narrower type for it.
+fn keep_parameter_type(expr: Expr, field: &FieldRef) -> Expr {
+    match expr {
+        Expr::Placeholder(_) => Expr::Cast(Cast::new_from_field(Box::new(expr), Arc::clone(field))),
+        other => other,
+    }
+}
+
+/// DataFusion compares an `int4` column with an `int8` value by widening the column, and the
+/// unparser writes that as `CAST(col AS BIGINT) = 4242`, which keeps Postgres and MySQL from
+/// using an index on `col`. Both compare mixed integer widths (and integers with fractions)
+/// themselves, so in a comparison, `IN`, `BETWEEN`, or join key a widening cast of a bare column
+/// is dropped. Names are preserved as the analyzer preserves them.
+fn uncast_compared_columns(plan: LogicalPlan) -> Result<LogicalPlan> {
+    Ok(plan
+        .transform_down_with_subqueries(|node| {
+            let mut schema = DFSchema::empty();
+            for input in node.inputs() {
+                schema.merge(input.schema());
+            }
+            let node = match node {
+                LogicalPlan::Join(mut join) => {
+                    for (left, right) in join.on.iter_mut() {
+                        for key in [left, right] {
+                            if let Some((column, _)) = widened_column(key, &schema) {
+                                *key = column;
+                            }
+                        }
+                    }
+                    LogicalPlan::Join(join)
+                }
+                other => other,
+            };
+            let name_preserver = NamePreserver::new(&node);
+            node.map_expressions(|expr| {
+                let original = name_preserver.save(&expr);
+                expr.transform_up(|e| {
+                    Ok(match e {
+                        Expr::BinaryExpr(BinaryExpr { left, op, right })
+                            if matches!(
+                                op,
+                                Operator::Eq
+                                    | Operator::NotEq
+                                    | Operator::Lt
+                                    | Operator::LtEq
+                                    | Operator::Gt
+                                    | Operator::GtEq
+                                    | Operator::IsDistinctFrom
+                                    | Operator::IsNotDistinctFrom
+                            ) =>
+                        {
+                            let (left, right) = match (
+                                widened_column(&left, &schema),
+                                widened_column(&right, &schema),
+                            ) {
+                                (Some((l, _)), Some((r, _))) => (l, r),
+                                (Some((l, field)), None) => {
+                                    (l, keep_parameter_type(*right, &field))
+                                }
+                                (None, Some((r, field))) => (keep_parameter_type(*left, &field), r),
+                                (None, None) => {
+                                    return Ok(Transformed::no(Expr::BinaryExpr(BinaryExpr {
+                                        left,
+                                        op,
+                                        right,
+                                    })))
+                                }
+                            };
+                            Transformed::yes(Expr::BinaryExpr(BinaryExpr::new(
+                                Box::new(left),
+                                op,
+                                Box::new(right),
+                            )))
+                        }
+                        Expr::InList(mut in_list) => match widened_column(&in_list.expr, &schema) {
+                            Some((column, field)) => {
+                                in_list.expr = Box::new(column);
+                                in_list.list = in_list
+                                    .list
+                                    .into_iter()
+                                    .map(|item| keep_parameter_type(item, &field))
+                                    .collect();
+                                Transformed::yes(Expr::InList(in_list))
+                            }
+                            None => Transformed::no(Expr::InList(in_list)),
+                        },
+                        Expr::Between(mut between) => {
+                            match widened_column(&between.expr, &schema) {
+                                Some((column, field)) => {
+                                    between.expr = Box::new(column);
+                                    between.low =
+                                        Box::new(keep_parameter_type(*between.low, &field));
+                                    between.high =
+                                        Box::new(keep_parameter_type(*between.high, &field));
+                                    Transformed::yes(Expr::Between(between))
+                                }
+                                None => Transformed::no(Expr::Between(between)),
                             }
                         }
                         other => Transformed::no(other),
@@ -704,6 +847,11 @@ mod tests {
                 {"schema": "public", "name": "Products", "columns": [
                     {"name": "ID", "type": "Int64", "nullable": false},
                     {"name": "Title", "type": "Utf8", "db_type": "text"}
+                ]},
+                {"schema": "public", "name": "Reviews", "columns": [
+                    {"name": "ID", "type": "Int32", "nullable": false, "db_type": "int4"},
+                    {"name": "Product ID", "type": "Int32", "db_type": "int4"},
+                    {"name": "Rating", "type": "Int16", "db_type": "int2"}
                 ]}
             ]
         }))
@@ -918,6 +1066,43 @@ mod tests {
         assert_eq!(
             mysql_sql(r#"SELECT sum("quantity") AS s FROM "orders" GROUP BY "note" ORDER BY "note" ASC NULLS FIRST LIMIT 2"#).await,
             "SELECT `__mb_c0` AS `s` FROM (SELECT `orders`.`note` AS `__mb_s0`, sum(`orders`.`quantity`) AS `__mb_c0` FROM `lakes`.`orders` GROUP BY `orders`.`note` ORDER BY `__mb_s0` ASC LIMIT 2) AS `derived_limit`"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_narrow_integer_column_is_compared_without_a_cast_so_its_index_applies() {
+        // DataFusion widens the column to the other side's type; a cast on the column keeps the
+        // warehouse from using an index on it
+        let sql = |q: &'static str| async move {
+            planner()
+                .plan_and_unparse(q, &[])
+                .await
+                .unwrap()
+                .warehouse_sql
+        };
+        assert_eq!(
+            sql(r#"SELECT "ID" FROM "public"."Reviews" WHERE "Product ID" = 4242"#).await,
+            r#"SELECT "Reviews"."ID" FROM "public"."Reviews" WHERE ("Reviews"."Product ID" = 4242)"#
+        );
+        // a parameter takes the column's type, so there is no cast to begin with
+        assert_eq!(
+            sql(r#"SELECT "ID" FROM "public"."Reviews" WHERE "Product ID" = $1"#).await,
+            r#"SELECT "Reviews"."ID" FROM "public"."Reviews" WHERE ("Reviews"."Product ID" = $1)"#
+        );
+        assert_eq!(
+            sql(r#"SELECT "ID" FROM "public"."Reviews" WHERE "Rating" IN (4, 5) AND "Product ID" BETWEEN 10 AND 20"#).await,
+            r#"SELECT "Reviews"."ID" FROM "public"."Reviews" WHERE ("Reviews"."Rating" IN (4, 5) AND ("Reviews"."Product ID" BETWEEN 10 AND 20))"#
+        );
+        // a join between an int4 and an int8 key compares them directly
+        assert_eq!(
+            sql(r#"SELECT r."ID" FROM "public"."Reviews" r JOIN "public"."Products" p ON r."Product ID" = p."ID""#).await,
+            r#"SELECT "r"."ID" FROM "public"."Reviews" AS "r" INNER JOIN "public"."Products" AS "p" ON ("r"."Product ID" = "p"."ID")"#
+        );
+        // a narrowing or non-numeric cast is the query's own and stays
+        assert_eq!(
+            sql(r#"SELECT "ID" FROM "public"."Reviews" WHERE CAST("Product ID" AS SMALLINT) = 3"#)
+                .await,
+            r#"SELECT "Reviews"."ID" FROM "public"."Reviews" WHERE (CAST("Reviews"."Product ID" AS SMALLINT) = 3)"#
         );
     }
 
