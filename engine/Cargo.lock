@@ -1690,6 +1690,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "chrono",
+ "dashmap",
  "datafusion",
  "engine-core",
  "engine-dialects",

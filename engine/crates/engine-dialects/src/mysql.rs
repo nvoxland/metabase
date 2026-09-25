@@ -213,6 +213,12 @@ impl MetabaseMySqlDialect {
                 number(divisor),
             )
         };
+        // a double's fraction (1742913282.314 is ...313999... in binary) would land in the
+        // microseconds; a decimal keeps the digits that were meant
+        let seconds = cast(
+            seconds,
+            ast::DataType::Decimal(ast::ExactNumberInfo::PrecisionAndScale(20, 6)),
+        );
         Ok(Some(call(
             "CONVERT_TZ",
             vec![

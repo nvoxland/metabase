@@ -7,6 +7,7 @@
    [metabase.engine.core :as engine]
    [metabase.engine.settings :as engine.settings]
    [metabase.lib.metadata :as lib.metadata]
+   [metabase.premium-features.core :refer [defenterprise]]
    [metabase.settings.core :as setting]))
 
 (def ^:private dialect-warehouses
@@ -137,6 +138,14 @@
   mode uses it to run the same query through both paths."
   nil)
 
+(defenterprise native-sandbox-applies?
+  "Whether a sandbox backed by a native question applies to `query` for the current user. Such a
+  sandbox replaces a table with the question's SQL during preprocessing, which is the warehouse's
+  own dialect, so the query has to stay on the driver. OSS has no sandboxes."
+  metabase-enterprise.sandbox.query-processor.middleware.sandboxing
+  [_query _metadata-provider]
+  false)
+
 (defn- routable?
   "Whether `query` against `warehouse-driver` could run through the engine at all."
   [query metadata-provider database warehouse-driver]
@@ -148,7 +157,8 @@
            (some? (engine.settings/bridge-url)))
        (details-supported? (:details database))
        (not (native-query? query metadata-provider))
-       (not (nested-field-column-query? query metadata-provider))))
+       (not (nested-field-column-query? query metadata-provider))
+       (not (native-sandbox-applies? query metadata-provider))))
 
 (defn shadow?
   "Whether `query` should also be run through both paths in the background and compared: the

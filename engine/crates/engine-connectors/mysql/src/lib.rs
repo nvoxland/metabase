@@ -41,6 +41,10 @@ pub struct MyPool {
     max_size: usize,
     checkout_timeout: Duration,
     flavor: Flavor,
+    /// Connections (by server id) on which a statement activated a role. A user's default role
+    /// is active at login and `SET ROLE NONE` would drop it, so a statement without a role
+    /// resets such a connection to its login state instead.
+    role_set: dashmap::DashSet<u32>,
 }
 
 #[async_trait]
@@ -142,23 +146,34 @@ fn session_setup_sql(settings: &SessionSettings, flavor: Flavor) -> Vec<String> 
         Flavor::MariaDb => format!("SET SESSION max_statement_time = {}", ms as f64 / 1000.0),
         Flavor::MySql => format!("SET SESSION max_execution_time = {ms}"),
     });
-    sql.push(match &settings.role {
-        Some(role) if !role.eq_ignore_ascii_case("none") => {
-            format!("SET ROLE {}", quote_ident(role))
-        }
-        _ => "SET ROLE NONE".to_string(),
-    });
+    if let Some(role) = requested_role(settings) {
+        sql.push(format!("SET ROLE {}", quote_ident(role)));
+    }
     sql
 }
 
-async fn set_up_session(conn: &mut Conn, settings: &SessionSettings, flavor: Flavor) -> Result<()> {
+/// The role a statement asks for, if any.
+fn requested_role(settings: &SessionSettings) -> Option<&str> {
+    settings
+        .role
+        .as_deref()
+        .filter(|r| !r.eq_ignore_ascii_case("none"))
+}
+
+async fn set_up_session(
+    conn: &mut Conn,
+    settings: &SessionSettings,
+    flavor: Flavor,
+    role_set: &dashmap::DashSet<u32>,
+) -> Result<()> {
+    // Back to the login state (the user's default role, no session variables) when an earlier
+    // statement on this connection activated a role and this one wants none; the variables are
+    // set again below either way.
+    if requested_role(settings).is_none() && role_set.remove(&conn.id()).is_some() {
+        conn.reset().await.map_err(|e| warehouse_error(e, false))?;
+    }
     for statement in session_setup_sql(settings, flavor) {
         if let Err(e) = conn.query_drop(&statement).await {
-            // a server without roles (MySQL 5.7) has nothing to unset
-            if statement == "SET ROLE NONE" {
-                tracing::debug!(error = %e, "SET ROLE NONE not supported; ignoring");
-                continue;
-            }
             let mut err = warehouse_error(e, false);
             if statement.starts_with("SET SESSION time_zone") {
                 err.message = format!(
@@ -168,6 +183,9 @@ async fn set_up_session(conn: &mut Conn, settings: &SessionSettings, flavor: Fla
             }
             return Err(err);
         }
+    }
+    if requested_role(settings).is_some() {
+        role_set.insert(conn.id());
     }
     Ok(())
 }
@@ -226,6 +244,7 @@ impl Connector for MySqlConnector {
                 config.checkout_timeout_ms + config.connect_timeout_ms,
             ),
             flavor,
+            role_set: dashmap::DashSet::new(),
         }))
     }
 
@@ -256,7 +275,7 @@ impl Connector for MySqlConnector {
                 }
                 e
             })?;
-        set_up_session(&mut conn, &query.settings, my.flavor).await?;
+        set_up_session(&mut conn, &query.settings, my.flavor, &my.role_set).await?;
 
         let (sql, order) = placeholders::to_question_marks(&query.sql);
         let mut bound = Vec::with_capacity(order.len());
@@ -418,6 +437,7 @@ mod tests {
         let none = session_setup_sql(&SessionSettings::default(), Flavor::MySql);
         assert_eq!(none[1], "SET SESSION time_zone = '+00:00'");
         assert_eq!(none[2], "SET SESSION max_execution_time = 0");
-        assert_eq!(none[3], "SET ROLE NONE");
+        // no role asked for: the login's default role stays active (nothing is unset here)
+        assert_eq!(none.len(), 3);
     }
 }

@@ -998,6 +998,7 @@
            metabase.engine.shadow}
    :uses #{events
            lib.metadata
+           premium-features
            settings
            util
            util.config

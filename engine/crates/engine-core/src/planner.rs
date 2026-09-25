@@ -758,7 +758,7 @@ mod tests {
         );
         assert_eq!(
             mysql_sql(r#"SELECT to_timestamp("quantity") AS t, to_timestamp("note", '%Y-%m-%d %H:%M:%S') AS p FROM "orders""#).await,
-            "SELECT CONVERT_TZ(FROM_UNIXTIME(`orders`.`quantity`), @@session.time_zone, '+00:00') AS `t`, STR_TO_DATE(`orders`.`note`, '%Y-%m-%d %H:%i:%s') AS `p` FROM `lakes`.`orders`"
+            "SELECT CONVERT_TZ(FROM_UNIXTIME(CAST(`orders`.`quantity` AS DECIMAL(20,6))), @@session.time_zone, '+00:00') AS `t`, STR_TO_DATE(`orders`.`note`, '%Y-%m-%d %H:%i:%s') AS `p` FROM `lakes`.`orders`"
         );
     }
 

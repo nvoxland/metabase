@@ -187,6 +187,21 @@
               (u/the-id (lib.metadata/database metadata-providerable))
               persisted-info)))))
 
+(defenterprise native-sandbox-applies?
+  "Whether a sandbox backed by a native question applies to `query` for the current user (see
+  `metabase.engine.routing`). The query may be legacy MBQL; sandboxes are per table, so anything
+  without source tables has none."
+  :feature :sandboxes
+  [query metadata-provider]
+  (boolean
+   (when (and *current-user-id* (map? query) (not= (keyword (:type query)) :native))
+     (let [query (if (:lib/type query) query (lib/query metadata-provider query))]
+       (some (fn [{:keys [card_id]}]
+               (when card_id
+                 (some #(= :mbql.stage/native (:lib/type %))
+                       (:stages (card-id->underlying-query metadata-provider card_id)))))
+             (vals (query->table-id->sandbox query)))))))
+
 (mu/defn- card-sandbox->query :- ::lib.schema/query
   [metadata-providerable          :- ::lib.schema.metadata/metadata-providerable
    {card-id :card_id :as sandbox} :- ::sandbox]
