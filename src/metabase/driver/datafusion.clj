@@ -218,6 +218,8 @@
    :report_timezone      (driver-api/report-timezone-id-if-supported driver database)
    :remark               (driver-api/query->remark driver outer-query)
    :statement_timeout_ms (* 60000 (driver.settings/db-query-timeout-minutes))
+   ;; the row cap the JDBC path passes to `Statement.setMaxRows`; the engine makes it a LIMIT the warehouse applies
+   :row_limit            (driver-api/determine-query-max-rows outer-query)
    :query_origin         (when-let [context (-> outer-query :info :context)]
                            {:type (name context)})})
 

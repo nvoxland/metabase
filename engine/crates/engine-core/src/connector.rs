@@ -29,6 +29,10 @@ pub struct Query {
     pub sql: String,
     pub params: Vec<ParamValue>,
     pub settings: SessionSettings,
+    /// Stop after this many rows, as JDBC's `Statement.setMaxRows` does: return them, stop the
+    /// statement, and give the connection back to the pool. The engine also truncates the stream
+    /// itself, so a connector that ignores this still returns no more than it.
+    pub max_rows: Option<u64>,
 }
 
 /// A running statement: the batches and the handle to stop it.

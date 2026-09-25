@@ -54,7 +54,48 @@ fn query(sql: &str, params: Vec<ParamValue>) -> Query {
             read_only: true,
             application_name: "engine-test".into(),
         },
+        max_rows: None,
     }
+}
+
+#[tokio::test]
+async fn a_row_cap_stops_the_statement_and_keeps_the_connection() {
+    let Some(pool) = pool().await else { return };
+    // tens of millions of rows streamed by a nested loop: only a stopped statement returns quickly
+    let mut q = query(
+        "SELECT a.oid FROM pg_class a, pg_class b, pg_class c",
+        vec![],
+    );
+    q.max_rows = Some(10);
+    let started = std::time::Instant::now();
+    let handle = PostgresConnector.execute(pool.as_ref(), q).await.unwrap();
+    let batches: Vec<_> = handle.stream.try_collect().await.unwrap();
+    let rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    assert_eq!(rows, 10);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+    // the connection is reset and pooled, not discarded; the next statement uses it
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let stats = pool.stats();
+    assert_eq!((stats.size, stats.available), (1, 1), "{stats:?}");
+    let again = PostgresConnector
+        .execute(
+            pool.as_ref(),
+            query("SELECT current_setting('statement_timeout') AS t", vec![]),
+        )
+        .await
+        .unwrap();
+    let batches: Vec<_> = again.stream.try_collect().await.unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
+    // a cap larger than the result changes nothing
+    let mut q = query("SELECT g FROM generate_series(1, 25) g", vec![]);
+    q.max_rows = Some(100);
+    let handle = PostgresConnector.execute(pool.as_ref(), q).await.unwrap();
+    let batches: Vec<_> = handle.stream.try_collect().await.unwrap();
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 25);
 }
 
 #[tokio::test]

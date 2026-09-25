@@ -3,6 +3,7 @@
   with the JDBC path. Needs the engine library built and the test datasets (`DRIVERS=postgres,mysql`)."
   (:require
    [clojure.test :refer :all]
+   [metabase.driver :as driver]
    [metabase.driver.datafusion]
    [metabase.engine-bridge.core :as engine-bridge]
    [metabase.engine.catalog :as engine.catalog]
@@ -11,6 +12,7 @@
    [metabase.engine.shadow :as engine.shadow]
    [metabase.engine.test-util :as engine.tu]
    [metabase.query-processor :as qp]
+   [metabase.query-processor.store :as qp.store]
    [metabase.test :as mt]
    [metabase.util.log :as log]))
 
@@ -75,6 +77,27 @@
                 actual   (rows-via! :datafusion query)]
             (is (same-rows? expected actual)
                 (str "expected " (pr-str (take 3 expected)) " got " (pr-str (take 3 actual))))))))))
+
+(deftest ^:mb/engine-tests ^:mb/driver-tests row-cap-reaches-the-warehouse-test
+  (mt/test-drivers #{:postgres :mysql}
+    (engine.tu/with-engine
+      (testing (str "the query's row cap (what the JDBC path passes to `setMaxRows`) stops the statement after that many"
+                    " rows, without a LIMIT that would change how the warehouse plans it")
+        (let [sql      (str "SELECT id FROM " (if (= driver/*driver* :mysql) "" "public.") "venues ORDER BY id")
+              captured (atom nil)
+              rows     (qp.store/with-metadata-provider (mt/id)
+                         (driver/execute-reducible-query
+                          :datafusion
+                          {:database    (mt/id)
+                           :type        :native
+                           :native      {:query sql :params []}
+                           :constraints {:max-results 5 :max-results-bare-rows 5}}
+                          {}
+                          (fn [metadata reducible]
+                            (reset! captured metadata)
+                            (into [] reducible))))]
+          (is (= 5 (count rows)))
+          (is (not (re-find #"(?i)\bLIMIT\b" (get-in @captured [:native_form :query])))))))))
 
 (deftest ^:mb/engine-tests ^:mb/driver-tests routing-binds-the-datafusion-driver-test
   (mt/test-drivers #{:postgres :mysql}

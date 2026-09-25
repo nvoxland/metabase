@@ -9,6 +9,7 @@ pub mod error;
 pub mod planner;
 pub mod policy;
 pub mod pools;
+pub mod row_cap;
 pub mod schema_cast;
 pub mod stream;
 

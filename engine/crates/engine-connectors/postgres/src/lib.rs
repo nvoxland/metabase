@@ -25,6 +25,7 @@ use engine_core::connector::{Connector, ExecuteHandle, Pool, PoolStats, Query, S
 use engine_core::error::{EngineError, ErrorKind, Result};
 use engine_dialects::Warehouse;
 use futures::Stream;
+use futures::StreamExt;
 use serde_json::Value;
 use tokio_postgres::{NoTls, RowStream, Statement};
 use tokio_util::sync::CancellationToken;
@@ -188,11 +189,16 @@ fn text_cast_wrapper(sql: &str, statement: &Statement) -> String {
 /// Pulls rows from Postgres and emits Arrow batches; holds the connection until finished, then
 /// resets its session state before it goes back to the pool.
 struct RowBatches {
-    rows: Pin<Box<RowStream>>,
+    /// `None` once handed to the cleanup that drains a capped statement.
+    rows: Option<Pin<Box<RowStream>>>,
     decoder: RowDecoder,
     client: Option<Object>,
     cancel: CancellationToken,
     done: bool,
+    /// Rows still to return under the query's cap, if it has one.
+    remaining: Option<u64>,
+    /// The cap was reached: the statement is stopped and the connection drained and kept.
+    capped: bool,
     /// The engine runtime, so cleanup can be scheduled from a thread that isn't inside it (the JVM
     /// releases streams from its own threads).
     runtime: tokio::runtime::Handle,
@@ -202,7 +208,44 @@ struct RowBatches {
 }
 
 impl RowBatches {
+    /// The cap was reached. Like JDBC's `setMaxRows`, stop the statement but keep the connection:
+    /// send the protocol cancel, wait until the server has ended the statement (draining whatever
+    /// was already in flight), then reset the session and return the connection to the pool. A
+    /// cancel that arrives after the statement finished on its own can only hit the reset, which
+    /// then fails and discards the connection.
+    fn release_capped(&mut self) {
+        self.capped = true;
+        let watcher = self.cancel_watcher.take();
+        let rows = self.rows.take();
+        let client = self.client.take();
+        self.cancel.cancel();
+        self.runtime.spawn(async move {
+            if let Some(watcher) = watcher {
+                let _ = watcher.await;
+            }
+            if let Some(mut rows) = rows {
+                while let Some(item) = rows.next().await {
+                    if item.is_err() {
+                        break;
+                    }
+                }
+            }
+            if let Some(client) = client {
+                match client.batch_execute(SESSION_RESET_SQL).await {
+                    Ok(()) => drop(client),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "reset after a capped statement failed; discarding the connection");
+                        drop(Object::take(client));
+                    }
+                }
+            }
+        });
+    }
+
     fn release(&mut self) {
+        if self.capped {
+            return;
+        }
         if let Some(watcher) = self.cancel_watcher.take() {
             if !self.cancel.is_cancelled() {
                 watcher.abort();
@@ -248,14 +291,35 @@ impl Stream for RowBatches {
         if self.done {
             return Poll::Ready(None);
         }
+        if self.remaining == Some(0) {
+            self.done = true;
+            self.release_capped();
+            return Poll::Ready(None);
+        }
         loop {
-            match self.rows.as_mut().poll_next(cx) {
+            let Some(rows) = self.rows.as_mut() else {
+                return Poll::Ready(None);
+            };
+            match rows.as_mut().poll_next(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(Some(Ok(row))) => {
                     if let Err(e) = self.decoder.push(&row) {
                         self.done = true;
                         self.release();
                         return Poll::Ready(Some(Err(e.into())));
+                    }
+                    if let Some(remaining) = self.remaining.as_mut() {
+                        *remaining -= 1;
+                        if *remaining == 0 {
+                            self.done = true;
+                            self.release_capped();
+                            return Poll::Ready(
+                                self.decoder
+                                    .flush()
+                                    .transpose()
+                                    .map(|r| r.map_err(Into::into)),
+                            );
+                        }
                     }
                     if self.decoder.is_full() {
                         return Poll::Ready(
@@ -396,11 +460,13 @@ async fn start_statement(
     });
 
     let batches = RowBatches {
-        rows: Box::pin(rows),
+        rows: Some(Box::pin(rows)),
         decoder,
         client: Some(client),
         cancel: cancel.clone(),
         done: false,
+        remaining: query.max_rows,
+        capped: false,
         runtime: tokio::runtime::Handle::current(),
         cancel_watcher: Some(cancel_watcher),
     };

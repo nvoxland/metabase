@@ -18,6 +18,9 @@ use crate::error::{EngineError, ErrorKind, Result};
 use crate::planner::Planner;
 use crate::pools::PoolRegistry;
 use crate::schema_cast::SchemaCastStream;
+use datafusion::physical_plan::SendableRecordBatchStream;
+
+use crate::row_cap::RowCapStream;
 use crate::stream::{BlockingReader, StreamEntry, StreamStatsSnapshot};
 
 /// Schema metadata key carrying the warehouse SQL a result stream ran.
@@ -326,18 +329,20 @@ impl Engine {
                     sql: warehouse_sql.clone(),
                     params,
                     settings,
+                    max_rows: session.context.row_limit,
                 },
             )
             .await?;
+        let rows: SendableRecordBatchStream = match session.context.row_limit {
+            Some(cap) => Box::pin(RowCapStream::new(handle.stream, cap)),
+            None => handle.stream,
+        };
         // the SQL that ran rides on the schema, so Metabase can show it as the query's native form
         let schema = Arc::new(planned.schema.as_ref().clone().with_metadata(
             std::collections::HashMap::from([(WAREHOUSE_SQL_METADATA.to_string(), warehouse_sql)]),
         ));
-        let stream = SchemaCastStream::new(
-            handle.stream,
-            &schema,
-            session.context.report_timezone.as_deref(),
-        );
+        let stream =
+            SchemaCastStream::new(rows, &schema, session.context.report_timezone.as_deref());
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.streams.insert(
             id,
@@ -387,6 +392,7 @@ impl Engine {
                     sql: sql.to_string(),
                     params,
                     settings,
+                    max_rows: None,
                 },
             )
             .await?;

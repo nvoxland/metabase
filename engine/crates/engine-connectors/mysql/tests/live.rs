@@ -48,7 +48,37 @@ fn query(sql: &str, params: Vec<ParamValue>) -> Query {
             read_only: true,
             application_name: "metabase-test".into(),
         },
+        max_rows: None,
     }
+}
+
+#[tokio::test]
+async fn a_row_cap_stops_the_statement_and_keeps_the_connection() {
+    let Some(pool) = pool().await else { return };
+    let mut q = query(
+        "SELECT c1.column_name FROM information_schema.columns c1, information_schema.columns c2, information_schema.columns c3",
+        vec![],
+    );
+    q.max_rows = Some(10);
+    let started = std::time::Instant::now();
+    let handle = MySqlConnector.execute(pool.as_ref(), q).await.unwrap();
+    let batches: Vec<_> = handle.stream.try_collect().await.unwrap();
+    assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 10);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "took {:?}",
+        started.elapsed()
+    );
+    // the connection goes back to the pool and serves the next statement
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let before = pool.stats();
+    let again = MySqlConnector
+        .execute(pool.as_ref(), query("SELECT 1 AS one", vec![]))
+        .await
+        .unwrap();
+    let batches: Vec<_> = again.stream.try_collect().await.unwrap();
+    assert_eq!(batches[0].num_rows(), 1);
+    assert!(before.available >= 1, "{before:?}");
 }
 
 fn display(column: &dyn Array, row: usize) -> String {

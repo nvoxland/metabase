@@ -18,7 +18,9 @@ pub struct SessionContext {
     pub workspace_id: Option<String>,
     #[serde(default)]
     pub report_timezone: Option<String>,
-    /// Reserved: not enforced by the planner yet (the MBQL limit middleware caps rows today).
+    /// Metabase's row cap for the query (what the JDBC path passes to `Statement.setMaxRows`): the
+    /// connector stops the statement after this many rows. Not a `LIMIT`, which would change how the
+    /// warehouse plans the query.
     #[serde(default)]
     pub row_limit: Option<u64>,
     #[serde(default)]

@@ -120,6 +120,7 @@ async fn run_do_get(engine: Arc<Engine>) {
             sql: "SELECT 1".into(),
             params: vec![],
             settings: Default::default(),
+            max_rows: None,
         };
         if connector.execute(pool.as_ref(), probe).await.is_err() {
             eprintln!("skipping: no Postgres reachable");

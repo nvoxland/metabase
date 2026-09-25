@@ -311,6 +311,7 @@ impl Connector for MySqlConnector {
             >,
         >(2);
         let killer = my.pool.clone();
+        let max_rows = query.max_rows;
         let task_cancel = cancel.clone();
         // The statement runs on the engine's runtime whatever thread drops the stream; the
         // connection goes back to the pool when the task ends.
@@ -329,7 +330,11 @@ impl Connector for MySqlConnector {
                 return;
             }
             let mut cancelled = false;
-            loop {
+            // the query's row cap: after this many rows the statement is stopped (like JDBC's
+            // `setMaxRows`) and the connection kept, with no error for the reader
+            let mut remaining = max_rows;
+            let mut capped = remaining == Some(0);
+            while !capped {
                 let next = tokio::select! {
                     biased;
                     _ = task_cancel.cancelled() => {
@@ -344,6 +349,16 @@ impl Connector for MySqlConnector {
                             let _ = batch_tx.send(Err(e.into())).await;
                             cancelled = true;
                             break;
+                        }
+                        if let Some(r) = remaining.as_mut() {
+                            *r -= 1;
+                            if *r == 0 {
+                                capped = true;
+                                if let Ok(Some(batch)) = decoder.flush() {
+                                    let _ = batch_tx.send(Ok(batch)).await;
+                                }
+                                break;
+                            }
                         }
                         if decoder.is_full() {
                             match decoder.flush() {
@@ -380,6 +395,15 @@ impl Connector for MySqlConnector {
                             .send(Err(warehouse_error(e, task_cancel.is_cancelled()).into()))
                             .await;
                         break;
+                    }
+                }
+            }
+            if capped {
+                // stop the server-side query; dropping the result then drains what was already
+                // sent, and the connection goes back to the pool
+                if let Ok(mut other) = killer.get_conn().await {
+                    if let Err(e) = other.query_drop(format!("KILL QUERY {conn_id}")).await {
+                        tracing::debug!(error = %e, "KILL QUERY after the row cap");
                     }
                 }
             }

@@ -17,15 +17,16 @@
   (`MB_ENGINE_NATIVE_LIBRARY_PATH=engine/target/release/libmetabase_engine.dylib`), with the application initialized
   (`(require 'metabase.core.init 'metabase-enterprise.core.init)` in a bare REPL, or sync can't read every setting).
 
-  Reading the numbers: the JDBC path caps rows with `Statement.setMaxRows`, which Postgres receives as a row-limited
-  portal, and it plans those without parallel workers; and without a download context it buffers the whole result
-  before the first row. The engine streams without either, so large scans and extracts differ for reasons that have
-  nothing to do with DataFusion."
+  Both paths get the same row cap, from how the query runs (`:as :card`, the default 2,000 rows, or `:as :download`).
+  Reading the numbers: the JDBC path passes the cap to `Statement.setMaxRows`, which Postgres receives as a
+  row-limited portal and plans without parallel workers; the engine stops the statement after the cap instead, which
+  leaves the plan alone. As a card, the JDBC path also buffers the whole (capped) result before the first row."
   (:require
    [clojure.java.jdbc :as jdbc]
    [clojure.string :as str]
    [metabase.driver :as driver]
    [metabase.engine.core :as engine]
+   [metabase.query-processor.core :as qp.constraints]
    [metabase.query-processor.store :as qp.store]
    [metabase.sync.core :as sync]
    [toucan2.core :as t2])
@@ -259,10 +260,16 @@
     (instance? OffsetDateTime v) (.toInstant ^OffsetDateTime v)
     :else                        v))
 
+(def ^:private run-as
+  "How Metabase runs the query, which decides its row cap on both paths (and, on the JDBC path, whether results
+  stream): as a saved question (the default 2,000-row cap) or as a CSV download (1,048,575)."
+  {:card     {:constraints (qp.constraints/default-query-constraints) :info {:context :question}}
+   :download {:info {:context :csv-download}}})
+
 (defn- execute
-  "Run `sql` through `driver` against `db` and reduce every row. Returns `{:ms :first-row-ms :rows}`, with the rows
-  only when `keep-rows?`."
-  [driver db sql keep-rows?]
+  "Run `sql` through `driver` against `db` the way `as` says, and reduce every row. Returns
+  `{:ms :first-row-ms :rows}`, with the rows only when `keep-rows?`."
+  [driver db sql as keep-rows?]
   (qp.store/with-metadata-provider (:id db)
     (binding [driver/*driver* driver]
       (let [start   (System/nanoTime)
@@ -270,7 +277,8 @@
             first-t (volatile! nil)
             result  (driver/execute-reducible-query
                      driver
-                     {:database (:id db) :type :native :native {:query sql :params []}}
+                     (merge {:database (:id db) :type :native :native {:query sql :params []}}
+                            (run-as as))
                      {}
                      (fn [_metadata rows]
                        (reduce (fn [acc row]
@@ -288,12 +296,12 @@
 
 (defn- measure
   "Time `sql` on both paths: one warm-up each, then `runs` alternating runs. Checks the two answers match."
-  [db sql runs]
-  (let [jdbc-rows   (:rows (execute :postgres db sql true))
-        engine-rows (:rows (execute :datafusion db sql true))
+  [db sql as runs]
+  (let [jdbc-rows   (:rows (execute :postgres db sql as true))
+        engine-rows (:rows (execute :datafusion db sql as true))
         timings     (for [_ (range runs)
                           path [:postgres :datafusion]]
-                      [path (execute path db sql false)])
+                      [path (execute path db sql as false)])
         by-path     (group-by first timings)
         summarize   (fn [path]
                       (let [ts (map second (by-path path))]
@@ -318,14 +326,14 @@
 (defn run-benchmark!
   "Run every query through both paths, print a comparison, and return the measurements."
   ([db] (run-benchmark! db {}))
-  ([db {:keys [runs only] :or {runs 5}}]
+  ([db {:keys [runs only as] :or {runs 5 as :card}}]
    (let [results (vec (for [[query-name description sql] queries
                             :when (or (nil? only) (contains? (set only) query-name))]
                         (do (printf "running %s...%n" query-name) (flush)
                             (merge {:name query-name :description description}
-                                   (measure db sql runs)
+                                   (measure db sql as runs)
                                    {:plan-ms (plan-ms db sql runs)}))))]
-     (println)
+     (printf "%nrun as: %s%n" (name as))
      (printf "%-26s %8s %6s  %9s %9s %7s  %9s %9s  %7s%n"
              "query" "rows" "same?" "jdbc ms" "engine ms" "ratio" "jdbc 1st" "eng 1st" "plan ms")
      (doseq [{:keys [name rows match? jdbc engine plan-ms]} results]
