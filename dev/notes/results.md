@@ -117,6 +117,77 @@ Both JDBC effects could be fixed in the JDBC path on its own, so the fair readin
 - **Developer setup is fiddly.** In a source checkout the loader prefers the debug build of the engine, which is far slower than release, and a bare REPL needs the application initialized before sync can read every setting. Neither is obvious.
 - **Shadow mode keeps its comparisons in memory only.** There's no UI, and nothing survives a restart.
 
+## Code comparison at the end state
+
+The prototype hasn't deleted anything, so this compares the code the final version would have with the code it would retire, assuming DataFusion replaces query compilation and execution for every SQL driver. Postgres and MySQL were built, so their numbers are measured. The rest are extrapolated from them and should be read as estimates. Line counts are code lines, excluding blanks, comments, and tests.
+
+### Removed and added
+
+**Removed: about 4,100 lines.** That is every SQL driver's query-compilation overrides (3,539 lines, 763 multimethods across 17 drivers), result reading for drivers that move to native connectors (about 220 lines), and a few hundred lines of per-driver hooks in the shared compiler. The shared HoneySQL compiler stays as the single compiler to the engine dialect. The shared JDBC execution layer stays for bridged warehouses. Every driver's connection, sync, actions, uploads, and DDL code stays.
+
+**Added:**
+
+| Part | Estimate | Based on |
+| --- | --: | --- |
+| Engine core, FFI, sidecar, JDBC bridge, Clojure driver (without shadow mode and other transitional code) | ~4,800 | Measured |
+| About 13 dialects, sharing families (Presto, Trino, and Athena; Spark, Databricks, and Hive; Postgres and Redshift) | 5,500–8,000 | The Postgres dialect is 1.6 times and the MySQL dialect 2.4 times the old compile code |
+| Native connectors for Postgres, MySQL, ClickHouse, Snowflake, and BigQuery (Redshift reuses Postgres) | 4,700–6,200 | 1,000 to 1,230 lines per connector |
+| Per-warehouse sync dispatch in Clojure | ~500 | Measured for MySQL |
+| **Total** | **15,500–19,500** | |
+
+The end state has about four times as much code as it removes. Dialects are larger than the compilers they replace because they render DataFusion's whole function surface, not just what MBQL emits, and because they carry emulations the old compilers never needed (for MySQL: `split_part`, `NULLS FIRST`, regex case sensitivity). Warehouses without a good Rust driver (SQL Server, Oracle, Vertica, Hive, Druid, H2) go through the bridge and cost only a dialect.
+
+### What gets easier and what gets harder
+
+Easier:
+
+- **A construct is written once.** A new MBQL feature is one compiler change, plus a rendering only in dialects that spell it differently. Today it can mean 17 driver overrides.
+- **One test suite checks every warehouse.** The sqllogictest harness compares each warehouse with DataFusion, so drift is caught in one place instead of per driver.
+- **Capabilities and semantics live in one place.** A dialect's policy states what its warehouse can run, and anything else is rejected with a structured error. Today capabilities are spread across 89 feature flags and each driver's behavior.
+- **Result reading is uniform.** Native connectors return Arrow, and the per-driver JDBC row readers go away.
+- **Security gets one enforcement point.** Plan-level policy would cover MBQL, AI-generated SQL, and eventually native SQL.
+
+Harder:
+
+- **A fixed platform cost:** Rust, a native boundary, per-platform builds (musl, aarch64), and debugging across two languages.
+- **Coupling to DataFusion.** DataFusion, Arrow, and Flight upgrade in lockstep every 6 to 10 weeks. The planner's rewrites depend on unparser behavior that can change in any release unless the fixes go upstream.
+- **Dialects are harder to write than HoneySQL overrides.** A dialect has to preserve the plan's semantics, not just its syntax. Most of the bugs found building MySQL were semantic: integer casts, NULL ordering, time zones.
+- **Connectors are per-warehouse code Metabase owns.** Session setup, cancellation, the row cap, and type conversion were written once for every JDBC driver. Each native connector now has its own.
+
+### Why the connectors reimplemented so much
+
+The Rust drivers aren't the problem. `tokio-postgres` is mature and widely used, and `mysql_async` is solid. They handle the wire protocol, authentication, TLS, and typed values (about 12,500 lines for Postgres and 37,000 for MySQL), and none of that was rewritten. None of the connector bugs found this week were in those libraries. They were in the code on top of them: `SET ROLE NONE` dropping MySQL's default role, `timestamptz` parameter offsets, MySQL zero dates (a single JDBC connection property handles those), and unsigned integers.
+
+The reason is architectural. The engine executes in Rust and returns Arrow, and Metabase's JVM code can't be reused across that boundary. Here is what the 1,230-line Postgres connector does, and where the same job is done today:
+
+| Connector part | Lines | Today's equivalent |
+| --- | --: | --- |
+| Connection details to client config, TLS modes | 144 | The Postgres driver's JDBC spec code, about the same size |
+| Rows to Arrow | 337 | Shared JDBC row reading plus each driver's `read-column-thunk` |
+| Parameters from JSON to Postgres types | 300 | Each driver's `set-parameter` methods (8 in Postgres). Parameters cross the native boundary as JSON. |
+| Pool, session setup, cancel, row cap, streaming | 449 | The shared `sql_jdbc` execution and connection code (about 1,350 lines) and c3p0 |
+
+So what was rebuilt is Metabase's own JDBC glue, once per connector, not the vendor drivers. JDBC's real advantage is a standard type model and connection-property conventions, plus decades of vendor quirk handling. The Rust clients are lower level, so the conversions are ours. Where Rust drivers are genuinely weak is the long tail (SQL Server, Oracle, Vertica, Hive, Athena), which is why those go through the bridge.
+
+### Ways to shrink it
+
+Each option below is estimated against the baseline of 15,500 to 19,500 added lines and about 4,100 removed.
+
+- **ADBC drivers and a shared connector toolkit.** An ADBC driver returns Arrow and takes Arrow parameters, so row conversion and parameter binding (about half of each connector) mostly disappear, leaving about 100 lines of type adjustments. A shared toolkit would hold the generic half of each connector's main file (session lifecycle, cancellation, the row cap, streaming with back-pressure), about 600 lines once, leaving about 150 warehouse-specific lines per connector. With about 300 lines to integrate the ADBC driver manager, the five connectors come to 2,300 to 3,300 lines instead of 4,700 to 6,200. The catch: official Apache ADBC drivers cover Postgres, Snowflake, BigQuery, SQLite, and Flight SQL. MySQL, ClickHouse, and others come from the ADBC Driver Foundry under mixed licenses, or stay native and use only the toolkit. ADBC drivers are also C or Go libraries, one more native artifact per platform, with a blocking API.
+- **Dialects scoped to what MBQL emits.** In the MySQL dialect, about a third of the override arms (`strpos`, `starts_with`, `ends_with`, `ln`, `trunc`, `random`, `regexp_like`, `regexp_replace`, trims with explicit characters) render functions the MBQL compiler never emits, and by a manual reading only about 40 of its 97 allowlisted functions are ones MBQL uses. Scoping would cut 20 to 30 percent of each dialect, bringing the dialects to 4,100 to 6,200 lines. The cost is the design decision that the whole DataFusion SQL surface is available: engine-dialect native SQL and AI-generated SQL would hit rejections more often. The rejection is safe, but it is a smaller product.
+- **Always use the bridge.** No native connectors at all: every warehouse runs through its vendor JDBC driver behind the bridge. That removes the connectors (4,700 to 6,200 lines) and the per-warehouse sync dispatch (about 500), since bridged databases sync on their own driver. It also keeps the JDBC row readers (about 220 fewer lines removed). What remains is the single compiler, the dialects, plan-level policy, and the harness. The costs are an extra loopback hop and two Arrow conversions per query, and the bridge's performance hasn't been benchmarked. The streaming and parallel-query gains in the benchmark would also depend on how the bridge reads results.
+
+| Scenario | Added | Removed | Net growth |
+| --- | --: | --: | --: |
+| Baseline | 15,500–19,500 | ~4,100 | +11,400–15,400 |
+| ADBC and a shared toolkit | 13,100–16,600 | ~4,100 | +9,000–12,500 |
+| Dialects scoped to MBQL | 14,100–17,700 | ~4,100 | +10,000–13,600 |
+| ADBC, toolkit, and scoped dialects | 11,700–14,800 | ~4,100 | +7,600–10,700 |
+| Always the bridge | 10,300–12,800 | ~3,900 | +6,400–8,900 |
+| Always the bridge, with scoped dialects | 8,900–11,000 | ~3,900 | +5,000–7,100 |
+
+Even the smallest version is larger than today's code. The case for the engine is consistency, testability, and plan-level security, not less code. Among the options, always using the bridge cuts the most code and keeps those benefits, but it leaves performance as an open question. ADBC with a shared toolkit keeps native performance and removes about half the connector code, on warehouses where an ADBC driver exists.
+
 ## Recommended next steps
 
 1. Push the branch and get the engine CI jobs, including the per-platform native builds and the Alpine image, running for real.
@@ -124,4 +195,5 @@ Both JDBC effects could be fixed in the JDBC path on its own, so the fair readin
 3. Fix the JDBC path's two handicaps (`setMaxRows` disabling parallel query, buffering whole results) independently of the engine, so the comparison reflects the engine itself.
 4. Upstream the unparser fixes to DataFusion and retire the matching rewrites.
 5. Run the benchmark on MySQL and add it to CI with a regression threshold.
-6. Implement plan-level policy, starting with row filters, which is the main reason for the engine to exist.
+6. Benchmark the bridge against native connectors, and try an ADBC driver for Postgres, before choosing the connector strategy for the remaining warehouses.
+7. Implement plan-level policy, starting with row filters, which is the main reason for the engine to exist.
