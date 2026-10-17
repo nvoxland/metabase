@@ -44,6 +44,7 @@
 ;;; |                                                 Current Driver                                                 |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:dynamic *driver*
   "Current driver (a keyword such as `:postgres`) in use by the Query Processor/tests/etc. Bind this with `with-driver`
   below. The QP binds the driver this way in the `bind-driver` middleware."
@@ -1184,6 +1185,7 @@
   [_ native-form]
   native-form)
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:dynamic ^{:added "0.51.0"} *compile-with-inline-parameters*
   "Whether to compile an MBQL query to native with parameters spliced inline (as opposed to using placeholders like `?`
   and passing the parameters separately.) Normally we want to pass parameters separately to protect against SQL
@@ -1565,10 +1567,19 @@
    {:closed true}
    [:transform :metabase.lib.schema.id/transform]])
 
+(mr/def ::native-query-deps.unresolved-table-dep
+  [:map
+   {:closed true}
+   [:unresolved-table [:map
+                       {:closed true}
+                       [:schema {:optional true} :string]
+                       [:table :string]]]])
+
 (mr/def ::native-query-deps
   [:set [:or
          ::native-query-deps.table-dep
-         ::native-query-deps.transform-dep]])
+         ::native-query-deps.transform-dep
+         ::native-query-deps.unresolved-table-dep]])
 
 (defmulti native-query-deps
   "Gets the table dependencies of a given sql string (or equivalent).
@@ -1577,6 +1588,9 @@
 
   `query` is a Lib `:metabase.lib.schema/native-only-query`; you can use [[metabase.driver-api.core/raw-native-query]]
   to get the raw native query as needed.
+
+  A table the query names that matches no synced table or transform target can be returned as
+  `{:unresolved-table {:schema ... :table ...}}`, so dependency tracking can recompute the query once sync finds it.
 
   The return value should match the `:metabase.driver/native-query-deps` schema."
   {:added "0.57.0" :arglists '([driver query])}
@@ -1590,31 +1604,6 @@
                     {:driver driver
                      :args args}))
     #{}))
-
-(mr/def ::native-query-table-refs.table-ref
-  [:map
-   {:closed true}
-   [:schema {:optional true} [:maybe :string]]
-   [:table :string]])
-
-(mr/def ::native-query-table-refs
-  [:set ::native-query-table-refs.table-ref])
-
-(defmulti native-query-table-refs
-  "Gets the raw table references from a native query without resolving them to IDs.
-
-  Unlike [[native-query-deps]] which looks up tables in the database to return IDs,
-  this method returns just the schema and table names as they appear in the query.
-  This is useful for dependency tracking where referenced tables may not
-  exist yet.
-
-  `query` is a Lib `:metabase.lib.schema/native-only-query`; you can use
-  [[metabase.driver-api.core/raw-native-query]] to get the raw native query as needed.
-
-  The return value should match the `:metabase.driver/native-query-table-refs` schema."
-  {:changelog-test/ignore true :added "0.58.0" :arglists '([driver query])}
-  dispatch-on-initialized-driver
-  :hierarchy #'hierarchy)
 
 (defmulti native-result-metadata
   "Gets the result-metadata for a native query using static analysis (i.e., without actually
@@ -1683,6 +1672,7 @@
 ;;; |                                                    Upload                                                      |
 ;;; +----------------------------------------------------------------------------------------------------------------+
 
+#_{:clj-kondo/ignore [:metabase/discourage-dynamic-vars]}
 (def ^:dynamic *insert-chunk-rows*
   "The number of rows to insert at a time when uploading data to a database. This can be bound for testing purposes."
   nil)

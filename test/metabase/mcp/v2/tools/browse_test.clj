@@ -19,6 +19,7 @@
    [clojure.string :as str]
    [clojure.test :refer :all]
    [metabase.collections.models.collection :as collection]
+   [metabase.mcp.db :as mcp.db]
    [metabase.mcp.v2.message :as message]
    [metabase.mcp.v2.projections :as projections]
    [metabase.mcp.v2.registry :as registry]
@@ -41,13 +42,12 @@
 ;;; ------------------------------------------------- helpers ------------------------------------------------------
 
 (defn- browse-as
-  "Call `browse_collection` as `user` (nil token-scopes bypasses the scope gate — this is an
-   internal caller). Returns `{:error <text>}` for a teaching error, else
+  "Call `browse_collection` as `user`, holding every MCP scope. Returns `{:error <text>}` for a teaching error, else
    `{:json <parsed> :line <steering line>}` — the success text is the JSON envelope optionally
    followed by a newline and the line."
   [user args]
   (mt/with-test-user user
-    (let [{:keys [result error]} (registry/call-tool nil nil "browse_collection" args)]
+    (let [{:keys [result error]} (registry/call-tool v2.tu/all-scopes nil "browse_collection" args)]
       (cond
         error            {:error (message/render (:message error))}
         (:isError result) {:error (-> result :content first :text)}
@@ -247,6 +247,18 @@
       (is (nil? (:error (browse {:id (:id c) :namespace "content"}))))
       (is (nil? (:error (browse {:id (:id c)})))))))
 
+(deftest ^:parallel no-transform-folders-test
+  (testing "GHY-4746: MCP v2 has no transforms, so browse_collection has no transforms namespace, and a transform
+            folder reads as not found, the same answer a missing id gets"
+    (testing "namespace \"transforms\" fails the argument schema"
+      (let [error (:error (browse {:id "root" :namespace "transforms"}))]
+        (is (str/starts-with? error "Invalid arguments: "))
+        (is (str/includes? error "\"namespace\""))))
+    (mt/with-temp [:model/Collection folder {:name "browse-transform-folder" :namespace "transforms"}]
+      (doseq [mode ["items" "tree"]]
+        (testing mode
+          (is (re-find #"not found" (:error (browse {:id (:id folder) :mode mode})))))))))
+
 ;;; -------------------------------------------- argument validation -----------------------------------------------
 
 (deftest ^:parallel tree-mode-rejects-items-args-test
@@ -396,7 +408,7 @@
                                                    (collection/user->personal-collection
                                                     (mt/user->id :crowberto)))}]
       (mt/with-test-user :rasta
-        (let [{:keys [result error]} (registry/call-tool nil nil "browse_collection" {:id (:id c)})
+        (let [{:keys [result error]} (registry/call-tool v2.tu/all-scopes nil "browse_collection" {:id (:id c)})
               text                   (if error (message/render (:message error)) (-> result :content first :text))]
           (is (or error (:isError result)))
           (is (str/includes? text "may not exist")))))))
@@ -490,6 +502,29 @@
          clojure.lang.ExceptionInfo
          #"\"offset\" with get_fields pages the fields of one large table"
          (#'tools.browse/get-fields {:action "get_fields" :table_ids [1 2] :offset 5})))))
+
+(deftest related-tables-cap-before-lookup-test
+  (testing "GHY-4323: each requested table's FK targets are capped before the table lookup, so its `IN` is bounded
+            by what the response can surface rather than by how many FK columns the tables have"
+    (mt/with-temp [:model/Database {db-id :id} {}]
+      (let [target-ids (t2/insert-returning-pks! :model/Table
+                                                 (for [i (range 60)]
+                                                   {:db_id db-id :schema "public" :active true
+                                                    :name (str "spoke_" i) :display_name (str "spoke_" i)}))
+            rows       [{:id     -1
+                         :fields (for [id target-ids] {:target {:table_id id}})}]
+            looked-up  (atom [])
+            related    (let [active-tables-by-ids (mt/original-fn #'mcp.db/active-tables-by-ids)]
+                         (mt/with-dynamic-fn-redefs [mcp.db/active-tables-by-ids
+                                                     (fn [ids]
+                                                       (swap! looked-up conj (set ids))
+                                                       (active-tables-by-ids ids))]
+                           (mt/with-test-user :crowberto
+                             (#'tools.browse/related-tables-by-requested-table #{db-id} rows))))]
+        (is (= [(set (take 50 target-ids))] @looked-up)
+            "the lookup asks for the first 50 targets, in field order, and no more")
+        (is (= (take 50 target-ids) (map :id (get related -1)))
+            "the surfaced related tables are those same 50, in field order")))))
 
 (deftest get-fields-dedups-table-ids-test
   (testing "GHY-4138: duplicate table_ids are deduped before the guards run — the same id twice is
@@ -1115,8 +1150,7 @@
 ;;; all in play, and the assertions are on the response the model actually receives.
 
 (defn- dispatch-data
-  "Call `browse_data` through the registry as `:crowberto` carrying `token-scopes` (nil bypasses the
-   scope gate — this is an internal caller). Returns the whole dispatch outcome: `{:result <mcp
+  "Call `browse_data` through the registry as `:crowberto` carrying `token-scopes`. Returns the whole dispatch outcome: `{:result <mcp
    content>}` for anything that reached the handler, `{:error {:code .. :message ..}}` for a
    registry-level rejection (unknown tool, scope denial, args-schema failure)."
   [token-scopes args]
@@ -1148,13 +1182,17 @@
                                     "Insufficient scope to call tool: \"browse_data\". Requires ")
       #{metabot.scope/agent-query-run}
       #{metabot.scope/agent-content-write}
+      #{"agent:*"}
       #{}))
-  (testing "GHY-4138: the content-read scope, its wildcard, and an internal caller all reach the handler"
+  (testing "GHY-4942: a nil token scope set or the unrestricted sentinel is refused before dispatch"
+    (are [scopes] (str/starts-with? (dispatch-text scopes {:action "list_databases"})
+                                    "Insufficient scope to call tool: \"browse_data\". Requires ")
+      nil
+      #{:metabase.api.macros.scope/unrestricted}))
+  (testing "GHY-4138: the content-read scope reaches the handler"
     (are [scopes] (and (not (dispatch-error? (dispatch-data scopes {:action "list_databases"})))
                        (str/starts-with? (dispatch-text scopes {:action "list_databases"}) "{\"data\":"))
-      content-read
-      #{"agent:*"}
-      nil)))
+      content-read)))
 
 (deftest ^:parallel browse-data-tools-list-visibility-test
   (testing "GHY-4543: tools/list shows the tool whatever the token's scopes; the gate is at call time (above)"

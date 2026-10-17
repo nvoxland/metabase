@@ -74,7 +74,10 @@ export function Header({
       className={className}
       data-testid="visualizer-header"
     >
-      <ActionIcon onClick={() => setDataSidebarOpen((isOpen) => !isOpen)}>
+      <ActionIcon
+        variant="subtle"
+        onClick={() => setDataSidebarOpen((isOpen) => !isOpen)}
+      >
         <Icon name="sidebar_open" />
       </ActionIcon>
       <EditableText
@@ -89,7 +92,7 @@ export function Header({
       {/* Spacer */}
       <div style={{ flexGrow: 1 }} />
 
-      <Button.Group>
+      <Button.Group flex="0 0 auto">
         <Tooltip withinPortal={false} label={t`Undo`}>
           <Button
             aria-label={t`Undo`}
@@ -113,12 +116,14 @@ export function Header({
       </Button.Group>
       <Button
         variant="filled"
+        flex="0 0 auto"
         disabled={!saveButtonEnabled}
         onClick={handleSave}
       >
         {saveLabel ?? t`Add to dashboard`}
       </Button>
       <ActionIcon
+        variant="subtle"
         data-testid="visualizer-close-button"
         onClick={() => {
           trackVisualizerCloseClicked();
