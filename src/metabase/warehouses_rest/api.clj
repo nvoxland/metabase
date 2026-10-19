@@ -1150,7 +1150,9 @@
                   nil
                   (catch Throwable e
                     e))]
-      (throw (ex-info (ex-message ex) {:status-code 422}))
+      (throw (ex-info (ex-message ex) {:status-code 422
+                                       ;; give the UI the full failure so it can show why the connection failed
+                                       :details     (Throwable->map ex)}))
       (do
         (analytics/track-event! :snowplow/simple_event {:event "database_manual_sync" :target_id id})
         (quick-task/submit-task!
