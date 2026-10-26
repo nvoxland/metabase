@@ -26,6 +26,8 @@
   * `:vacuous`   -- admin succeeds but sees no disallowed VENUES data, so the probe proves nothing."
   (:require
    [clojure.test :refer :all]
+   [metabase-enterprise.sandbox.query-processor.middleware.sandboxing :as sandboxing]
+   [metabase-enterprise.sandbox.restricted-db-test-util :as rdb]
    [metabase-enterprise.sandbox.test-util :as met]
    [metabase.lib.walk :as lib.walk]
    [metabase.permissions.models.data-permissions :as data-perms]
@@ -40,7 +42,8 @@
 ;;; ------------------------------------------------ Ref shapes ---------------------------------------------------
 
 (defn- ids []
-  {:checkins          (mt/id :checkins)
+  {:db                (mt/id)
+   :checkins          (mt/id :checkins)
    :venues            (mt/id :venues)
    :users             (mt/id :users)
    :checkins.id       (mt/id :checkins :id)
@@ -177,7 +180,7 @@
 (defn- probe-query [i shape-k position-k]
   (let [r                                 ((ref-shapes shape-k) i)
         {:keys [query parameters]}        (positions position-k)]
-    (cond-> {:database (mt/id) :type "query" :query (query i r)}
+    (cond-> {:database (:db i) :type "query" :query (query i r)}
       parameters (assoc :parameters (parameters i r)))))
 
 (defn- run-as [user query]
@@ -264,10 +267,19 @@
 (def ^:private sandbox-configs
   "Config name -> the VENUES sandbox definition, the login attributes, and the prices that leaves visible."
   (array-map
-   :empty      {:gtap price-row-sandbox         :attributes {"price" "999"} :allowed #{}}
-   :price-1    {:gtap price-row-sandbox         :attributes {"price" "1"}   :allowed #{1}}
+   :empty      {:gtap         price-row-sandbox
+                :attributes   {"price" "999"}
+                :allowed      #{}
+                :restrict-sql ["DELETE FROM VENUES"]}
+   :price-1    {:gtap         price-row-sandbox
+                :attributes   {"price" "1"}
+                :allowed      #{1}
+                :restrict-sql ["DELETE FROM VENUES WHERE PRICE IS NULL OR PRICE <> 1"]}
    ;; every row visible, PRICE column dropped by the sandbox card
-   :hide-price {:gtap hide-price-column-sandbox :attributes {}              :allowed #{}}))
+   :hide-price {:gtap         hide-price-column-sandbox
+                :attributes   {}
+                :allowed      #{}
+                :restrict-sql ["UPDATE VENUES SET PRICE = NULL"]}))
 
 (defn- do-with-venues-sandbox!
   "Run `(thunk card-ids)` as the sandboxed :rasta user, with VENUES sandboxed by `(gtap-fn)`, CHECKINS and USERS
@@ -319,6 +331,87 @@
     (fn [ctx i]
       (doall (for [shape-k (keys ref-shapes), position-k (keys positions)]
                (run-probe ctx i shape-k position-k)))))))
+
+;;; ------------------------------------------- Differential oracle -----------------------------------------------
+;;;
+;;; A sandbox is a view. The sandboxed user running Q on the real data must get the same rows as an admin running Q on
+;;; a copy of the data with the sandbox applied by hand, or else a clean error. This needs no per-position oracle, so
+;;; it judges counts, joins and aggregates the same way.
+
+(def ^:private differential-tables ["CATEGORIES" "VENUES" "USERS" "CHECKINS"])
+
+(def ^:private differential-fks
+  [["CHECKINS" "VENUE_ID" "VENUES" "ID"]
+   ["CHECKINS" "USER_ID" "USERS" "ID"]
+   ["VENUES" "CATEGORY_ID" "CATEGORIES" "ID"]])
+
+(defn- unlimited
+  "`query` without its row limit, so result sets compare as wholes."
+  [query]
+  (update query :query dissoc :limit))
+
+(defn- classify-differential
+  "Compare the sandboxed user's result on the base data with an admin's result on the restricted copy. `admin-base` is
+  an admin's result on the base data; when it equals the restricted result the probe cannot tell the two apart."
+  [{user-rows :rows user-error :error}
+   {expected-rows :rows expected-error :error}
+   {admin-rows :rows}]
+  (let [freq frequencies]
+    (cond
+      (and expected-error user-error)               :rejected
+      expected-error                                :expected-error
+      user-error                                    :user-error
+      (= (freq user-rows) (freq expected-rows))     (if (= (freq admin-rows) (freq expected-rows)) :vacuous :consistent)
+      ;; any row the user got more often than the restricted data has is data the sandbox should have hidden
+      (some (fn [[row n]] (> n (get (freq expected-rows) row 0))) (freq user-rows))
+      :extra-rows
+      :else                                         :missing-rows)))
+
+(defn- run-differential-probe [i-restricted ctx i shape-k position-k]
+  (let [user-query (unlimited (probe-query i shape-k position-k))
+        user       (run-as :rasta user-query)
+        expected   (run-as :crowberto (unlimited (probe-query i-restricted shape-k position-k)))
+        admin-base (run-as :crowberto user-query)]
+    {:config   (:config ctx)
+     :shape    shape-k
+     :position position-k
+     :outcome  (classify-differential user expected admin-base)
+     :user     (update user :rows #(some->> % (take 5)))
+     :expected (update expected :rows #(some->> % (take 5)))
+     :query    user-query}))
+
+(defn- with-checkins-cards!
+  "Call `(f card-ids)` with a saved question and a model over CHECKINS in the current database."
+  [f]
+  (mt/with-temp [:model/Card {card-id :id}  {:dataset_query (mt/mbql-query checkins)}
+                 :model/Card {model-id :id} {:dataset_query (mt/mbql-query checkins) :type :model}]
+    (f {:card/checkins card-id :model/checkins model-id})))
+
+(defn run-differential!
+  "Run `probes` (pairs of ref shape and clause position, by default all of them) under sandbox config `config-k`, or
+  every config, judged by the differential oracle. H2 only: the restricted copy is built in H2. Returns a seq of probe
+  results."
+  ([]
+   (mapcat run-differential! (keys sandbox-configs)))
+  ([config-k]
+   (run-differential! config-k (for [shape-k (keys ref-shapes), position-k (keys positions)] [shape-k position-k])))
+  ([config-k probes]
+   (mt/dataset test-data
+     (rdb/do-with-restricted-pair!
+      {:tables       differential-tables
+       :fks          differential-fks
+       :restrict-sql (:restrict-sql (sandbox-configs config-k))}
+      (fn [base restricted]
+        (mt/with-db restricted
+          (with-checkins-cards!
+            (fn [card-ids]
+              (let [i-restricted (merge (ids) card-ids)]
+                (mt/with-db base
+                  (do-with-config!
+                   config-k
+                   (fn [ctx i]
+                     (doall (for [[shape-k position-k] probes]
+                              (run-differential-probe i-restricted ctx i shape-k position-k)))))))))))))))
 
 (defn summarize
   "A shape x position grid of outcome keywords, for reading at the REPL."
@@ -376,3 +469,18 @@
            (is (= 5 (count (:rows (run-as :crowberto query))))
                "admin sees VENUES rows, so the probe is meaningful")
            (is (= [] (:rows (run-as :rasta query))))))))))
+
+(deftest ^:synchronized differential-oracle-detects-dropped-sandbox-filter-test
+  (testing "With the sandbox's attribute filter dropped, the differential oracle reports rows the sandbox should hide"
+    (mt/test-drivers #{:h2}
+      (with-redefs-fn {#'sandboxing/sandbox->parameters (constantly [])}
+        #(is (= [:extra-rows]
+                (map :outcome (run-differential! :price-1 [[:canonical-source-field :fields]]))))))))
+
+(deftest ^:synchronized sandboxed-results-match-restricted-data-test
+  (testing "Every probe the sandboxed user can run returns exactly what an admin gets from the data with the sandbox applied by hand"
+    (mt/test-drivers #{:h2}
+      (doseq [{:keys [config shape position outcome] :as result} (run-differential!)]
+        (testing (format "%s in %s under %s" shape position config)
+          (is (not (#{:extra-rows :missing-rows} outcome))
+              (pr-str (select-keys result [:user :expected :query]))))))))
