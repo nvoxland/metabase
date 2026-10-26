@@ -41,6 +41,7 @@
    [metabase.query-processor.util.add-alias-info :as add]
    [metabase.sync.core :as sync]
    [metabase.test :as mt]
+   [metabase.test.util :as tu]
    [metabase.test.util.random :as tu.rng]
    [metabase.util :as u]
    [metabase.util.json :as json]
@@ -138,7 +139,8 @@
   * `:expect`      `:restricted` (user == admin on restricted), `:unrestricted` (user == admin on base) or `:error`
   * `:hidden-cols` SHOPS columns the sandbox card leaves out
   * `:sandboxed`   tables with an enforced sandbox, for the structural detector
-  * `:setup`       fn run inside `with-gtaps!` for extra arrangements (second groups, remaps)
+  * `:setup`       fn run inside `with-gtaps!` for extra arrangements (second groups)
+  * `:remaps`      FK display remappings `[[table column target-table target-column] ...]`, set up in both databases
   * `:feature`     driver feature the config needs"
   (array-map
    :table-tier      {:gtaps shops-table-gtap           :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
@@ -152,6 +154,9 @@
                      :feature :native-parameters}
    :two-tables      {:gtaps (fn [] (merge (shops-table-gtap) {:regions {:remappings (tier-remapping :regions)}}))
                      :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1-both :sandboxed #{:shops :regions}}
+   ;; ORDERS.SHOP_ID displays SHOPS.NAME: remaps add implicit joins to the sandboxed table in the outer query
+   :table-tier+remap {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
+                      :remaps [[:orders :shop_id :shops :name]]}
    ;; another group grants unrestricted access, so the sandbox is not enforced (by design)
    :cancelled       {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus :expect :unrestricted
                      :sandboxed #{} :setup #(add-rasta-to-group-with-view-data! :unrestricted)}
@@ -214,12 +219,38 @@
     (driver.u/supports? driver/*driver* feature (mt/db))
     true))
 
+(defn- do-with-remaps!
+  "Call `thunk` with the config's FK display remappings in place for the current database."
+  [remaps thunk]
+  (tu/do-with-column-remappings!
+   (into {} (for [[table column target-table target-column] remaps]
+              [(mt/id table column) (mt/id target-table target-column)]))
+   thunk))
+
 (defn- do-with-corpus-config!
   "Load the base dataset and the config's restricted variant, create the cards in both, set up the sandbox on a temp
   copy of the base database as `:rasta`, and call `(f ctx)` inside it. `ctx` has `:ids` for the base copy,
   `:restricted-ids` for the restricted database, `:allowed` canaries, and the config's fields."
   [config-k f]
-  (let [{:keys [gtaps attributes restricted setup expect hidden-cols] :or {expect :restricted}} (sandbox-configs config-k)]
+  (let [{:keys [gtaps attributes restricted setup expect hidden-cols remaps] :or {expect :restricted}} (sandbox-configs config-k)
+        in-sandbox-copy (fn [base restricted-ids allowed]
+                          (mt/with-db base
+                            (met/with-gtaps! {:gtaps (gtaps) :attributes attributes}
+                              (doseq [table tables]
+                                (data-perms/set-table-permission! &group (mt/id table) :perms/create-queries :query-builder))
+                              (data-perms/set-database-permission! &group (mt/id) :perms/download-results :one-million-rows)
+                              (when setup (setup))
+                              (do-with-remaps! remaps
+                                               (fn []
+                                                 (do-with-cards!
+                                                  (fn [cards]
+                                                    (f {:config         config-k
+                                                        :expect         expect
+                                                        :hidden-cols    (or hidden-cols #{})
+                                                        :sandboxed      (config-sandboxed-tables config-k)
+                                                        :ids            (ids-map cards)
+                                                        :restricted-ids restricted-ids
+                                                        :allowed        allowed}))))))))]
     (mt/dataset corpus/sandbox-corpus
       (corpus/ensure-fk-metadata!)
       (fully-synced!)
@@ -227,25 +258,11 @@
         (mt/dataset (var-get restricted)
           (corpus/ensure-fk-metadata!)
           (fully-synced!)
-          (do-with-cards!
-           (fn [restricted-cards]
-             (let [restricted-ids (ids-map restricted-cards)
-                   allowed        (allowed-canary-ids)]
-               (mt/with-db base
-                 (met/with-gtaps! {:gtaps (gtaps) :attributes attributes}
-                   (doseq [table tables]
-                     (data-perms/set-table-permission! &group (mt/id table) :perms/create-queries :query-builder))
-                   (data-perms/set-database-permission! &group (mt/id) :perms/download-results :one-million-rows)
-                   (when setup (setup))
-                   (do-with-cards!
-                    (fn [cards]
-                      (f {:config         config-k
-                          :expect         expect
-                          :hidden-cols    (or hidden-cols #{})
-                          :sandboxed      (config-sandboxed-tables config-k)
-                          :ids            (ids-map cards)
-                          :restricted-ids restricted-ids
-                          :allowed        allowed})))))))))))))
+          (do-with-remaps! remaps
+                           (fn []
+                             (do-with-cards!
+                              (fn [restricted-cards]
+                                (in-sandbox-copy base (ids-map restricted-cards) (allowed-canary-ids)))))))))))
 
 ;;; -------------------------------------------------- Detectors ---------------------------------------------------
 
@@ -467,6 +484,8 @@
   (array-map
    :shops-source            (fn [ids] {:query {:source-table (tid ids :shops)}})
    :shops-count             (fn [ids] {:query {:source-table (tid ids :shops) :aggregation [[:count]]}})
+   :orders-plain            (fn [ids] {:query {:source-table (tid ids :orders)}})
+   :orders-fk-only          (fn [ids] {:query {:source-table (tid ids :orders) :fields [[:field (fid ids :orders :shop_id) nil]]}})
    :orders-implicit-price   (fn [ids] {:query {:source-table (tid ids :orders)
                                                :fields       [[:field (fid ids :orders :id) nil]
                                                               (implicit ids :orders :shop_id :shops :price)]}})
