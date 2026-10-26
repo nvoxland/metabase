@@ -17,18 +17,30 @@
 
   See the dataset namespace for the schema, the canaries, and the restricted variants."
   (:require
+   [clojure.string :as str]
    [clojure.test :refer :all]
+   [clojure.test.check :as tc]
+   [clojure.test.check.generators :as gen]
+   [clojure.test.check.properties :as prop]
+   [clojure.walk :as walk]
+   [metabase-enterprise.sandbox.api.util :as sandbox.api.util]
    [metabase-enterprise.sandbox.corpus-test-dataset :as corpus]
+   [metabase-enterprise.sandbox.query-processor.middleware.sandboxing :as sandboxing]
    [metabase-enterprise.sandbox.test-util :as met]
    [metabase.driver :as driver]
    [metabase.driver.util :as driver.u]
+   [metabase.lib.core :as lib]
+   [metabase.lib.metadata :as lib.metadata]
+   [metabase.lib.test-util.generators :as lib.tu.gen]
    [metabase.lib.walk :as lib.walk]
    [metabase.permissions.core :as perms]
    [metabase.permissions.models.data-permissions :as data-perms]
+   [metabase.query-processor.middleware.enterprise :as qp.middleware.enterprise]
    [metabase.query-processor.preprocess :as qp.preprocess]
    [metabase.query-processor.setup :as qp.setup]
    [metabase.query-processor.util.add-alias-info :as add]
    [metabase.test :as mt]
+   [metabase.test.util.random :as tu.rng]
    [metabase.util :as u]
    [metabase.util.json :as json]
    [metabase.util.match :as match]
@@ -295,6 +307,9 @@
          (-> outer qp.preprocess/preprocess add/add-alias-info)
          (fn [_query path stage]
            (when-not (:query-permissions/sandboxed-table stage)
+             ;; a stage still reading the raw table is the plainest failure of the rewrite
+             (when (contains? table-ids (:source-table stage))
+               (vswap! acc conj {:path path :unmarked-source-table (:source-table stage)}))
              (let [own (-> stage
                            (dissoc :lib/stage-metadata)
                            (update :joins (partial mapv #(dissoc % :stages :lib/stage-metadata))))]
@@ -315,6 +330,77 @@
       (seq refs) {:verdict :raw-ref :refs refs}
       :else      {:verdict :clean})))
 
+;;; ------------------------------------------- Detector cross-checks ----------------------------------------------
+
+(defn detector-disagreements
+  "Results where two detectors contradict each other. A non-empty answer is a bug in a detector, not in sandboxing:
+  the differential oracle saying the rows are right while a canary of a hidden row got through, or the rows holding
+  extra data from a canary column without the canary scan noticing."
+  [results]
+  (for [{:keys [differential canary user probe config] :as r} results
+        :let [secret-col? (some #(str/includes? (u/lower-case-en (str %)) "secret") (:cols user))
+              reason (cond
+                       (and (#{:consistent :vacuous} differential) (= :leak (:verdict canary)))
+                       :rows-right-but-canary-leaked
+
+                       (and (= :extra-rows differential) secret-col? (= :clean (:verdict canary)))
+                       :extra-rows-with-canary-column-but-no-canary)]
+        :when reason]
+    {:config config :probe probe :reason reason :result (select-keys r [:differential :canary :user])}))
+
+(defn- scan-paths
+  "Seq of `[path value]` for every scalar in `x`."
+  [x]
+  (let [acc (volatile! [])]
+    (letfn [(scan [path v]
+              (cond
+                (map? v)        (doseq [[k child] v] (scan (conj path k) child))
+                (sequential? v) (doall (map-indexed (fn [i child] (scan (conj path i) child)) v))
+                :else           (vswap! acc conj [path v])))]
+      (scan [] x))
+    @acc))
+
+(def ^:private sql-text-pattern #"(?i)\bSELECT\b|\bFROM\b.*\bJOIN\b")
+
+(defn- hygiene-verdict
+  "What a sandboxed user's response must never carry, wherever it sits: a fingerprint, a native or preprocessed form,
+  internal query stages, the physical name of a sandboxed table, or SQL text in an error. `:json_query` echoes the
+  user's own input and is skipped."
+  [{:keys [sandboxed]} user]
+  (let [body        (let [b (:body user)] (if (map? b) (dissoc b :json_query) b))
+        table-names (into #{} (map #(mt/format-name (name %))) sandboxed)
+        problems    (concat
+                     (for [[path v] (scan-paths body)
+                           :when (and (some? v)
+                                      (or (some #{:fingerprint "fingerprint"} path)
+                                          (some #{:native :preprocessed :native_form "native_form"} path)))]
+                       {:kind :internal-metadata :path path})
+                     (for [[path v] (scan-paths body)
+                           :when (and (string? v)
+                                      (or (some #(str/includes? v (str "\"" % "\"")) table-names)
+                                          (re-find sql-text-pattern v)))]
+                       {:kind :sql-text :path path :value (u/truncate v 120)})
+                     (for [[path _] (scan-paths body)
+                           :when (some #{:stages "stages"} path)]
+                       {:kind :internal-query :path path}))
+        problems    (vec (distinct (map #(update % :path (partial take 4)) problems)))]
+    (if (seq problems) {:verdict :dirty :problems (vec (take 6 problems))} {:verdict :clean})))
+
+(def ^:private compared-col-keys [:base_type :effective_type :semantic_type :binning_info])
+
+(defn- metadata-diff-verdict
+  "Compare the result columns the user got with the expected ones, by name, on the keys that describe a column's
+  type and binning. Differences point at metadata that was merged in from the unsandboxed query."
+  [user expected]
+  (if (or (:error user) (:error expected))
+    {:verdict :skipped}
+    (let [by-name (fn [{:keys [body]}] (into {} (map (juxt :name #(select-keys % compared-col-keys))) (get-in body [:data :cols])))
+          u       (by-name user)
+          e       (by-name expected)
+          diffs   (for [col (keys u) :when (and (contains? e col) (not= (u col) (e col)))]
+                    {:col col :user (u col) :expected (e col)})]
+      (if (seq diffs) {:verdict :differs :diffs (vec diffs)} {:verdict :same}))))
+
 (defn- outcome
   "One keyword for a result, worst first, from its separate verdicts."
   [{:keys [differential canary structural]}]
@@ -323,7 +409,8 @@
     (= :raw-ref (:verdict structural))  :raw-ref
     :else                               differential))
 
-(def ^:private failing-outcomes #{:canary-leak :raw-ref :extra-rows :missing-rows :missing-error :over-restricted})
+(def ^:private failing-outcomes
+  #{:canary-leak :raw-ref :extra-rows :missing-rows :missing-error :over-restricted})
 
 (defn- run-probe
   "Run `probe-fn`, a fn of an ids map returning `{:query inner-query, :parameters ...}`, under `ctx`. Returns a result
@@ -335,9 +422,11 @@
         expected    (if (= expect :unrestricted)
                       admin-base
                       (run-as :crowberto restricted-ids (probe-fn restricted-ids)))
-        verdicts    {:differential (differential-verdict ctx user expected admin-base)
-                     :canary       (canary-verdict ctx user)
-                     :structural   (structural-verdict ctx probe)}]
+        verdicts    {:differential  (differential-verdict ctx user expected admin-base)
+                     :canary        (canary-verdict ctx user)
+                     :structural    (structural-verdict ctx probe)
+                     :hygiene       (hygiene-verdict ctx user)
+                     :metadata-diff (metadata-diff-verdict user expected)}]
     (merge verdicts
            {:config   (:config ctx)
             :probe    probe-name
@@ -399,7 +488,13 @@
    :parameter-on-shops      (fn [ids] {:query      {:source-table (tid ids :orders) :aggregation [[:count]]}
                                        :parameters [{:type   "number/!="
                                                      :target ["dimension" (implicit ids :orders :shop_id :shops :price)]
-                                                     :value  [-1]}]})))
+                                                     :value  [-1]}]})
+   ;; a bogus join alias over a card source fails validation after the card's stage metadata is spliced in, and the
+   ;; error text echoes that metadata, fingerprints included
+   :model-bogus-join-alias  (fn [ids] {:query {:source-table (card-source ids :model/shops)
+                                               :fields       [[:field (fid ids :shops :name) {:join-alias "Nope"}]]}})
+   :card-bogus-join-alias   (fn [ids] {:query {:source-table (card-source ids :card/shops)
+                                               :fields       [[:field (fid ids :shops :name) {:join-alias "Nope"}]]}})))
 
 (defn run-canonical!
   "Run the canonical probes under one config, or every config. Returns result maps."
@@ -465,7 +560,9 @@
    :field-literal             (fn [ids _ t] [:field-literal (fname ids :shops t) (get-in targets [t :base-type])])
    :source-field-is-pk        (fn [ids e t] [:field (fid ids :shops t) {:source-field (fid ids (:fk-table e) :id)}])
    :source-field-from-shops   (fn [ids _ t] [:field (fid ids :shops t) {:source-field (fid ids :shops :region_id)}])
-   :source-field-other-fk     (fn [ids e t] [:field (fid ids :shops t) {:source-field (fid ids (:fk-table e) (if (= (:fk e) :shop_id) :return_shop_id :shop_id))}])))
+   ;; only ORDERS has a second FK into SHOPS; nil elsewhere, and the probe is skipped
+   :source-field-other-fk     (fn [ids e t] (when (= :orders (:fk-table e))
+                                              [:field (fid ids :shops t) {:source-field (fid ids :orders (if (= (:fk e) :shop_id) :return_shop_id :shop_id))}]))))
 
 (defn- lib-binned
   "`r` with default binning, when it is a `:field` ref whose options can carry it."
@@ -527,13 +624,16 @@
      :parameter         {:query      (assoc base :aggregation [[:count]])
                          :parameters [(assoc (get-in targets [t :param]) :target [:dimension r])]})))
 
-(defn- grid-probe-fn [edge-k shape-k position-k target]
-  (fn [ids]
-    (let [e (edges edge-k)
-          r ((ref-shapes shape-k) ids e target)]
-      (-> (grid-positions ids e target r)
-          (get position-k)
-          (dissoc :params-note)))))
+(defn- grid-probe-fn
+  "A probe fn for one grid cell, or nil when the ref shape does not apply to the edge."
+  [edge-k shape-k position-k target]
+  (when ((ref-shapes shape-k) {:tables {} :fields {} :names {}} (edges edge-k) target)
+    (fn [ids]
+      (let [e (edges edge-k)
+            r ((ref-shapes shape-k) ids e target)]
+        (-> (grid-positions ids e target r)
+            (get position-k)
+            (dissoc :params-note))))))
 
 (def ^:private grid-position-names
   [:fields :breakout :filter :aggregation :expression :case-expression :order-by :mixed-after-canon
@@ -557,8 +657,10 @@
    (do-with-corpus-config!
     config-k
     (fn [ctx]
-      (doall (for [[edge-k shape-k position-k target :as probe-name] probe-names]
-               (run-probe ctx probe-name (grid-probe-fn edge-k shape-k position-k target))))))))
+      (doall (for [[edge-k shape-k position-k target :as probe-name] probe-names
+                   :let [probe-fn (grid-probe-fn edge-k shape-k position-k target)]
+                   :when probe-fn]
+               (run-probe ctx probe-name probe-fn)))))))
 
 (defn grid-summary
   "Outcome -> count, and the probes per failing outcome."
@@ -569,6 +671,309 @@
                   (map (juxt :outcome :probe (comp #(u/truncate (str %) 100) :error :user)))
                   sort
                   vec)})
+
+;;; ------------------------------------------- Mutation score of enforcement ---------------------------------------
+;;;
+;;; Each mutant breaks the sandbox rewrite in one plausible way. Every mutant must be caught by at least one detector
+;;; on at least one probe; a surviving mutant is a blind spot in the detectors.
+
+(def ^:private real-apply-sandboxing
+  "The OSS entry point of the rewrite, captured before any mutant replaces it. The preprocess pipeline calls this var,
+  not the EE one, so mutants must replace it here."
+  qp.middleware.enterprise/apply-sandboxing)
+
+(defn- sandbox-only-stages-without-joins
+  "A broken rewrite that skips any query with joins, as if the second pass never ran."
+  [query]
+  (if (some :joins (:stages query))
+    query
+    (real-apply-sandboxing query)))
+
+(def ^:private mutants
+  "Mutant name -> var -> replacement, applied with `with-redefs-fn`. Each is a way the rewrite could fail that would
+  let hidden rows through. Left out on purpose: column projection and the wrapper `:fields` filter, whose breakage
+  fails closed with a database error that no detector counts as a catch; and `fix-bad-field-id-refs`, which field
+  resolution makes equivalent for every probe here."
+  (array-map
+   :no-sandboxing          {#'qp.middleware.enterprise/apply-sandboxing identity}
+   :nothing-enforced       {#'sandbox.api.util/enforced-sandboxes-for-tables (constantly nil)}
+   :attribute-filter-lost  {#'sandboxing/sandbox->parameters (constantly [])}
+   :joins-never-sandboxed  {#'qp.middleware.enterprise/apply-sandboxing sandbox-only-stages-without-joins}))
+
+(def ^:private mutant-probes
+  "Probe name -> probe fn. A small set that between them exercise every part the mutants break: canonical probes,
+  plus a bare off-table ref that only `fix-bad-field-id-refs` rescues through the explicit join."
+  (delay
+    (merge (select-keys canonical-probes [:shops-source :orders-implicit-price :orders-explicit-join :items-two-hops
+                                          :nested-shops :card-shops])
+           {[:orders/shop_id :bare-id :explicit-join-present :price]
+            (grid-probe-fn :orders/shop_id :bare-id :explicit-join-present :price)})))
+
+(def ^:private mutant-configs [:table-tier :card-hide-price :card-join])
+
+(defn- detectors-fired [{:keys [differential canary structural hygiene]}]
+  (cond-> #{}
+    (#{:extra-rows :missing-rows :over-restricted} differential) (conj :differential)
+    (= :leak (:verdict canary))                                  (conj :canary)
+    (= :raw-ref (:verdict structural))                           (conj :structural)
+    (= :dirty (:verdict hygiene))                                (conj :hygiene)))
+
+(defn mutation-score!
+  "Run the mutant probes under each mutant and config. Returns mutant -> set of detectors that caught it, over all
+  configs and probes, plus `:probes` with the per-probe detail."
+  []
+  (into (sorted-map)
+        (for [[mutant-k redefs] mutants]
+          [mutant-k
+           (let [results (with-redefs-fn redefs
+                           (fn []
+                             (doall
+                              (for [config-k mutant-configs
+                                    r        (do-with-corpus-config!
+                                              config-k
+                                              (fn [ctx]
+                                                (doall (for [[probe-name probe-fn] @mutant-probes]
+                                                         (run-probe ctx probe-name probe-fn)))))]
+                                r))))]
+             {:caught-by (reduce into #{} (map detectors-fired results))
+              :probes    (mapv (fn [r] [(:config r) (:probe r) (:outcome r)]) results)})])))
+
+;;; --------------------------------------------- Generated queries -----------------------------------------------
+;;;
+;;; Random valid queries from the lib generator, started from each source kind, converted to legacy MBQL the way a
+;;; client would send them, then (step 6) rewritten into non-standard ref encodings. test.check shrinks a failing
+;;; case to the shortest walk and fewest mutations that still fail.
+
+(defn- translate-query
+  "`legacy-query`, built against database `from`, rewritten to name the same tables, fields and cards in database
+  `to`. Only ids in table, field and card positions are touched."
+  [legacy-query from to]
+  (let [tbl     (into {} (for [t tables] [(tid from t) (tid to t)]))
+        fld     (into {} (for [[t cols] columns, c cols] [(fid from t c) (fid to t c)]))
+        crd     (into {} (for [k (keys (:cards from))] [(card-source from k) (card-source to k)]))
+        xf-opts (fn [opts] (cond-> opts (and (map? opts) (int? (:source-field opts))) (update :source-field #(fld % %))))]
+    (-> (walk/postwalk
+         (fn [x]
+           (cond
+             (and (map? x) (contains? x :source-table))
+             (update x :source-table #(or (tbl %) (crd %) %))
+
+             (and (vector? x) (= :field (first x)) (int? (second x)))
+             [:field (fld (second x) (second x)) (xf-opts (nth x 2 nil))]
+
+             (and (vector? x) (= :field-id (first x)) (int? (second x)))
+             [:field-id (fld (second x) (second x))]
+
+             :else x))
+         legacy-query)
+        (assoc :database (:db to)))))
+
+(def ^:private source-kinds
+  [:table/shops :table/orders :table/items :table/regions :card/shops :model/shops :card/orders-implicit :nested/shops])
+
+(defn- start-query
+  "A lib query over the current database to start a random walk from."
+  [ids source]
+  (let [mp    (mt/metadata-provider)
+        table (fn [t] (lib/query mp (lib.metadata/table mp (tid ids t))))
+        card  (fn [k] (lib/query mp (lib.metadata/card mp (get-in ids [:cards k]))))]
+    (case source
+      :table/shops          (table :shops)
+      :table/orders         (table :orders)
+      :table/items          (table :items)
+      :table/regions        (table :regions)
+      :card/shops           (card :card/shops)
+      :model/shops          (card :model/shops)
+      :card/orders-implicit (card :card/orders-implicit)
+      :nested/shops         (lib/append-stage (table :shops)))))
+
+(defn- generate-legacy-query
+  "A random walk of `n-steps` from `source`, seeded, as a legacy query over the current database."
+  [ids {:keys [source seed n-steps]}]
+  (let [mp (mt/metadata-provider)]
+    (binding [tu.rng/*generator*             (java.util.Random. ^long seed)
+              lib.tu.gen/*safe-for-old-refs* false
+              lib.tu.gen/*available-cards*   (mapv #(lib.metadata/card mp %) (vals (:cards ids)))]
+      (-> (lib.tu.gen/random-queries-from (start-query ids source) n-steps)
+          last
+          lib/->legacy-MBQL))))
+
+(defn- field-ref? [x]
+  (and (vector? x) (= :field (first x)) (or (int? (second x)) (string? (second x)))))
+
+(defn- field-id->column
+  "Field id -> `[table column]` for the ids map."
+  [ids]
+  (into {} (map (fn [[tc id]] [id tc])) (:fields ids)))
+
+(def ^:private column-base-types
+  {:id :type/Integer :name :type/Text :tier :type/Integer :price :type/Integer :amount :type/Integer :qty :type/Integer
+   :region_id :type/Integer :parent_shop_id :type/Integer :hq_shop_id :type/Integer :shop_id :type/Integer
+   :return_shop_id :type/Integer :order_id :type/Integer :secret :type/Text :secret_num :type/BigInteger})
+
+(defn- ref-column
+  "`[table column]` a field ref names, when it names one by id."
+  [ids [_ id-or-name]]
+  (when (int? id-or-name) ((field-id->column ids) id-or-name)))
+
+(defn- nth-field-ref
+  "The k-th (mod count) field ref of `x` in traversal order, refs to SHOPS first; nil when there are none."
+  [ids x k]
+  (let [refs  (atom [])
+        _     (walk/postwalk (fn [v] (when (field-ref? v) (swap! refs conj v)) v) x)
+        shops (filter #(= :shops (first (ref-column ids %))) @refs)
+        all   (concat shops (remove #(= :shops (first (ref-column ids %))) @refs))]
+    (when (seq all)
+      (nth all (mod k (count all))))))
+
+(defn- replace-ref
+  "`x` with every occurrence of field ref `r` replaced by `(f r)`."
+  [x r f]
+  (walk/postwalk (fn [v] (if (= v r) (f v) v)) x))
+
+(defn- name-ref
+  "`r` rewritten as a name ref, with or without its base type."
+  [ids [_ _ opts :as r] base-type?]
+  (if-let [[table column] (ref-column ids r)]
+    [:field (fname ids table column) (cond-> (or opts {})
+                                       true       (dissoc :source-field :source-field-name :source-field-join-alias :join-alias)
+                                       base-type? (assoc :base-type (column-base-types column)))]
+    r))
+
+(defn- fk-column-name [ids opts]
+  (when-let [[table column] (ref-column ids [:field (:source-field opts) nil])]
+    (fname ids table column)))
+
+(def ^:private mutation-kinds
+  "Mutation name -> fn of ids, the outer legacy query and the k-th ref, returning the mutated outer query. Each is a
+  way a client could encode a ref that the query builder never produces."
+  (array-map
+   :id->name                   (fn [ids q r] (replace-ref q r #(name-ref ids % true)))
+   :id->name-no-base-type      (fn [ids q r] (replace-ref q r #(name-ref ids % false)))
+   :source-field-name          (fn [ids q [_ id opts :as r]]
+                                 (if-let [n (and (:source-field opts) (fk-column-name ids opts))]
+                                   (replace-ref q r (constantly [:field id (assoc opts :source-field-name n)]))
+                                   q))
+   :source-field-name-bogus    (fn [_ q [_ id opts :as r]]
+                                 (if (:source-field opts)
+                                   (replace-ref q r (constantly [:field id (assoc opts :source-field-name "NOPE")]))
+                                   q))
+   :source-field-join-bogus    (fn [_ q [_ id opts :as r]]
+                                 (if (:source-field opts)
+                                   (replace-ref q r (constantly [:field id (assoc opts :source-field-join-alias "Nope")]))
+                                   q))
+   :fk->                       (fn [_ q [_ id opts :as r]]
+                                 (if (and (int? id) (:source-field opts))
+                                   (replace-ref q r (constantly [:fk-> [:field-id (:source-field opts)] [:field-id id]]))
+                                   q))
+   :field-literal              (fn [ids q r]
+                                 (if-let [[table column] (ref-column ids r)]
+                                   (replace-ref q r (constantly [:field-literal (fname ids table column) (column-base-types column)]))
+                                   q))
+   :joined-field               (fn [_ q [_ id opts :as r]]
+                                 (if (and (int? id) (:join-alias opts))
+                                   (replace-ref q r (constantly [:joined-field (:join-alias opts) [:field-id id]]))
+                                   q))
+   :drop-join-alias            (fn [_ q [_ id opts :as r]]
+                                 (if (:join-alias opts)
+                                   (replace-ref q r (constantly [:field id (not-empty (dissoc opts :join-alias))]))
+                                   q))
+   :bogus-join-alias           (fn [_ q [_ id opts :as r]]
+                                 (replace-ref q r (constantly [:field id (assoc opts :join-alias "Nope")])))
+   :drop-source-field          (fn [_ q [_ id opts :as r]]
+                                 (if (:source-field opts)
+                                   (replace-ref q r (constantly [:field id (not-empty (dissoc opts :source-field :source-field-name :source-field-join-alias))]))
+                                   q))
+   :duplicate-into-filter      (fn [_ q r]
+                                 (update-in q [:query :filter] #(if % [:and % [:not-null r]] [:not-null r])))
+   :outer-stage                (fn [_ q r]
+                                 (assoc q :query {:source-query (:query q) :fields [r]}))
+   :outer-stage-name-ref       (fn [ids q r]
+                                 (assoc q :query {:source-query (:query q) :fields [(name-ref ids r true)]}))
+   :parameter                  (fn [ids q r]
+                                 (if-let [[_ column] (ref-column ids r)]
+                                   (let [text? (= :type/Text (column-base-types column))]
+                                     (update q :parameters (fnil conj [])
+                                             {:type   (if text? "string/!=" "number/!=")
+                                              :value  [(if text? "__none__" -424242)]
+                                              :target [:dimension r]}))
+                                   q))))
+
+(defn- apply-mutations
+  "Rewrite refs of `legacy-query` per `mutations`, each `[kind k]`: the k-th field ref (SHOPS refs first) gets the
+  kind's encoding. Mutations that do not apply to the chosen ref leave the query unchanged."
+  [ids legacy-query mutations]
+  (reduce (fn [q [kind k]]
+            (if-let [r (nth-field-ref ids (:query q) k)]
+              ((mutation-kinds kind) ids q r)
+              q))
+          legacy-query
+          mutations))
+
+(defn- run-case!
+  "Generate, mutate and run one case under `ctx`. A generator failure is recorded as `:generator-error`, not a
+  sandbox failure."
+  [{:keys [ids restricted-ids] :as ctx} {:keys [source seed n-steps mutations] :as case}]
+  (let [generated (try (apply-mutations ids (generate-legacy-query ids case) mutations)
+                       (catch Throwable e {::generator-error (ex-message e)}))]
+    (if-let [error (::generator-error generated)]
+      {:outcome :generator-error :case case :error (u/truncate error 300) :config (:config ctx)}
+      (let [q-base       (select-keys generated [:query :parameters])
+            q-restricted (select-keys (translate-query generated ids restricted-ids) [:query :parameters])
+            probe-fn     (fn [i] (if (= (:db i) (:db ids)) q-base q-restricted))]
+        (assoc (run-probe ctx [:generated source seed n-steps mutations] probe-fn) :case case)))))
+
+(def ^:private gen-case
+  (gen/hash-map :source    (gen/elements source-kinds)
+                :seed      (gen/no-shrink gen/large-integer)
+                :n-steps   (gen/choose 1 12)
+                :mutations (gen/vector (gen/tuple (gen/elements (keys mutation-kinds)) gen/nat) 0 3)))
+
+(defn- env-long [var-name default]
+  (or (some-> (System/getenv var-name) parse-long) default))
+
+(defn- generated-cases-per-config [] (env-long "MB_SANDBOX_GEN_CASES" 40))
+(defn- generated-seed [] (env-long "MB_SANDBOX_GEN_SEED" 20261026))
+
+(defn run-generated!
+  "Run `n` generated cases under `config-k` with test.check seed `seed`. Returns the quick-check result and every
+  case result, including those run while shrinking."
+  [config-k n seed]
+  (do-with-corpus-config!
+   config-k
+   (fn [ctx]
+     (let [outcomes (atom [])
+           property (prop/for-all [c gen-case]
+                      (let [r (run-case! ctx c)]
+                        (swap! outcomes conj r)
+                        (not (failing-outcomes (:outcome r)))))
+           ;; the property needs the expensive harness around it, so it cannot be a top-level `defspec`
+           result   #_{:clj-kondo/ignore [:discouraged-var]} (tc/quick-check n property :seed seed)]
+       {:result result :outcomes @outcomes}))))
+
+(defn- meaningful?
+  "At least some of the cases ran for both users and compared rows; a run that only ever errors proves nothing."
+  [outcomes]
+  (let [counts (frequencies (map :outcome outcomes))
+        total  (count outcomes)]
+    (and (pos? total)
+         (>= (+ (get counts :consistent 0) (get counts :vacuous 0)) (* 0.3 total)))))
+
+(defn repro-report
+  "The smallest failing case as a reproduction: its generator inputs, the legacy query as JSON, and every verdict."
+  [{:keys [shrunk fail] :as result} outcomes]
+  (when-not (:pass? result)
+    (let [smallest  (first (or (:smallest shrunk) fail))
+          r         (last (filter #(= smallest (:case %)) outcomes))
+          ;; a property that threw has no result record; test.check keeps the exception
+          exception (some-> (or (:result shrunk) (:result result)) ex-message)]
+      (str/join "\n"
+                ["Smallest failing case:" (pr-str smallest)
+                 "Outcome:" (pr-str (select-keys r [:outcome :differential :canary :structural :hygiene :error]))
+                 "Exception:" (pr-str exception)
+                 "Legacy query (base copy ids):" (json/encode (:query r))
+                 "Sandboxed user got:" (pr-str (:user r))
+                 "Expected:" (pr-str (:expected r))]))))
 
 ;;; --------------------------------------------------- Tests ------------------------------------------------------
 
@@ -621,4 +1026,108 @@
         (doseq [{:keys [probe outcome] :as result} (run-canonical! config-k)]
           (testing (format "%s under %s" probe config-k)
             (is (not (failing-outcomes outcome))
-                (pr-str (select-keys result [:outcome :differential :canary :structural :user :expected :query])))))))))
+                (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
+                                             :user :expected :query])))))))))
+
+(deftest ^:synchronized sandboxed-user-responses-are-hygienic-test
+  (testing "Nothing in a sandboxed user's response reveals the sandbox or the raw table: no fingerprints, no native or preprocessed forms, no SQL text"
+    (mt/test-drivers (corpus-drivers)
+      (doseq [{:keys [probe config hygiene]} (mapcat run-canonical! [:table-tier :card-hide-price])]
+        (testing (format "%s under %s" probe config)
+          (is (= :clean (:verdict hygiene)) (pr-str hygiene)))))))
+
+(deftest ^:synchronized detectors-agree-with-each-other-test
+  (testing "No probe makes two detectors contradict each other; a disagreement is a detector bug"
+    (mt/test-drivers (corpus-drivers)
+      (is (empty? (detector-disagreements (mapcat run-canonical! [:table-tier :card-hide-price :two-tables])))))))
+
+(deftest ^:synchronized every-mutant-of-the-rewrite-is-caught-test
+  (testing "Each plausible way of breaking the sandbox rewrite is caught by at least one detector"
+    (mt/test-drivers #{:h2}
+      (doseq [[mutant-k {:keys [caught-by probes]}] (mutation-score!)]
+        (testing (name mutant-k)
+          (is (seq caught-by) (pr-str probes)))))))
+
+(def ^:private ci-grid-selection
+  "The slice of the grid that runs in CI: every edge and ref shape, in the positions that take different code paths,
+  for the numeric target."
+  {:positions* [:fields :join-condition :second-stage :parameter]
+   :targets*   [:price]})
+
+(deftest ^:synchronized field-ref-grid-slice-cannot-escape-sandbox-test
+  (mt/test-drivers (corpus-drivers)
+    (doseq [config-k [:table-tier :card-hide-price]
+            {:keys [probe outcome] :as result} (run-grid! config-k (grid-probe-names ci-grid-selection))]
+      (testing (format "%s under %s" (pr-str probe) config-k)
+        (is (not (failing-outcomes outcome))
+            (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :user :query])))))))
+
+(deftest ^:synchronized generated-queries-cannot-escape-sandbox-test
+  (mt/test-drivers (corpus-drivers)
+    (doseq [config-k [:table-tier :card-hide-price :two-tables]]
+      (testing (str config-k)
+        (let [{:keys [result outcomes]} (run-generated! config-k (generated-cases-per-config) (generated-seed))]
+          (is (true? (:pass? result)) (repro-report result outcomes))
+          (is (meaningful? outcomes) (pr-str (frequencies (map :outcome outcomes)))))))))
+
+(def ^:private fake-ids
+  "An ids map with made-up ids, for testing the mutation catalogue without a database."
+  {:db     1
+   :tables (zipmap tables (range 100 104))
+   :fields (into {} (map-indexed (fn [i tc] [tc (+ 200 i)])) (for [[t cols] columns, c cols] [t c]))
+   :names  (into {} (for [[t cols] columns, c cols] [[t c] (u/upper-case-en (name c))]))
+   :cards  {:card/shops 5 :model/shops 6 :card/orders-implicit 7}})
+
+(deftest ^:parallel mutation-kinds-rewrite-refs-test
+  (let [f  (partial fid fake-ids)
+        q  {:database 1
+            :type     :query
+            :query    {:source-table (tid fake-ids :orders)
+                       :joins        [{:source-table (tid fake-ids :shops) :alias "S"
+                                       :condition    [:= [:field (f :orders :shop_id) nil] [:field (f :shops :id) {:join-alias "S"}]]
+                                       :fields       :none}]
+                       :fields       [[:field (f :orders :id) nil]
+                                      [:field (f :shops :price) {:source-field (f :orders :shop_id)}]
+                                      [:field (f :shops :secret) {:join-alias "S"}]]}}
+        at (fn [kind k] (apply-mutations fake-ids q [[kind k]]))]
+    (testing "SHOPS refs come first in walk order: the join condition's SHOPS.ID, then PRICE, then SECRET"
+      (is (= [:field "ID" {:base-type :type/Integer}]
+             (get-in (at :id->name 0) [:query :joins 0 :condition 2])))
+      (is (= [:field "PRICE" {:base-type :type/Integer}]
+             (get-in (at :id->name 1) [:query :fields 1])))
+      (is (= [:field "SECRET" {:base-type :type/Text}]
+             (get-in (at :id->name 2) [:query :fields 2])))
+      (is (= [:field "SECRET" {}]
+             (get-in (at :id->name-no-base-type 2) [:query :fields 2]))))
+    (testing "source-field variants"
+      (is (= [:field (f :shops :price) {:source-field (f :orders :shop_id) :source-field-name "SHOP_ID"}]
+             (get-in (at :source-field-name 1) [:query :fields 1])))
+      (is (= [:field (f :shops :price) {:source-field (f :orders :shop_id) :source-field-name "NOPE"}]
+             (get-in (at :source-field-name-bogus 1) [:query :fields 1])))
+      (is (= [:fk-> [:field-id (f :orders :shop_id)] [:field-id (f :shops :price)]]
+             (get-in (at :fk-> 1) [:query :fields 1])))
+      (is (= [:field (f :shops :price) nil]
+             (get-in (at :drop-source-field 1) [:query :fields 1])))
+      (testing "do not apply to a ref without :source-field"
+        (is (= q (at :fk-> 2)))))
+    (testing "join-alias variants"
+      (is (= [:joined-field "S" [:field-id (f :shops :secret)]]
+             (get-in (at :joined-field 2) [:query :fields 2])))
+      (is (= [:field (f :shops :secret) nil]
+             (get-in (at :drop-join-alias 2) [:query :fields 2])))
+      (is (= [:field (f :shops :secret) {:join-alias "Nope"}]
+             (get-in (at :bogus-join-alias 2) [:query :fields 2]))))
+    (testing "wrapping and parameters"
+      (is (= [:field-literal "PRICE" :type/Integer]
+             (get-in (at :field-literal 1) [:query :fields 1])))
+      (is (= [:not-null [:field (f :shops :price) {:source-field (f :orders :shop_id)}]]
+             (get-in (at :duplicate-into-filter 1) [:query :filter])))
+      (is (= {:source-query (:query q) :fields [[:field (f :shops :price) {:source-field (f :orders :shop_id)}]]}
+             (:query (at :outer-stage 1))))
+      (is (= [[:field "PRICE" {:base-type :type/Integer}]]
+             (get-in (at :outer-stage-name-ref 1) [:query :fields])))
+      (is (= [{:type "number/!=" :value [-424242] :target [:dimension [:field (f :shops :price) {:source-field (f :orders :shop_id)}]]}]
+             (:parameters (at :parameter 1))))
+      (is (= "string/!=" (-> (at :parameter 2) :parameters first :type))))
+    (testing "k wraps around the five candidate refs"
+      (is (= (at :id->name 1) (at :id->name 6))))))

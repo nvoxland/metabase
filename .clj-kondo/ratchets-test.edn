@@ -41,6 +41,7 @@
                                 :clojure.java.jdbc/with-db-connection              1
                                 :clojure.pprint/print-table                        1
                                 :clojure.string/lower-case                         1
+                                :clojure.test.check/quick-check                    1
                                 :compojure.core/routes                             2
                                 :ee.search.entity-retrieval.core/search-unfiltered 6
                                 :lib.equality/find-column-indexes-for-refs         2
