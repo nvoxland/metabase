@@ -108,6 +108,36 @@
                        :fields       [["field" (:venues.name i) {"source-field" (:checkins.venue-id i)}] r]
                        :limit        50})
     :result [:values 1]}
+   ;; the same, but the canonical ref spells out `source-field-name`, which the implicit-join code treats as a
+   ;; separate join unless it matches the FK's own name
+   :fields-mixed-with-source-field-name
+   {:query  (fn [i r] {:source-table (:checkins i)
+                       :fields       [["field" (:venues.name i) {"source-field"      (:checkins.venue-id i)
+                                                                 "source-field-name" (:name/venue-id i)}]
+                                      r]
+                       :limit        50})
+    :result [:values 1]}
+   ;; the ref under test first, the canonical ref second
+   :fields-mixed-canonical-after
+   {:query  (fn [i r] {:source-table (:checkins i)
+                       :fields       [r ["field" (:venues.name i) {"source-field" (:checkins.venue-id i)}]]
+                       :limit        50})
+    :result [:values 0]}
+   ;; saved question and model over CHECKINS as the source, the way stored legacy refs reach the QP
+   :card-source
+   {:query  (fn [i r] {:source-table (str "card__" (:card/checkins i)) :fields [r] :limit 50})
+    :result [:values 0]}
+   :card-source-mixed-with-canonical
+   {:query  (fn [i r] {:source-table (str "card__" (:card/checkins i))
+                       :fields       [["field" (:venues.name i) {"source-field" (:checkins.venue-id i)}] r]
+                       :limit        50})
+    :result [:values 1]}
+   :model-source
+   {:query  (fn [i r] {:source-table (str "card__" (:model/checkins i)) :fields [r] :limit 50})
+    :result [:values 0]}
+   :card-source-filter
+   {:query  (fn [i r] {:source-table (str "card__" (:card/checkins i)) :aggregation [["count"]] :filter ["not-null" r]})
+    :result [:count]}
    ;; the ref under test in a second stage, over a first stage that is plain CHECKINS
    :second-stage
    {:query  (fn [i r] {:source-query {:source-table (:checkins i)} :fields [r] :limit 50})
@@ -225,21 +255,31 @@
      :structure structure
      :query     query}))
 
+(defn- price-row-sandbox []
+  {:remappings {"price" ["variable" [:field (mt/id :venues :price) nil]]}})
+
+(defn- hide-price-column-sandbox []
+  {:query (mt/mbql-query venues {:fields [$id $name $category_id $latitude $longitude]})})
+
 (def ^:private sandbox-configs
-  "Config name -> the login attribute VENUES.PRICE is sandboxed to, and the prices that leaves visible."
+  "Config name -> the VENUES sandbox definition, the login attributes, and the prices that leaves visible."
   (array-map
-   :empty   {:attribute "999" :allowed #{}}
-   :price-1 {:attribute "1"   :allowed #{1}}))
+   :empty      {:gtap price-row-sandbox         :attributes {"price" "999"} :allowed #{}}
+   :price-1    {:gtap price-row-sandbox         :attributes {"price" "1"}   :allowed #{1}}
+   ;; every row visible, PRICE column dropped by the sandbox card
+   :hide-price {:gtap hide-price-column-sandbox :attributes {}              :allowed #{}}))
 
 (defn- do-with-venues-sandbox!
-  "Run `thunk` as the sandboxed :rasta user, with VENUES sandboxed to `price = attribute` and CHECKINS and USERS fully
-  queryable."
-  [attribute thunk]
-  (met/with-gtaps! {:gtaps      {:venues {:remappings {"price" ["variable" [:field (mt/id :venues :price) nil]]}}}
-                    :attributes {"price" attribute}}
+  "Run `(thunk card-ids)` as the sandboxed :rasta user, with VENUES sandboxed by `(gtap-fn)`, CHECKINS and USERS
+  fully queryable, and a saved question and a model over CHECKINS. `gtap-fn` runs inside the sandbox's copy of the
+  test database, so the ids it reads belong to that copy."
+  [gtap-fn attributes thunk]
+  (met/with-gtaps! {:gtaps {:venues (gtap-fn)} :attributes attributes}
     (doseq [table [:checkins :users]]
       (data-perms/set-table-permission! &group (mt/id table) :perms/create-queries :query-builder))
-    (thunk)))
+    (mt/with-temp [:model/Card {card-id :id}  {:dataset_query (mt/mbql-query checkins)}
+                   :model/Card {model-id :id} {:dataset_query (mt/mbql-query checkins) :type :model}]
+      (thunk {:card/checkins card-id :model/checkins model-id}))))
 
 (defn- allowed-checkins-count
   "Number of CHECKINS rows whose venue has a price in `allowed`, counted as admin."
@@ -257,11 +297,12 @@
 (defn- do-with-config!
   "Run `(f ctx ids)` under sandbox config `config-k`, where `ctx` carries what [[judge]] needs."
   [config-k f]
-  (let [{:keys [attribute allowed]} (sandbox-configs config-k)]
+  (let [{:keys [gtap attributes allowed]} (sandbox-configs config-k)]
     (do-with-venues-sandbox!
-     attribute
-     (fn []
-       (let [i (ids)]
+     gtap
+     attributes
+     (fn [card-ids]
+       (let [i (merge (ids) card-ids)]
          (f {:config        config-k
              :allowed       allowed
              :allowed-count (allowed-checkins-count i allowed)}
