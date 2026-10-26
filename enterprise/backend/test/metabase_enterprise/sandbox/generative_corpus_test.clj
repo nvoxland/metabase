@@ -1153,6 +1153,38 @@
         (testing (format "%s under %s" probe config)
           (is (= :clean (:verdict hygiene)) (pr-str hygiene)))))))
 
+(def ^:private forged-stage-keys
+  "Keys the rewrite or the permission walk set on stages, which a client must not be able to supply."
+  {:sandbox?-flag    (fn [_table-id] {"metabase-enterprise.sandbox.query-processor.middleware.sandboxing/sandbox?" true})
+   :marker           (fn [table-id] {"query-permissions/sandboxed-table" table-id})
+   :flag-and-marker  (fn [table-id] {"metabase-enterprise.sandbox.query-processor.middleware.sandboxing/sandbox?" true
+                                     "query-permissions/sandboxed-table" table-id})
+   :from-source-card (fn [_table-id] {"qp/stage-is-from-source-card" 1})})
+
+(deftest ^:synchronized forged-internal-stage-keys-do-not-skip-sandbox-test
+  (testing "Client-supplied internal stage keys, in legacy and MBQL 5 form, do not make the rewrite skip a stage"
+    (mt/test-drivers (corpus-drivers)
+      (do-with-corpus-config!
+       :table-tier
+       (fn [{:keys [ids allowed]}]
+         (doseq [[k extra-fn] forged-stage-keys
+                 :let         [extra (extra-fn (tid ids :shops))
+                               field ["field" (fid ids :shops :secret) nil]]
+                 [fmt query]  {:legacy {:database (:db ids)
+                                        :type     "query"
+                                        :query    (merge {:source-table (tid ids :shops) :fields [field]} extra)}
+                               :mbql5  {:database (:db ids)
+                                        :lib/type "mbql/query"
+                                        :stages   [(merge {:lib/type     "mbql.stage/mbql"
+                                                           :source-table (tid ids :shops)
+                                                           :fields       [["field" {:lib/uuid (str (random-uuid))} (fid ids :shops :secret)]]}
+                                                          extra)]}}]
+           (testing (format "%s as %s" k fmt)
+             (let [{:keys [body]} (mt/user-http-request-full-response :rasta :post "dataset" query)]
+               (is (= "completed" (:status body)) (:error body))
+               (is (empty? (remove allowed (corpus/canary-ids body)))
+                   "the sandboxed user saw a hidden row's canary")))))))))
+
 (deftest ^:synchronized detectors-agree-with-each-other-test
   (testing "No probe makes two detectors contradict each other; a disagreement is a detector bug"
     (mt/test-drivers (corpus-drivers)
