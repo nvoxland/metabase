@@ -56,32 +56,38 @@
    :users.id          (mt/id :users :id)
    ;; physical names, which differ in case by driver
    :name/price        (mt/format-name "price")
+   ;; the VENUES column the ref shapes aim at; see [[retarget]]
+   :target            (mt/id :venues :price)
+   :name/target       (mt/format-name "price")
+   :target-type       "type/Integer"
+   :target-param      {:type "number/=" :value [1 2 3 4]}
    :name/venue-id     (mt/format-name "venue_id")
    :name/venues       (mt/format-name "venues")})
 
 (def ^:private ref-shapes
-  "Ref shape name -> fn of the [[ids]] map returning a legacy ref that names VENUES.PRICE from a CHECKINS stage."
+  "Ref shape name -> fn of the [[ids]] map returning a legacy ref that names the target VENUES column from a CHECKINS
+  stage."
   (array-map
    ;; what the query builder produces
-   :canonical-source-field          (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.venue-id i)}])
+   :canonical-source-field          (fn [i] ["field" (:target i) {"source-field" (:checkins.venue-id i)}])
    ;; legacy forms normalization still accepts
-   :legacy-fk->                     (fn [i] ["fk->" ["field-id" (:checkins.venue-id i)] ["field-id" (:venues.price i)]])
-   :legacy-fk->-field               (fn [i] ["fk->" ["field" (:checkins.venue-id i) nil] ["field" (:venues.price i) nil]])
+   :legacy-fk->                     (fn [i] ["fk->" ["field-id" (:checkins.venue-id i)] ["field-id" (:target i)]])
+   :legacy-fk->-field               (fn [i] ["fk->" ["field" (:checkins.venue-id i) nil] ["field" (:target i) nil]])
    ;; string ref plus source-field: implicit joins only create joins for integer refs
-   :name-ref+source-field           (fn [i] ["field" (:name/price i) {"base-type" "type/Integer" "source-field" (:checkins.venue-id i)}])
+   :name-ref+source-field           (fn [i] ["field" (:name/target i) {"base-type" (:target-type i) "source-field" (:checkins.venue-id i)}])
    ;; source-field-name / source-field-join-alias variants
-   :source-field-name-matching      (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.venue-id i) "source-field-name" (:name/venue-id i)}])
-   :source-field-name-bogus         (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.venue-id i) "source-field-name" "NOPE"}])
-   :source-field-join-alias-bogus   (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.venue-id i) "source-field-join-alias" "Nope"}])
+   :source-field-name-matching      (fn [i] ["field" (:target i) {"source-field" (:checkins.venue-id i) "source-field-name" (:name/venue-id i)}])
+   :source-field-name-bogus         (fn [i] ["field" (:target i) {"source-field" (:checkins.venue-id i) "source-field-name" "NOPE"}])
+   :source-field-join-alias-bogus   (fn [i] ["field" (:target i) {"source-field" (:checkins.venue-id i) "source-field-join-alias" "Nope"}])
    ;; refs that name the other table with no join at all
-   :bare-id-off-table               (fn [i] ["field" (:venues.price i) nil])
-   :bare-id-off-table+base-type     (fn [i] ["field" (:venues.price i) {"base-type" "type/Integer"}])
-   :join-alias-of-implicit-join     (fn [i] ["field" (:venues.price i) {"join-alias" (str (:name/venues i) "__via__" (:name/venue-id i))}])
-   :field-literal                   (fn [i] ["field-literal" (:name/price i) "type/Integer"])
+   :bare-id-off-table               (fn [i] ["field" (:target i) nil])
+   :bare-id-off-table+base-type     (fn [i] ["field" (:target i) {"base-type" (:target-type i)}])
+   :join-alias-of-implicit-join     (fn [i] ["field" (:target i) {"join-alias" (str (:name/venues i) "__via__" (:name/venue-id i))}])
+   :field-literal                   (fn [i] ["field-literal" (:name/target i) (:target-type i)])
    ;; source-field that is not the right FK
-   :source-field-wrong-fk           (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.user-id i)}])
-   :source-field-not-an-fk          (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.id i)}])
-   :source-field-from-venues        (fn [i] ["field" (:venues.price i) {"source-field" (:venues.category i)}])))
+   :source-field-wrong-fk           (fn [i] ["field" (:target i) {"source-field" (:checkins.user-id i)}])
+   :source-field-not-an-fk          (fn [i] ["field" (:target i) {"source-field" (:checkins.id i)}])
+   :source-field-from-venues        (fn [i] ["field" (:target i) {"source-field" (:venues.category i)}])))
 
 ;;; ---------------------------------------------- Clause positions -----------------------------------------------
 
@@ -172,8 +178,55 @@
    ;; the ref under test as a parameter target
    :parameter
    {:query      (fn [i _r] {:source-table (:checkins i) :aggregation [["count"]]})
-    :parameters (fn [_i r] [{:type "number/=" :target ["dimension" r] :value [1 2 3 4]}])
+    :parameters (fn [i r] [(assoc (:target-param i) :target ["dimension" r])])
     :result     [:count]}))
+
+;;; ------------------------------------------------- Canaries -----------------------------------------------------
+;;;
+;;; In the differential databases every VENUES row carries two canary values that decode back to its ID: a text token
+;;; in SECRET and a number in SECRET_NUM. A canary from a venue the sandbox does not allow, anywhere in a response the
+;;; sandboxed user gets (rows, error text, metadata), is a leak, whatever endpoint or query shape produced it.
+
+(def ^:private canary-nonce "5b0dca7e")
+(def ^:private canary-num-base 900000000000)
+(def ^:private canary-num-step 7919)
+
+(def ^:private canary-prepare-sql
+  "Adds the canary columns. Runs in both differential databases, before the sandbox is applied to the restricted one."
+  ["ALTER TABLE VENUES ADD COLUMN SECRET VARCHAR"
+   (format "UPDATE VENUES SET SECRET = CONCAT('CANARY-V', ID, '-%s')" canary-nonce)
+   "ALTER TABLE VENUES ADD COLUMN SECRET_NUM BIGINT"
+   (format "UPDATE VENUES SET SECRET_NUM = %d + ID * %d" canary-num-base canary-num-step)])
+
+(def ^:private canary-text-pattern (re-pattern (str "CANARY-V(\\d+)-" canary-nonce)))
+
+;; SECRET_NUM values are 12-digit numbers starting with 9; JSON may also print them as doubles, e.g. 9.00000007919E11
+(def ^:private canary-num-pattern #"(?<![\d.])9(?:\d{11}|\.\d+E11)(?![\d.])")
+
+(defn- canary-num->venue-id [s]
+  (let [n (- (long (bigdec s)) canary-num-base)]
+    (when (and (pos? n) (zero? (mod n canary-num-step)))
+      (quot n canary-num-step))))
+
+(defn canary-venue-ids
+  "IDs of the VENUES rows whose canaries appear anywhere in `x`, a response body or any other value."
+  [x]
+  (let [text (pr-str x)]
+    (into (into #{} (map (comp parse-long second)) (re-seq canary-text-pattern text))
+          (keep canary-num->venue-id)
+          (re-seq canary-num-pattern text))))
+
+(defn- retarget
+  "Aim the ref shapes in ids map `i` at `target`: `:price`, or `:secret`, the text canary column. Call it inside the
+  database the ids belong to."
+  [i target]
+  (case target
+    :price  i
+    :secret (assoc i
+                   :target       (mt/id :venues :secret)
+                   :name/target  (mt/format-name "secret")
+                   :target-type  "type/Text"
+                   :target-param {:type "string/starts-with" :value ["CANARY"]})))
 
 ;;; ------------------------------------------------- Running ------------------------------------------------------
 
@@ -183,11 +236,15 @@
     (cond-> {:database (:db i) :type "query" :query (query i r)}
       parameters (assoc :parameters (parameters i r)))))
 
-(defn- run-as [user query]
+(defn- run-as
+  "Run `query` through the dataset API as `user`. Returns `:rows` or `:error`, and `:canary-ids`, the venues whose
+  canaries appear anywhere in the response body."
+  [user query]
   (let [{:keys [status body]} (mt/user-http-request-full-response user :post "dataset" query)]
-    (if (and (= 202 status) (= "completed" (:status body)))
-      {:rows (get-in body [:data :rows])}
-      {:error (u/truncate (str status " " (or (:error body) (:message body) body)) 300)})))
+    (assoc (if (and (= 202 status) (= "completed" (:status body)))
+             {:rows (get-in body [:data :rows])}
+             {:error (u/truncate (str status " " (or (:error body) (:message body) body)) 300)})
+           :canary-ids (canary-venue-ids body))))
 
 (defn- raw-refs-to-table
   "Field refs in `query`, outside any sandbox stage, whose physical source after alias resolution is `table-id`. Runs
@@ -279,7 +336,9 @@
    :hide-price {:gtap         hide-price-column-sandbox
                 :attributes   {}
                 :allowed      #{}
-                :restrict-sql ["UPDATE VENUES SET PRICE = NULL"]}))
+                :restrict-sql ["UPDATE VENUES SET PRICE = NULL"
+                               ;; the sandbox card does not select the canary columns either
+                               "UPDATE VENUES SET SECRET = NULL, SECRET_NUM = NULL"]}))
 
 (defn- do-with-venues-sandbox!
   "Run `(thunk card-ids)` as the sandboxed :rasta user, with VENUES sandboxed by `(gtap-fn)`, CHECKINS and USERS
@@ -367,18 +426,36 @@
       :extra-rows
       :else                                         :missing-rows)))
 
-(defn- run-differential-probe [i-restricted ctx i shape-k position-k]
-  (let [user-query (unlimited (probe-query i shape-k position-k))
-        user       (run-as :rasta user-query)
-        expected   (run-as :crowberto (unlimited (probe-query i-restricted shape-k position-k)))
-        admin-base (run-as :crowberto user-query)]
-    {:config   (:config ctx)
-     :shape    shape-k
-     :position position-k
-     :outcome  (classify-differential user expected admin-base)
-     :user     (update user :rows #(some->> % (take 5)))
-     :expected (update expected :rows #(some->> % (take 5)))
-     :query    user-query}))
+(defn- run-differential-probe
+  "Run one probe. `:differential` is the differential verdict. `:leaked-venue-ids` are venues outside
+  `allowed-venue-ids` whose canaries reached the sandboxed user. `:outcome` is `:canary-leak` when there are any, and
+  the differential verdict otherwise."
+  [i-restricted allowed-venue-ids ctx i target shape-k position-k]
+  (let [user-query   (unlimited (probe-query i shape-k position-k))
+        user         (run-as :rasta user-query)
+        expected     (run-as :crowberto (unlimited (probe-query i-restricted shape-k position-k)))
+        admin-base   (run-as :crowberto user-query)
+        differential (classify-differential user expected admin-base)
+        leaked       (not-empty (into (sorted-set) (remove allowed-venue-ids) (:canary-ids user)))]
+    {:config           (:config ctx)
+     :target           target
+     :shape            shape-k
+     :position         position-k
+     :outcome          (if leaked :canary-leak differential)
+     :differential     differential
+     :leaked-venue-ids leaked
+     :user             (update user :rows #(some->> % (take 5)))
+     :expected         (update expected :rows #(some->> % (take 5)))
+     :query            user-query}))
+
+(defn- allowed-canary-venue-ids
+  "Venues whose canaries survive in the restricted copy, read as an admin. Run inside the restricted database."
+  []
+  (canary-venue-ids (run-as :crowberto {:database (mt/id)
+                                        :type     "query"
+                                        :query    {:source-table (mt/id :venues)
+                                                   :fields       [["field" (mt/id :venues :secret) nil]
+                                                                  ["field" (mt/id :venues :secret_num) nil]]}})))
 
 (defn- with-checkins-cards!
   "Call `(f card-ids)` with a saved question and a model over CHECKINS in the current database."
@@ -387,31 +464,42 @@
                  :model/Card {model-id :id} {:dataset_query (mt/mbql-query checkins) :type :model}]
     (f {:card/checkins card-id :model/checkins model-id})))
 
+(def ^:private differential-targets [:price :secret])
+
+(defn- all-differential-probes []
+  (for [target differential-targets, shape-k (keys ref-shapes), position-k (keys positions)]
+    [target shape-k position-k]))
+
 (defn run-differential!
-  "Run `probes` (pairs of ref shape and clause position, by default all of them) under sandbox config `config-k`, or
-  every config, judged by the differential oracle. H2 only: the restricted copy is built in H2. Returns a seq of probe
-  results."
+  "Run `probes` (triples of target column, ref shape and clause position, by default all of them) under sandbox config
+  `config-k`, or every config, judged by the differential oracle and the canary scan. H2 only: the restricted copy is
+  built in H2. Returns a seq of probe results."
   ([]
    (mapcat run-differential! (keys sandbox-configs)))
   ([config-k]
-   (run-differential! config-k (for [shape-k (keys ref-shapes), position-k (keys positions)] [shape-k position-k])))
+   (run-differential! config-k (all-differential-probes)))
   ([config-k probes]
    (mt/dataset test-data
      (rdb/do-with-restricted-pair!
       {:tables       differential-tables
        :fks          differential-fks
+       :prepare-sql  canary-prepare-sql
        :restrict-sql (:restrict-sql (sandbox-configs config-k))}
       (fn [base restricted]
         (mt/with-db restricted
           (with-checkins-cards!
             (fn [card-ids]
-              (let [i-restricted (merge (ids) card-ids)]
+              (let [i-restricted      (merge (ids) card-ids)
+                    i-restricted-by-t (into {} (for [t differential-targets] [t (retarget i-restricted t)]))
+                    allowed-venue-ids (allowed-canary-venue-ids)]
                 (mt/with-db base
                   (do-with-config!
                    config-k
                    (fn [ctx i]
-                     (doall (for [[shape-k position-k] probes]
-                              (run-differential-probe i-restricted ctx i shape-k position-k)))))))))))))))
+                     (let [i-by-t (into {} (for [t differential-targets] [t (retarget i t)]))]
+                       (doall (for [[target shape-k position-k] probes]
+                                (run-differential-probe (i-restricted-by-t target) allowed-venue-ids ctx
+                                                        (i-by-t target) target shape-k position-k))))))))))))))))
 
 (defn summarize
   "A shape x position grid of outcome keywords, for reading at the REPL."
@@ -475,12 +563,73 @@
     (mt/test-drivers #{:h2}
       (with-redefs-fn {#'sandboxing/sandbox->parameters (constantly [])}
         #(is (= [:extra-rows]
-                (map :outcome (run-differential! :price-1 [[:canonical-source-field :fields]]))))))))
+                (map :outcome (run-differential! :price-1 [[:price :canonical-source-field :fields]]))))))))
 
 (deftest ^:synchronized sandboxed-results-match-restricted-data-test
   (testing "Every probe the sandboxed user can run returns exactly what an admin gets from the data with the sandbox applied by hand"
     (mt/test-drivers #{:h2}
-      (doseq [{:keys [config shape position outcome] :as result} (run-differential!)]
-        (testing (format "%s in %s under %s" shape position config)
-          (is (not (#{:extra-rows :missing-rows} outcome))
-              (pr-str (select-keys result [:user :expected :query]))))))))
+      (doseq [{:keys [config target shape position outcome] :as result} (run-differential!)]
+        (testing (format "%s aimed at %s in %s under %s" shape target position config)
+          (is (not (#{:extra-rows :missing-rows :canary-leak} outcome))
+              (pr-str (select-keys result [:leaked-venue-ids :user :expected :query]))))))))
+
+;;; ---------------------------------------------- Canary endpoints ------------------------------------------------
+
+(defn- endpoint-requests
+  "Endpoint name -> `[method path body]` for endpoints that read VENUES data or metadata, aimed at the canary columns."
+  [i]
+  (let [secret     (mt/id :venues :secret)
+        secret-num (mt/id :venues :secret_num)
+        venues     (mt/id :venues)
+        canonical  ["field" secret {"source-field" (:checkins.venue-id i)}]]
+    (array-map
+     :field-values-secret        [:get (format "field/%d/values" secret)]
+     :field-values-secret-num    [:get (format "field/%d/values" secret-num)]
+     :field-search-secret        [:get (format "field/%d/search/%d?value=CANARY&limit=1000" secret secret)]
+     :field-summary-secret       [:get (format "field/%d/summary" secret)]
+     :field-secret               [:get (format "field/%d" secret)]
+     :field-secret-num           [:get (format "field/%d" secret-num)]
+     :table-query-metadata       [:get (format "table/%d/query_metadata" venues)]
+     :table                      [:get (format "table/%d" venues)]
+     :database-metadata          [:get (format "database/%d/metadata" (mt/id))]
+     :parameter-values           [:post "dataset/parameter/values"
+                                  {:parameter {:id "p" :type "string/=" :slug "s"} :field_ids [secret]}]
+     :parameter-search           [:post "dataset/parameter/search/CANARY"
+                                  {:parameter {:id "p" :type "string/=" :slug "s"} :field_ids [secret]}]
+     :pivot                      [:post "dataset/pivot"
+                                  {:database (mt/id) :type "query"
+                                   :query    {:source-table (:checkins i) :breakout [canonical] :aggregation [["count"]]}}]
+     :search                     [:get "search?q=CANARY"])))
+
+(defn run-canary-endpoints!
+  "Call each of [[endpoint-requests]] as the sandboxed user under sandbox config `config-k`. Returns endpoint name ->
+  `{:status s, :leaked-venue-ids ids}`, where `ids` are venues outside the sandbox whose canaries the response carries."
+  [config-k]
+  (mt/dataset test-data
+    (rdb/do-with-restricted-pair!
+     {:tables       differential-tables
+      :fks          differential-fks
+      :prepare-sql  canary-prepare-sql
+      :restrict-sql (:restrict-sql (sandbox-configs config-k))}
+     (fn [base restricted]
+       (let [allowed-venue-ids (mt/with-db restricted (allowed-canary-venue-ids))]
+         (mt/with-db base
+           (do-with-config!
+            config-k
+            (fn [_ctx i]
+              (into (array-map)
+                    (for [[endpoint [method path body]] (endpoint-requests i)]
+                      (let [{:keys [status] response :body} (if body
+                                                              (mt/user-http-request-full-response :rasta method path body)
+                                                              (mt/user-http-request-full-response :rasta method path))]
+                        [endpoint {:status           status
+                                   :leaked-venue-ids (not-empty (into (sorted-set)
+                                                                      (remove allowed-venue-ids)
+                                                                      (canary-venue-ids response)))}])))))))))))
+
+(deftest ^:synchronized endpoints-reveal-no-canaries-outside-sandbox-test
+  (mt/test-drivers #{:h2}
+    (doseq [config-k [:price-1 :hide-price]
+            [endpoint {:keys [status leaked-venue-ids]}] (run-canary-endpoints! config-k)]
+      (testing (format "%s under %s (HTTP %s)" endpoint config-k status)
+        (is (empty? leaked-venue-ids))))))

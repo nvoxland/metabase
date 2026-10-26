@@ -47,24 +47,26 @@
                  :fk_target_field_id (field-id to-table to-col)})))
 
 (defn- create-db!
-  "Create an in-memory H2 database named `db-name` holding `tables` copied from `from-spec`, run `restrict-sql` in it,
-  register and sync it in Metabase, and mark `fks`. Returns the Metabase Database."
-  [from-spec dataset-name db-name tables fks restrict-sql]
+  "Create an in-memory H2 database named `db-name` holding `tables` copied from `from-spec`, run `sql` statements in
+  it, register it in Metabase, sync it with `scan` (`:schema` or `:full`), and mark `fks`. Returns the Metabase
+  Database."
+  [from-spec dataset-name db-name tables fks {:keys [sql scan]}]
   (let [details {:db (format "mem:%s;DB_CLOSE_DELAY=-1" db-name)}
         spec    {:classname "org.h2.Driver" :subprotocol "h2" :subname (:db details)}]
     (doseq [table tables]
       (copy-table! from-spec spec table))
-    (doseq [stmt restrict-sql]
+    (doseq [stmt sql]
       (jdbc/execute! spec [stmt]))
     (let [db (t2/insert-returning-instance! :model/Database {:name     db-name
                                                              :engine   :h2
                                                              :details  details
                                                              ;; `mt/with-db` and `mt/id` resolve names through this
                                                              :settings {:database-source-dataset-name dataset-name}})]
-      (sync/sync-database! db {:scan :schema})
+      (sync/sync-database! db {:scan scan})
       (doseq [fk fks]
         (set-fk-metadata! (:id db) fk))
-      db)))
+      ;; re-read so callers see what sync wrote
+      (t2/select-one :model/Database :id (:id db)))))
 
 (defn- drop-db! [{db-id :id {h2-db :db} :details}]
   (t2/delete! :model/Database :id db-id)
@@ -73,15 +75,19 @@
 
 (defn do-with-restricted-pair!
   "Copy `tables` from the current test database (which must be H2) into a fresh base database and a fresh restricted
-  database, run `restrict-sql` statements in the restricted one only, mark `fks` (`[from-table from-col to-table
-  to-col]`) in both, and call `(f base-db restricted-db)`. Both databases are removed afterwards."
-  [{:keys [tables fks restrict-sql]} f]
+  database, run `prepare-sql` statements in both, then `restrict-sql` statements in the restricted one only, mark
+  `fks` (`[from-table from-col to-table to-col]`) in both, and call `(f base-db restricted-db)`. The base database
+  gets a full sync, so it has fingerprints and field values as a real one would. Both databases are removed
+  afterwards."
+  [{:keys [tables fks prepare-sql restrict-sql]} f]
   (let [from-spec    (sql-jdbc.conn/db->pooled-connection-spec (mt/db))
         dataset-name (get-in (mt/db) [:settings :database-source-dataset-name])
         suffix       (str (random-uuid))
-        base         (create-db! from-spec dataset-name (str "sbx-base-" suffix) tables fks nil)]
+        base         (create-db! from-spec dataset-name (str "sbx-base-" suffix) tables fks
+                                 {:sql prepare-sql :scan :full})]
     (try
-      (let [restricted (create-db! from-spec dataset-name (str "sbx-restricted-" suffix) tables fks restrict-sql)]
+      (let [restricted (create-db! from-spec dataset-name (str "sbx-restricted-" suffix) tables fks
+                                   {:sql (concat prepare-sql restrict-sql) :scan :schema})]
         (try
           (f base restricted)
           (finally
