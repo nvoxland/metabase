@@ -2,25 +2,28 @@
   "Property check for sandboxing: a sandboxed user never sees a value that comes from a sandboxed row, whatever shape
   of field ref the query uses to reach it.
 
-  VENUES is sandboxed to an attribute value that matches no row. Each probe is a legacy-MBQL query that reaches
-  VENUES.PRICE from a CHECKINS query through one ref shape in one clause position. Two oracles judge it:
+  VENUES is sandboxed by price, through a login attribute. Each probe is a legacy-MBQL query that reaches VENUES.PRICE
+  from a CHECKINS query through one ref shape in one clause position. Each probe runs under every sandbox
+  configuration in [[sandbox-configs]], and two oracles judge it:
 
-  * Rows: the probe runs through the dataset API as an admin and as the sandboxed user. The user must see no VENUES
-    value, since every path to VENUES goes through the empty sandbox.
+  * Rows: the probe runs through the dataset API as an admin and as the sandboxed user. Every VENUES.PRICE value the
+    user sees must be one the sandbox allows, and every count of CHECKINS rows filtered on VENUES must equal the
+    count over the allowed venues.
   * Structure: the probe is preprocessed as the sandboxed user and given alias info, as compilation would. No field ref
     outside a sandbox stage may have VENUES as its physical source, since that compiles to the raw table name. This
     oracle does not depend on the driver rejecting the SQL.
 
   Verdicts per probe, worst first:
 
-  * `:leak`      -- the sandboxed user sees VENUES data.
+  * `:leak`      -- the sandboxed user sees VENUES data the sandbox does not allow.
   * `:raw-ref`   -- the user's query references raw VENUES outside the sandbox. Here the database rejected it, but
                     the invariant is already broken and other drivers or query shapes may accept it.
-  * `:enforced`  -- admin sees VENUES data, the sandboxed user sees none, no raw reference.
+  * `:over-restricted` -- the sandboxed user sees fewer rows than the sandbox allows. Not a leak.
+  * `:enforced`  -- admin sees disallowed VENUES data, the sandboxed user sees only allowed data, no raw reference.
   * `:rejected`  -- the shape fails for the admin and the sandboxed user alike, with no raw reference.
   * `:user-only-error` -- admin succeeds, the sandboxed user's query fails, no raw reference.
   * `:user-ok-admin-error` -- the admin's run fails but the sandboxed user's succeeds with clean rows.
-  * `:vacuous`   -- admin succeeds but sees no VENUES data, so the probe proves nothing."
+  * `:vacuous`   -- admin succeeds but sees no disallowed VENUES data, so the probe proves nothing."
   (:require
    [clojure.test :refer :all]
    [metabase-enterprise.sandbox.test-util :as met]
@@ -75,40 +78,36 @@
 
 ;;; ---------------------------------------------- Clause positions -----------------------------------------------
 
-(defn- all-nil-in-col [n] (fn [rows] (every? #(nil? (nth % n)) rows)))
-(defn- some-non-nil-in-col [n] (fn [rows] (boolean (some #(some? (nth % n)) rows))))
-(defn- first-cell-zero? [rows] (contains? #{0 nil} (ffirst rows)))
-(defn- first-cell-positive? [rows] (boolean (some-> (ffirst rows) pos?)))
-
 (def ^:private positions
-  "Clause position name -> {:query (fn [ids ref] inner-query), :clean? (fn [rows]), :dirty? (fn [rows])}. `:clean?`
-  holds when the rows carry no VENUES data; `:dirty?` holds when they do."
+  "Clause position name -> `{:query (fn [ids ref] inner-query), :result result-kind}`, with an optional `:parameters`
+  fn. `result-kind` is `[:values col]` when column `col` holds VENUES.PRICE values, or `[:count]` when the first cell
+  counts CHECKINS rows whose venue passes the probe."
   (array-map
    :fields
    {:query  (fn [i r] {:source-table (:checkins i) :fields [r] :limit 50})
-    :clean? (all-nil-in-col 0) :dirty? (some-non-nil-in-col 0)}
+    :result [:values 0]}
    :breakout
    {:query  (fn [i r] {:source-table (:checkins i) :breakout [r] :aggregation [["count"]]})
-    :clean? (all-nil-in-col 0) :dirty? (some-non-nil-in-col 0)}
+    :result [:values 0]}
    :filter
    {:query  (fn [i r] {:source-table (:checkins i) :aggregation [["count"]] :filter ["not-null" r]})
-    :clean? first-cell-zero? :dirty? first-cell-positive?}
+    :result [:count]}
    :aggregation
    {:query  (fn [i r] {:source-table (:checkins i) :aggregation [["max" r]]})
-    :clean? (all-nil-in-col 0) :dirty? (some-non-nil-in-col 0)}
+    :result [:values 0]}
    :expression
    {:query  (fn [i r] {:source-table (:checkins i) :expressions {"x" ["+" r 0]} :fields [["expression" "x"]] :limit 50})
-    :clean? (all-nil-in-col 0) :dirty? (some-non-nil-in-col 0)}
+    :result [:values 0]}
    ;; an integer canonical ref creates the implicit join, then the ref under test rides along with it
    :fields-mixed-with-canonical
    {:query  (fn [i r] {:source-table (:checkins i)
                        :fields       [["field" (:venues.name i) {"source-field" (:checkins.venue-id i)}] r]
                        :limit        50})
-    :clean? (all-nil-in-col 1) :dirty? (some-non-nil-in-col 1)}
+    :result [:values 1]}
    ;; the ref under test in a second stage, over a first stage that is plain CHECKINS
    :second-stage
    {:query  (fn [i r] {:source-query {:source-table (:checkins i)} :fields [r] :limit 50})
-    :clean? (all-nil-in-col 0) :dirty? (some-non-nil-in-col 0)}
+    :result [:values 0]}
    ;; an explicit join to VENUES exists; the ref under test does not name its alias
    :explicit-join-present
    {:query  (fn [i r] {:source-table (:checkins i)
@@ -119,7 +118,7 @@
                                        :fields       "none"}]
                        :fields       [r]
                        :limit        50})
-    :clean? (all-nil-in-col 0) :dirty? (some-non-nil-in-col 0)}
+    :result [:values 0]}
    ;; the ref under test inside the condition of an inner join to an unsandboxed table
    :join-condition
    {:query  (fn [i r] {:source-table (:checkins i)
@@ -132,12 +131,12 @@
                                                       ["not-null" r]]
                                        :fields       "none"}]
                        :aggregation  [["count"]]})
-    :clean? first-cell-zero? :dirty? first-cell-positive?}
+    :result [:count]}
    ;; the ref under test as a parameter target
    :parameter
    {:query      (fn [i _r] {:source-table (:checkins i) :aggregation [["count"]]})
     :parameters (fn [_i r] [{:type "number/=" :target ["dimension" r] :value [1 2 3 4]}])
-    :clean?     first-cell-zero? :dirty? first-cell-positive?}))
+    :result     [:count]}))
 
 ;;; ------------------------------------------------- Running ------------------------------------------------------
 
@@ -179,49 +178,99 @@
       (catch Throwable e
         {:error (u/truncate (ex-message e) 300)}))))
 
+(defn- judge
+  "How `rows` compare to what the sandbox allows: `:clean` when every VENUES value is allowed, `:dirty` when some
+  value is not, `:short` when a count is below the allowed count."
+  [[kind col] {:keys [allowed allowed-count]} rows]
+  (case kind
+    :values (if (some #(when-some [v (nth % col)] (not (contains? allowed v))) rows) :dirty :clean)
+    :count  (let [n (or (ffirst rows) 0)]
+              (cond (> n allowed-count) :dirty
+                    (< n allowed-count) :short
+                    :else               :clean))))
+
 (defn- classify [{admin-rows :rows admin-error :error}
                  {user-rows :rows user-error :error}
                  {raw-refs :refs}
-                 {:keys [clean? dirty?]}]
-  (cond
-    (and user-rows (dirty? user-rows))        :leak
-    (seq raw-refs)                            :raw-ref
-    admin-error                               (if user-error :rejected :user-ok-admin-error)
-    (not (dirty? admin-rows))                 :vacuous
-    user-error                                :user-only-error
-    (clean? user-rows)                        :enforced
-    :else                                     :leak))
+                 result-kind
+                 ctx]
+  (let [user-judgement (some->> user-rows (judge result-kind ctx))]
+    (cond
+      (= :dirty user-judgement)                                :leak
+      (seq raw-refs)                                           :raw-ref
+      admin-error                                              (if user-error :rejected :user-ok-admin-error)
+      (not= :dirty (judge result-kind ctx admin-rows))         :vacuous
+      user-error                                               :user-only-error
+      (= :short user-judgement)                                :over-restricted
+      :else                                                    :enforced)))
 
-(defn- run-probe [i shape-k position-k]
+(defn- run-probe [ctx i shape-k position-k]
   (let [query     (probe-query i shape-k position-k)
         admin     (run-as :crowberto query)
         user      (run-as :rasta query)
         structure (raw-refs-to-table query (:venues i))]
-    {:shape     shape-k
+    {:config    (:config ctx)
+     :shape     shape-k
      :position  position-k
-     :outcome   (classify admin user structure (positions position-k))
+     :outcome   (classify admin user structure (:result (positions position-k)) ctx)
      :admin     admin
      :user      user
      :structure structure
      :query     query}))
 
-(defn- do-with-empty-venues-sandbox!
-  "Run `thunk` as the sandboxed :rasta user, with VENUES sandboxed to no rows and CHECKINS and USERS fully queryable."
-  [thunk]
+(def ^:private sandbox-configs
+  "Config name -> the login attribute VENUES.PRICE is sandboxed to, and the prices that leaves visible."
+  (array-map
+   :empty   {:attribute "999" :allowed #{}}
+   :price-1 {:attribute "1"   :allowed #{1}}))
+
+(defn- do-with-venues-sandbox!
+  "Run `thunk` as the sandboxed :rasta user, with VENUES sandboxed to `price = attribute` and CHECKINS and USERS fully
+  queryable."
+  [attribute thunk]
   (met/with-gtaps! {:gtaps      {:venues {:remappings {"price" ["variable" [:field (mt/id :venues :price) nil]]}}}
-                    :attributes {"price" "999"}}
+                    :attributes {"price" attribute}}
     (doseq [table [:checkins :users]]
       (data-perms/set-table-permission! &group (mt/id table) :perms/create-queries :query-builder))
     (thunk)))
 
+(defn- allowed-checkins-count
+  "Number of CHECKINS rows whose venue has a price in `allowed`, counted as admin."
+  [i allowed]
+  (if (empty? allowed)
+    0
+    (-> (run-as :crowberto {:database (mt/id)
+                            :type     "query"
+                            :query    {:source-table (:checkins i)
+                                       :aggregation  [["count"]]
+                                       :filter       (into ["=" ((ref-shapes :canonical-source-field) i)] allowed)}})
+        :rows
+        ffirst)))
+
+(defn- do-with-config!
+  "Run `(f ctx ids)` under sandbox config `config-k`, where `ctx` carries what [[judge]] needs."
+  [config-k f]
+  (let [{:keys [attribute allowed]} (sandbox-configs config-k)]
+    (do-with-venues-sandbox!
+     attribute
+     (fn []
+       (let [i (ids)]
+         (f {:config        config-k
+             :allowed       allowed
+             :allowed-count (allowed-checkins-count i allowed)}
+            i))))))
+
 (defn run-corpus!
-  "Run every ref shape in every clause position. Returns a seq of probe results."
-  []
-  (do-with-empty-venues-sandbox!
-   (fn []
-     (let [i (ids)]
-       (doall (for [shape-k (keys ref-shapes), position-k (keys positions)]
-                (run-probe i shape-k position-k)))))))
+  "Run every ref shape in every clause position under sandbox config `config-k`, or under every config. Returns a seq
+  of probe results."
+  ([]
+   (mapcat run-corpus! (keys sandbox-configs)))
+  ([config-k]
+   (do-with-config!
+    config-k
+    (fn [ctx i]
+      (doall (for [shape-k (keys ref-shapes), position-k (keys positions)]
+               (run-probe ctx i shape-k position-k)))))))
 
 (defn summarize
   "A shape x position grid of outcome keywords, for reading at the REPL."
@@ -233,17 +282,49 @@
 ;;; -------------------------------------------------- Tests -------------------------------------------------------
 
 (deftest ^:synchronized baseline-probe-is-meaningful-test
-  (testing "The canonical ref in a :fields clause sees VENUES data as admin and none as the sandboxed user"
-    (mt/test-drivers #{:h2}
-      (let [{:keys [outcome] :as result} (do-with-empty-venues-sandbox!
-                                          #(run-probe (ids) :canonical-source-field :fields))]
-        (is (= :enforced outcome) (pr-str result))))))
+  (mt/test-drivers #{:h2}
+    (doseq [config-k (keys sandbox-configs)]
+      (testing (format "Under %s, the canonical ref sees disallowed VENUES data as admin and only allowed data as the sandboxed user"
+                       config-k)
+        (let [{:keys [outcome] :as result} (do-with-config! config-k #(run-probe %1 %2 :canonical-source-field :fields))]
+          (is (= :enforced outcome) (pr-str result)))))))
 
 (deftest ^:synchronized field-ref-shapes-cannot-escape-sandbox-test
   (mt/test-drivers #{:h2}
-    (doseq [{:keys [shape position outcome] :as result} (run-corpus!)]
-      (testing (format "%s in %s" shape position)
-        (testing "the sandboxed user sees no sandboxed rows"
+    (doseq [{:keys [config shape position outcome] :as result} (run-corpus!)]
+      (testing (format "%s in %s under %s" shape position config)
+        (testing "the sandboxed user sees no rows the sandbox does not allow"
           (is (not= :leak outcome) (pr-str (select-keys result [:user :query]))))
         (testing "the sandboxed user's query never references the raw sandboxed table"
           (is (not= :raw-ref outcome) (pr-str (select-keys result [:structure :user :query]))))))))
+
+(def ^:private forged-stage-keys
+  "Keys the sandbox rewrite or the permission walk set on stages themselves, which a client must not be able to supply."
+  {:sandbox?-flag    (fn [_vid] {"metabase-enterprise.sandbox.query-processor.middleware.sandboxing/sandbox?" true})
+   :marker           (fn [vid] {"query-permissions/sandboxed-table" vid})
+   :flag-and-marker  (fn [vid] {"metabase-enterprise.sandbox.query-processor.middleware.sandboxing/sandbox?" true
+                                "query-permissions/sandboxed-table" vid})
+   :from-source-card (fn [_vid] {"qp/stage-is-from-source-card" 1})})
+
+(deftest ^:synchronized forged-internal-stage-keys-do-not-skip-sandbox-test
+  (mt/test-drivers #{:h2}
+    (do-with-config!
+     :empty
+     (fn [_ctx i]
+       (doseq [[k extra-fn] forged-stage-keys
+               :let         [extra (extra-fn (:venues i))
+                             field ["field" (:venues.price i) nil]]
+               [fmt query]  {:legacy {:database (mt/id)
+                                      :type     "query"
+                                      :query    (merge {:source-table (:venues i) :fields [field] :limit 5} extra)}
+                             :mbql5  {:database (mt/id)
+                                      :lib/type "mbql/query"
+                                      :stages   [(merge {:lib/type     "mbql.stage/mbql"
+                                                         :source-table (:venues i)
+                                                         :fields       [["field" {:lib/uuid (str (random-uuid))} (:venues.price i)]]
+                                                         :limit        5}
+                                                        extra)]}}]
+         (testing (format "%s as %s" k fmt)
+           (is (= 5 (count (:rows (run-as :crowberto query))))
+               "admin sees VENUES rows, so the probe is meaningful")
+           (is (= [] (:rows (run-as :rasta query))))))))))
