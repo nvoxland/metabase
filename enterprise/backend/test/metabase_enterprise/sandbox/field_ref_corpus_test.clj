@@ -1,4 +1,4 @@
-(ns metabase-enterprise.sandbox.field-ref-corpus-test
+(ns ^:mb/driver-tests metabase-enterprise.sandbox.field-ref-corpus-test
   "Property check for sandboxing: a sandboxed user never sees a value that comes from a sandboxed row, whatever shape
   of field ref the query uses to reach it.
 
@@ -50,7 +50,11 @@
    :venues.price      (mt/id :venues :price)
    :venues.name       (mt/id :venues :name)
    :venues.category   (mt/id :venues :category_id)
-   :users.id          (mt/id :users :id)})
+   :users.id          (mt/id :users :id)
+   ;; physical names, which differ in case by driver
+   :name/price        (mt/format-name "price")
+   :name/venue-id     (mt/format-name "venue_id")
+   :name/venues       (mt/format-name "venues")})
 
 (def ^:private ref-shapes
   "Ref shape name -> fn of the [[ids]] map returning a legacy ref that names VENUES.PRICE from a CHECKINS stage."
@@ -61,16 +65,16 @@
    :legacy-fk->                     (fn [i] ["fk->" ["field-id" (:checkins.venue-id i)] ["field-id" (:venues.price i)]])
    :legacy-fk->-field               (fn [i] ["fk->" ["field" (:checkins.venue-id i) nil] ["field" (:venues.price i) nil]])
    ;; string ref plus source-field: implicit joins only create joins for integer refs
-   :name-ref+source-field           (fn [i] ["field" "PRICE" {"base-type" "type/Integer" "source-field" (:checkins.venue-id i)}])
+   :name-ref+source-field           (fn [i] ["field" (:name/price i) {"base-type" "type/Integer" "source-field" (:checkins.venue-id i)}])
    ;; source-field-name / source-field-join-alias variants
-   :source-field-name-matching      (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.venue-id i) "source-field-name" "VENUE_ID"}])
+   :source-field-name-matching      (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.venue-id i) "source-field-name" (:name/venue-id i)}])
    :source-field-name-bogus         (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.venue-id i) "source-field-name" "NOPE"}])
    :source-field-join-alias-bogus   (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.venue-id i) "source-field-join-alias" "Nope"}])
    ;; refs that name the other table with no join at all
    :bare-id-off-table               (fn [i] ["field" (:venues.price i) nil])
    :bare-id-off-table+base-type     (fn [i] ["field" (:venues.price i) {"base-type" "type/Integer"}])
-   :join-alias-of-implicit-join     (fn [i] ["field" (:venues.price i) {"join-alias" "VENUES__via__VENUE_ID"}])
-   :field-literal                   (fn [_] ["field-literal" "PRICE" "type/Integer"])
+   :join-alias-of-implicit-join     (fn [i] ["field" (:venues.price i) {"join-alias" (str (:name/venues i) "__via__" (:name/venue-id i))}])
+   :field-literal                   (fn [i] ["field-literal" (:name/price i) "type/Integer"])
    ;; source-field that is not the right FK
    :source-field-wrong-fk           (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.user-id i)}])
    :source-field-not-an-fk          (fn [i] ["field" (:venues.price i) {"source-field" (:checkins.id i)}])
@@ -204,6 +208,9 @@
       (= :short user-judgement)                                :over-restricted
       :else                                                    :enforced)))
 
+(defn- corpus-drivers []
+  (mt/normal-drivers-with-feature :nested-queries :left-join))
+
 (defn- run-probe [ctx i shape-k position-k]
   (let [query     (probe-query i shape-k position-k)
         admin     (run-as :crowberto query)
@@ -282,7 +289,7 @@
 ;;; -------------------------------------------------- Tests -------------------------------------------------------
 
 (deftest ^:synchronized baseline-probe-is-meaningful-test
-  (mt/test-drivers #{:h2}
+  (mt/test-drivers (corpus-drivers)
     (doseq [config-k (keys sandbox-configs)]
       (testing (format "Under %s, the canonical ref sees disallowed VENUES data as admin and only allowed data as the sandboxed user"
                        config-k)
@@ -290,7 +297,7 @@
           (is (= :enforced outcome) (pr-str result)))))))
 
 (deftest ^:synchronized field-ref-shapes-cannot-escape-sandbox-test
-  (mt/test-drivers #{:h2}
+  (mt/test-drivers (corpus-drivers)
     (doseq [{:keys [config shape position outcome] :as result} (run-corpus!)]
       (testing (format "%s in %s under %s" shape position config)
         (testing "the sandboxed user sees no rows the sandbox does not allow"
@@ -307,7 +314,7 @@
    :from-source-card (fn [_vid] {"qp/stage-is-from-source-card" 1})})
 
 (deftest ^:synchronized forged-internal-stage-keys-do-not-skip-sandbox-test
-  (mt/test-drivers #{:h2}
+  (mt/test-drivers (corpus-drivers)
     (do-with-config!
      :empty
      (fn [_ctx i]
