@@ -39,6 +39,7 @@
    [metabase.query-processor.preprocess :as qp.preprocess]
    [metabase.query-processor.setup :as qp.setup]
    [metabase.query-processor.util.add-alias-info :as add]
+   [metabase.sync.core :as sync]
    [metabase.test :as mt]
    [metabase.test.util.random :as tu.rng]
    [metabase.util :as u]
@@ -197,6 +198,17 @@
                                          {:database (mt/id) :type "query" :query {:source-table (mt/id table)}}))))
         [:shops :regions]))
 
+(defonce ^:private fully-synced-dbs (atom #{}))
+
+(defn- fully-synced!
+  "Give the current database the fingerprints and field values a real instance has, once per JVM. The dataset loader
+  only syncs the schema, and binning needs fingerprints."
+  []
+  (let [db (mt/db)]
+    (when-not (contains? @fully-synced-dbs (:id db))
+      (sync/sync-database! db {:scan :full})
+      (swap! fully-synced-dbs conj (:id db)))))
+
 (defn- config-supported? [config-k]
   (if-let [feature (get-in sandbox-configs [config-k :feature])]
     (driver.u/supports? driver/*driver* feature (mt/db))
@@ -210,9 +222,11 @@
   (let [{:keys [gtaps attributes restricted setup expect hidden-cols] :or {expect :restricted}} (sandbox-configs config-k)]
     (mt/dataset corpus/sandbox-corpus
       (corpus/ensure-fk-metadata!)
+      (fully-synced!)
       (let [base (mt/db)]
         (mt/dataset (var-get restricted)
           (corpus/ensure-fk-metadata!)
+          (fully-synced!)
           (do-with-cards!
            (fn [restricted-cards]
              (let [restricted-ids (ids-map restricted-cards)
@@ -221,6 +235,7 @@
                  (met/with-gtaps! {:gtaps (gtaps) :attributes attributes}
                    (doseq [table tables]
                      (data-perms/set-table-permission! &group (mt/id table) :perms/create-queries :query-builder))
+                   (data-perms/set-database-permission! &group (mt/id) :perms/download-results :one-million-rows)
                    (when setup (setup))
                    (do-with-cards!
                     (fn [cards]
@@ -367,7 +382,7 @@
   internal query stages, the physical name of a sandboxed table, or SQL text in an error. `:json_query` echoes the
   user's own input and is skipped."
   [{:keys [sandboxed]} user]
-  (let [body        (let [b (:body user)] (if (map? b) (dissoc b :json_query) b))
+  (let [body        (let [b (:body user)] (if (map? b) (dissoc b :json_query :dataset_query) b))
         table-names (into #{} (map #(mt/format-name (name %))) sandboxed)
         problems    (concat
                      (for [[path v] (scan-paths body)
@@ -403,14 +418,20 @@
 
 (defn- outcome
   "One keyword for a result, worst first, from its separate verdicts."
-  [{:keys [differential canary structural]}]
+  [{:keys [differential canary structural metadata-diff]}]
   (cond
     (= :leak (:verdict canary))         :canary-leak
     (= :raw-ref (:verdict structural))  :raw-ref
+    ;; bin bounds come from fingerprints; bounds that differ from the restricted data's reveal the hidden range
+    (some (fn [{u :user e :expected}]
+            (let [bounds #(select-keys (:binning_info %) [:min_value :max_value])]
+              (and (seq (bounds u)) (seq (bounds e)) (not= (bounds u) (bounds e)))))
+          (:diffs metadata-diff))
+    :binning-bounds-leak
     :else                               differential))
 
 (def ^:private failing-outcomes
-  #{:canary-leak :raw-ref :extra-rows :missing-rows :missing-error :over-restricted})
+  #{:canary-leak :raw-ref :binning-bounds-leak :extra-rows :missing-rows :missing-error :over-restricted})
 
 (defn- run-probe
   "Run `probe-fn`, a fn of an ids map returning `{:query inner-query, :parameters ...}`, under `ctx`. Returns a result
@@ -542,8 +563,10 @@
     via-join (assoc :source-field-join-alias via-join)))
 
 (def ^:private targets
-  {:price  {:base-type :type/Integer :param {:type "number/!=" :value [-1]}}
-   :secret {:base-type :type/Text    :param {:type "string/!=" :value ["__none__"]}}})
+  {:price      {:base-type :type/Integer    :param {:type "number/!=" :value [-1]}}
+   :secret     {:base-type :type/Text       :param {:type "string/!=" :value ["__none__"]}}
+   ;; the numeric canary: its hidden rows extend the column's range, which binning bounds would reveal
+   :secret_num {:base-type :type/BigInteger :param {:type "number/!=" :value [-1]}}})
 
 (def ^:private ref-shapes
   "Ref shape name -> fn of ids, edge and target returning a legacy ref to SHOPS.<target> from the edge's stage."
@@ -620,7 +643,7 @@
                                   :fields       :none})
                     :aggregation [[:count]])}
      :cumulative        {:query (assoc base :aggregation [[:cum-count]] :breakout [r])}
-     :binning           {:query (assoc base :breakout [(if (= t :price) (lib-binned r) r)] :aggregation [[:count]])}
+     :binning           {:query (assoc base :breakout [(if (#{:price :secret_num} t) (lib-binned r) r)] :aggregation [[:count]])}
      :parameter         {:query      (assoc base :aggregation [[:count]])
                          :parameters [(assoc (get-in targets [t :param]) :target [:dimension r])]})))
 
@@ -737,6 +760,100 @@
                                 r))))]
              {:caught-by (reduce into #{} (map detectors-fired results))
               :probes    (mapv (fn [r] [(:config r) (:probe r) (:outcome r)]) results)})])))
+
+;;; ------------------------------------------------ Endpoint scan -------------------------------------------------
+;;;
+;;; Everything the sandboxed user can reach that reads SHOPS data or metadata, outside `POST /api/dataset`: scanned
+;;; for canaries of hidden rows and for hygiene. The base database gets one full sync first, so fingerprints and
+;;; field values exist as they would in a real instance.
+
+(defn- endpoint-requests
+  "Endpoint name -> `[method path body?]` for the current (base copy) database."
+  [ids]
+  (let [shops      (tid ids :shops)
+        secret     (fid ids :shops :secret)
+        secret-num (fid ids :shops :secret_num)
+        price      (fid ids :shops :price)
+        model      (get-in ids [:cards :model/shops])
+        card       (get-in ids [:cards :card/shops])
+        canonical  (implicit ids :orders :shop_id :shops :secret)
+        orders-q   {:database (:db ids) :type "query"
+                    :query    {:source-table (tid ids :orders) :fields [[:field (fid ids :orders :id) nil] canonical]}}]
+    (array-map
+     :field-secret-num         [:get (format "field/%d" secret-num)]
+     :field-secret             [:get (format "field/%d" secret)]
+     :field-values-secret      [:get (format "field/%d/values" secret)]
+     :field-values-secret-num  [:get (format "field/%d/values" secret-num)]
+     :field-search-secret      [:get (format "field/%d/search/%d?value=CANARY&limit=1000" secret secret)]
+     :field-summary-secret-num [:get (format "field/%d/summary" secret-num)]
+     :field-related            [:get (format "field/%d/related" secret)]
+     :table-query-metadata     [:get (format "table/%d/query_metadata" shops)]
+     :table                    [:get (format "table/%d" shops)]
+     :table-fks                [:get (format "table/%d/fks" shops)]
+     :database-metadata        [:get (format "database/%d/metadata" (:db ids))]
+     :database-fields          [:get (format "database/%d/fields" (:db ids))]
+     :database-idfields        [:get (format "database/%d/idfields" (:db ids))]
+     :parameter-values         [:post "dataset/parameter/values"
+                                {:parameter {:id "p" :type "string/=" :slug "s"} :field_ids [secret]}]
+     :parameter-search         [:post "dataset/parameter/search/CANARY"
+                                {:parameter {:id "p" :type "string/=" :slug "s"} :field_ids [secret]}]
+     :pivot                    [:post "dataset/pivot"
+                                {:database (:db ids) :type "query"
+                                 :query    {:source-table (tid ids :orders) :breakout [canonical] :aggregation [["count"]]}}]
+     :pivot-secret-num         [:post "dataset/pivot"
+                                {:database (:db ids) :type "query"
+                                 :query    {:source-table (tid ids :orders)
+                                            :breakout     [(implicit ids :orders :shop_id :shops :secret_num)]
+                                            :aggregation  [["count"]]}}]
+     :download-csv             [:post "dataset/csv" {:query (json/encode orders-q)}]
+     :download-json            [:post "dataset/json" {:query (json/encode orders-q)}]
+     :card-get-model           [:get (format "card/%d" model)]
+     :card-get                 [:get (format "card/%d" card)]
+     :card-query-metadata      [:get (format "card/%d/query_metadata" model)]
+     :card-run-model           [:post (format "card/%d/query" model)]
+     :card-run-model-csv       [:post (format "card/%d/query/csv" model)]
+     :table-card-metadata      [:get (format "table/card__%d/query_metadata" model)]
+     :binning-breakout         [:post "dataset"
+                                {:database (:db ids) :type "query"
+                                 :query    {:source-table shops
+                                            :breakout     [[:field price {:binning {:strategy :default}}]]
+                                            :aggregation  [["count"]]}}]
+     :binning-secret-num       [:post "dataset"
+                                {:database (:db ids) :type "query"
+                                 :query    {:source-table shops
+                                            :breakout     [[:field secret-num {:binning {:strategy :default}}]]
+                                            :aggregation  [["count"]]}}])))
+
+(defn- request-as [user [method path body]]
+  (let [{:keys [status] response :body} (if body
+                                          (mt/user-http-request-full-response user method path body)
+                                          (mt/user-http-request-full-response user method path))]
+    {:status status :body response}))
+
+(defn run-canary-endpoints!
+  "Call every endpoint of [[endpoint-requests]] as the sandboxed user under `config-k`, after a full sync of the base
+  copy. Returns endpoint -> `{:status, :leaked-venue-ids, :hygiene}`."
+  [config-k]
+  (do-with-corpus-config!
+   config-k
+   (fn [{:keys [ids allowed] :as ctx}]
+     (into (array-map)
+           (for [[endpoint request] (endpoint-requests ids)]
+             (let [{:keys [status body]} (request-as :rasta request)
+                   user                  {:body body}]
+               [endpoint {:status  status
+                          :leaked  (not-empty (into (sorted-set) (remove allowed) (corpus/canary-ids body)))
+                          :hygiene (hygiene-verdict ctx user)}]))))))
+
+(deftest ^:synchronized endpoints-reveal-nothing-outside-the-sandbox-test
+  (mt/test-drivers #{:h2}
+    (doseq [config-k [:table-tier :card-hide-price]
+            [endpoint {:keys [status leaked hygiene]}] (run-canary-endpoints! config-k)]
+      (testing (format "%s under %s (HTTP %s)" endpoint config-k status)
+        (testing "no canary of a hidden row"
+          (is (nil? leaked)))
+        (testing "nothing internal in the response"
+          (is (= :clean (:verdict hygiene)) (pr-str hygiene)))))))
 
 ;;; --------------------------------------------- Generated queries -----------------------------------------------
 ;;;
