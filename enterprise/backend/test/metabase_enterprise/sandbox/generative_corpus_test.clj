@@ -419,6 +419,157 @@
         (map (fn [[config rs]] [config (frequencies (map :outcome rs))]))
         (group-by :config results)))
 
+;;; ------------------------------------------------ Field-ref grid ------------------------------------------------
+;;;
+;;; Every way to write a ref to a SHOPS column, in every clause position, from every stage that can reach SHOPS.
+
+(def ^:private edges
+  "Edge name -> how a stage reaches SHOPS: the source table and the FK column, plus for the two-hop case the explicit
+  join that brings the FK's table into scope."
+  (array-map
+   :orders/shop_id        {:source :orders  :fk-table :orders  :fk :shop_id}
+   :orders/return_shop_id {:source :orders  :fk-table :orders  :fk :return_shop_id}
+   :regions/hq_shop_id    {:source :regions :fk-table :regions :fk :hq_shop_id}
+   :shops/parent_shop_id  {:source :shops   :fk-table :shops   :fk :parent_shop_id}
+   :items->orders/shop_id {:source :items   :fk-table :orders  :fk :shop_id :via-join "O"}))
+
+(defn- edge-joins
+  "Explicit joins an edge's stage needs before the FK column is in scope."
+  [ids {:keys [via-join]}]
+  (when via-join
+    [{:source-table (tid ids :orders)
+      :alias        via-join
+      :condition    [:= [:field (fid ids :items :order_id) nil] [:field (fid ids :orders :id) {:join-alias via-join}]]
+      :fields       :none}]))
+
+(defn- fk-opts [ids {:keys [fk-table fk via-join]}]
+  (cond-> {:source-field (fid ids fk-table fk)}
+    via-join (assoc :source-field-join-alias via-join)))
+
+(def ^:private targets
+  {:price  {:base-type :type/Integer :param {:type "number/!=" :value [-1]}}
+   :secret {:base-type :type/Text    :param {:type "string/!=" :value ["__none__"]}}})
+
+(def ^:private ref-shapes
+  "Ref shape name -> fn of ids, edge and target returning a legacy ref to SHOPS.<target> from the edge's stage."
+  (array-map
+   :canonical                 (fn [ids e t] [:field (fid ids :shops t) (fk-opts ids e)])
+   :legacy-fk->               (fn [ids e t] [:fk-> [:field-id (fid ids (:fk-table e) (:fk e))] [:field-id (fid ids :shops t)]])
+   :name-ref+source-field     (fn [ids e t] [:field (fname ids :shops t) (merge {:base-type (get-in targets [t :base-type])} (fk-opts ids e))])
+   :source-field-name-real    (fn [ids e t] [:field (fid ids :shops t) (assoc (fk-opts ids e) :source-field-name (fname ids (:fk-table e) (:fk e)))])
+   :source-field-name-bogus   (fn [ids e t] [:field (fid ids :shops t) (assoc (fk-opts ids e) :source-field-name "NOPE")])
+   :source-field-join-bogus   (fn [ids e t] [:field (fid ids :shops t) (assoc (fk-opts ids e) :source-field-join-alias "Nope")])
+   :bare-id                   (fn [ids _ t] [:field (fid ids :shops t) nil])
+   :bare-id+base-type         (fn [ids _ t] [:field (fid ids :shops t) {:base-type (get-in targets [t :base-type])}])
+   :implicit-alias-no-join    (fn [ids e t] [:field (fid ids :shops t) {:join-alias (str (mt/format-name "shops") "__via__" (fname ids (:fk-table e) (:fk e)))}])
+   :field-literal             (fn [ids _ t] [:field-literal (fname ids :shops t) (get-in targets [t :base-type])])
+   :source-field-is-pk        (fn [ids e t] [:field (fid ids :shops t) {:source-field (fid ids (:fk-table e) :id)}])
+   :source-field-from-shops   (fn [ids _ t] [:field (fid ids :shops t) {:source-field (fid ids :shops :region_id)}])
+   :source-field-other-fk     (fn [ids e t] [:field (fid ids :shops t) {:source-field (fid ids (:fk-table e) (if (= (:fk e) :shop_id) :return_shop_id :shop_id))}])))
+
+(defn- lib-binned
+  "`r` with default binning, when it is a `:field` ref whose options can carry it."
+  [[tag id-or-name opts :as r]]
+  (if (and (= tag :field) ((some-fn nil? map?) opts))
+    [tag id-or-name (assoc opts :binning {:strategy :default})]
+    r))
+
+(defn- grid-positions
+  "Position name -> `{:query inner, :parameters ...}` for ids, edge, target and ref. Every query starts from the
+  edge's source table with the edge's joins."
+  [ids e t r]
+  (let [src    (tid ids (:source e))
+        base   (cond-> {:source-table src} (edge-joins ids e) (assoc :joins (edge-joins ids e)))
+        canon  ((ref-shapes :canonical) ids e :name)
+        own-id [:field (fid ids (:source e) :id) nil]]
+    (array-map
+     :fields            {:query (assoc base :fields [own-id r] :limit 50)}
+     :breakout          {:query (assoc base :breakout [r] :aggregation [[:count]])}
+     :filter            {:query (assoc base :aggregation [[:count]] :filter [:not-null r])}
+     :aggregation       {:query (assoc base :aggregation [[:max r]])}
+     :expression        {:query (assoc base :expressions {"x" [:coalesce r r]} :fields [own-id [:expression "x"]] :limit 50)}
+     :case-expression   {:query (assoc base :expressions {"x" [:case [[[:not-null r] r]] {:default r}]} :fields [own-id [:expression "x"]] :limit 50)}
+     :order-by          {:query (assoc base :fields [own-id r] :order-by [[:desc r]] :limit 50)}
+     :mixed-after-canon {:query (assoc base :fields [canon r] :limit 50)}
+     :mixed-before-canon {:query (assoc base :fields [r canon] :limit 50)}
+     :second-stage      {:query {:source-query base :fields [r] :limit 50}}
+     :explicit-join-present
+     {:query (update base :joins (fnil conj [])
+                     {:source-table (tid ids :shops)
+                      :alias        "S"
+                      :condition    [:= [:field (fid ids (:fk-table e) (:fk e)) (when (:via-join e) {:join-alias (:via-join e)})]
+                                     [:field (fid ids :shops :id) {:join-alias "S"}]]
+                      :fields       :none})
+      :params-note "ref does not name the join"}
+     :right-join-shops-preserved
+     {:query (assoc base
+                    :joins (conj (vec (:joins base))
+                                 {:source-table (tid ids :shops)
+                                  :alias        "S"
+                                  :strategy     :right-join
+                                  :condition    [:= [:field (fid ids (:fk-table e) (:fk e)) (when (:via-join e) {:join-alias (:via-join e)})]
+                                                 [:field (fid ids :shops :id) {:join-alias "S"}]]
+                                  :fields       :none})
+                    :fields [own-id r [:field (fid ids :shops :secret) {:join-alias "S"}]]
+                    :limit 50)}
+     :join-condition
+     {:query (assoc base
+                    :joins (conj (vec (:joins base))
+                                 {:source-table (tid ids :regions)
+                                  :alias        "RG"
+                                  :strategy     :inner-join
+                                  :condition    [:and [:= [:field (fid ids :regions :id) {:join-alias "RG"}] [:field (fid ids :regions :id) {:join-alias "RG"}]]
+                                                 [:not-null r]]
+                                  :fields       :none})
+                    :aggregation [[:count]])}
+     :cumulative        {:query (assoc base :aggregation [[:cum-count]] :breakout [r])}
+     :binning           {:query (assoc base :breakout [(if (= t :price) (lib-binned r) r)] :aggregation [[:count]])}
+     :parameter         {:query      (assoc base :aggregation [[:count]])
+                         :parameters [(assoc (get-in targets [t :param]) :target [:dimension r])]})))
+
+(defn- grid-probe-fn [edge-k shape-k position-k target]
+  (fn [ids]
+    (let [e (edges edge-k)
+          r ((ref-shapes shape-k) ids e target)]
+      (-> (grid-positions ids e target r)
+          (get position-k)
+          (dissoc :params-note)))))
+
+(def ^:private grid-position-names
+  [:fields :breakout :filter :aggregation :expression :case-expression :order-by :mixed-after-canon
+   :mixed-before-canon :second-stage :explicit-join-present :right-join-shops-preserved :join-condition :cumulative
+   :binning :parameter])
+
+(defn grid-probe-names
+  "Every `[edge shape position target]` of the grid, or those matching `selection` (a map of key -> seq)."
+  ([] (grid-probe-names {}))
+  ([{:keys [edges* shapes positions* targets*]}]
+   (for [edge-k     (or edges* (keys edges))
+         shape-k    (or shapes (keys ref-shapes))
+         position-k (or positions* grid-position-names)
+         target     (or targets* [:price :secret])]
+     [edge-k shape-k position-k target])))
+
+(defn run-grid!
+  "Run the grid probes named by `probe-names` (default: all) under `config-k`, or under every config."
+  ([] (mapcat #(run-grid! % (grid-probe-names)) (keys sandbox-configs)))
+  ([config-k probe-names]
+   (do-with-corpus-config!
+    config-k
+    (fn [ctx]
+      (doall (for [[edge-k shape-k position-k target :as probe-name] probe-names]
+               (run-probe ctx probe-name (grid-probe-fn edge-k shape-k position-k target))))))))
+
+(defn grid-summary
+  "Outcome -> count, and the probes per failing outcome."
+  [results]
+  {:counts   (frequencies (map :outcome results))
+   :failing  (->> results
+                  (filter (comp failing-outcomes :outcome))
+                  (map (juxt :outcome :probe (comp #(u/truncate (str %) 100) :error :user)))
+                  sort
+                  vec)})
+
 ;;; --------------------------------------------------- Tests ------------------------------------------------------
 
 (defn- corpus-drivers []
