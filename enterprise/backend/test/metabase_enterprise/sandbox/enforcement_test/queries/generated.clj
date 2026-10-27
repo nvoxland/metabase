@@ -214,4 +214,4 @@
    :tables (zipmap dataset/tables (range 100 104))
    :fields (into {} (map-indexed (fn [i tc] [tc (+ 200 i)])) (for [[t cols] dataset/columns, c cols] [t c]))
    :names  (into {} (for [[t cols] dataset/columns, c cols] [[t c] (u/upper-case-en (name c))]))
-   :cards  {:card/shops 5 :model/shops 6 :card/orders-implicit 7}})
+   :cards  {:card/shops 5 :model/shops 6 :card/orders-implicit 7 :model/orders-implicit 8 :native/shops 9}})

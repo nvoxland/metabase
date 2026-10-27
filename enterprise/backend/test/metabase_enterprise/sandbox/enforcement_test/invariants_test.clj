@@ -86,6 +86,18 @@
       (testing "but a hidden row's text canary is a leak even then"
         (is (= :leak (:verdict (invariants/canary ctx (response [(dataset/canary-text :shops 2)]) (response [(c 2)])))))))))
 
+(deftest ^:parallel http-equivalence-test
+  (let [executed {:rows [[1 "Alpha" 900000015838]] :body {:data {:cols [{:name "ID" :base_type "type/Integer"} {:name "NAME" :base_type "type/Text"} {:name "SECRET_NUM" :base_type "type/BigInteger"}]}}}]
+    (testing "no HTTP transport"
+      (is (= {:verdict :n/a} (invariants/http-equivalence nil executed))))
+    (testing "the same rows and columns, numbers as JSON gives them"
+      (is (= {:verdict :same}
+             (invariants/http-equivalence {:rows [[1 "Alpha" 900000015838N]] :body (:body executed)} executed))))
+    (testing "other rows, or an error on one side only"
+      (is (= :differs (:verdict (invariants/http-equivalence {:rows [[1 "Alpha" 1]] :body (:body executed)} executed))))
+      (is (= :differs (:verdict (invariants/http-equivalence {:error "500 x" :status 500} executed))))
+      (is (= :same (:verdict (invariants/http-equivalence {:error "500 x" :status 500} {:error "400 y" :status 400})))))))
+
 (deftest ^:parallel meaningful-run-test
   (testing "a run that never compared rows that could differ proves nothing"
     (is (not (invariants/meaningful? (repeat 40 {:outcome :vacuous}))))
@@ -137,12 +149,13 @@
 
 (def ^:private mutant-policies [:table-tier :card-hide-price :card-join])
 
-(defn- invariants-fired [{:keys [differential canary structural hygiene]}]
+(defn- invariants-fired [{:keys [differential canary structural sql hygiene]}]
   (cond-> #{}
     (#{:extra-rows :missing-rows :extra-columns :missing-columns :hidden-column-values :over-restricted :user-error} differential)
     (conj :differential)
     (= :leak (:verdict canary))                                  (conj :canary)
     (= :raw-ref (:verdict structural))                           (conj :structural)
+    (= :raw-table-in-sql (:verdict sql))                         (conj :sql)
     (= :dirty (:verdict hygiene))                                (conj :hygiene)))
 
 (defn mutation-score!

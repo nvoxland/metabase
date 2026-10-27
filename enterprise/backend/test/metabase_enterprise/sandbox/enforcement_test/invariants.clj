@@ -5,27 +5,33 @@
   * [[differential]] -- the user's columns and rows equal an admin's on the restricted variant (a sandbox is a view),
     or the user's query fails in a declared way.
   * [[canary]] -- no canary of a row the sandbox hides appears anywhere in the user's response.
-  * [[structural]] -- after preprocessing as the user and alias resolution, no field ref outside a sandbox stage has a
-    sandboxed table as its physical source.
+  * [[structural]] -- in the preprocessed MBQL after alias resolution, no field ref outside a sandbox stage has a
+    sandboxed table as its physical source, and no stage reads it as its source.
+  * [[sql]] -- in the compiled SQL, the sandboxed table is read only inside the sandbox subquery
+    (see [[invariants.sql/structural-sql]]).
   * [[hygiene]] -- the response carries no fingerprint, native or preprocessed form, internal stage, or SQL text.
   * [[metadata]] -- the result columns' types and binning equal the admin's.
+  * [[http-equivalence]] -- an HTTP entry point returns the rows and columns the processor returns in-process.
 
-  [[outcome]] folds the verdicts into one keyword, worst first; [[failing-outcomes]] says which fail a test.
+  Each docstring says what the invariant looks at, and so where a failure lies: `differential`, `canary` and
+  `metadata` read the executed result, so a failure is anywhere in the stack; `structural` reads the preprocessed
+  query, so a failure is in the query processor's middleware; `sql` reads the compiled query, so a failure is in the
+  compiler; `hygiene` reads the response text, so a failure is in error handling or the driver.
+
+  [[outcomes]] lists every outcome with its meaning and whether it fails a test; [[outcome]] folds a result's verdicts
+  into one, worst first.
   [[disagreements]] finds results where two invariants contradict each other, which is a bug in an invariant.
   [[mask-response]] prepares a response for the noninterference comparison."
   (:require
    [clojure.string :as str]
    [clojure.walk :as walk]
    [metabase-enterprise.sandbox.enforcement-test.dataset :as dataset]
-   [metabase-enterprise.sandbox.enforcement-test.queries.formats :as formats]
+   [metabase-enterprise.sandbox.enforcement-test.invariants.sql :as invariants.sql]
    [metabase-enterprise.sandbox.enforcement-test.queries.hand-written :as hand-written]
    [metabase.lib.walk :as lib.walk]
-   [metabase.query-processor.preprocess :as qp.preprocess]
-   [metabase.query-processor.setup :as qp.setup]
    [metabase.query-processor.util.add-alias-info :as add]
    [metabase.test :as mt]
    [metabase.util :as u]
-   [metabase.util.json :as json]
    [metabase.util.match :as match]))
 
 (set! *warn-on-reflection* true)
@@ -115,41 +121,46 @@
     (if (seq leaked) {:verdict :leak :leaked leaked} {:verdict :clean})))
 
 (defn- raw-refs-to-tables
-  "Field refs in the user's query, outside any sandbox stage, whose physical source after alias resolution is one of
-  `table-ids`. Runs as the current user. `{:refs [...]}` or `{:error msg}` when the query does not preprocess."
-  [ids probe table-ids]
-  (let [outer (json/decode+kw (json/encode (or (:outer probe) (formats/legacy-outer ids probe))))
-        acc   (volatile! [])]
-    (try
-      (qp.setup/with-qp-setup [outer outer]
-        (lib.walk/walk-stages
-         (-> outer qp.preprocess/preprocess add/add-alias-info)
-         (fn [_query path stage]
-           (when-not (:query-permissions/sandboxed-table stage)
-             ;; a stage still reading the raw table is the plainest failure of the rewrite
-             (when (contains? table-ids (:source-table stage))
-               (vswap! acc conj {:path path :unmarked-source-table (:source-table stage)}))
-             (let [own (-> stage
-                           (dissoc :lib/stage-metadata)
-                           (update :joins (partial mapv #(dissoc % :stages :lib/stage-metadata))))]
-               (vswap! acc into
-                       (map (fn [ref] {:path path :ref ref}))
-                       (match/match-many own
-                         [:field (opts :guard (contains? table-ids (::add/source-table opts))) _] &match))))
-           nil)))
-      {:refs @acc}
-      (catch Throwable e
-        {:error (u/truncate (ex-message e) 300)}))))
+  "Field refs in `preprocessed` (the user's query after preprocessing and alias resolution), outside any sandbox
+  stage, whose physical source is one of `table-ids`; and stages that still read one of them as their source."
+  [preprocessed table-ids]
+  (let [acc (volatile! [])]
+    (lib.walk/walk-stages
+     preprocessed
+     (fn [_query path stage]
+       (when-not (:query-permissions/sandboxed-table stage)
+         ;; a stage still reading the raw table is the plainest failure of the rewrite
+         (when (contains? table-ids (:source-table stage))
+           (vswap! acc conj {:path path :unmarked-source-table (:source-table stage)}))
+         (let [own (-> stage
+                       (dissoc :lib/stage-metadata)
+                       (update :joins (partial mapv #(dissoc % :stages :lib/stage-metadata))))]
+           (vswap! acc into
+                   (map (fn [ref] {:path path :ref ref}))
+                   (match/match-many own
+                     [:field (opts :guard (contains? table-ids (::add/source-table opts))) _] &match))))
+       nil))
+    @acc))
 
 (defn structural
-  "Field refs in the user's query that read a sandboxed table outside a sandbox stage; see [[raw-refs-to-tables]]."
-  [{:keys [ids sandboxed]} probe]
-  (let [table-ids (into #{} (map #(dataset/tid ids %)) sandboxed)
-        {:keys [refs error]} (raw-refs-to-tables ids probe table-ids)]
+  "Looks at the preprocessed query: field refs that read a sandboxed table outside a sandbox stage, or a stage that
+  still reads it as its source. A failure here is in the query processor's rewrite or field resolution.
+  `preprocessed` is the harness's observation, `{:value query}` or `{:error ..}`."
+  [{:keys [ids sandboxed]} {:keys [value error]}]
+  (let [table-ids (into #{} (map #(dataset/tid ids %)) sandboxed)]
     (cond
-      error      {:verdict :error :error error}
-      (seq refs) {:verdict :raw-ref :refs refs}
-      :else      {:verdict :clean})))
+      error {:verdict :error :error (:message error)}
+      :else (let [refs (raw-refs-to-tables value table-ids)]
+              (if (seq refs) {:verdict :raw-ref :refs refs} {:verdict :clean})))))
+
+(defn sql
+  "Looks at the compiled SQL: the sandboxed tables must be read only inside the sandbox subquery. A failure here is in
+  the compiler. See [[invariants.sql/structural-sql]]."
+  [{:keys [ids sandboxed]} preprocessed sql]
+  (invariants.sql/structural-sql {:names     (into {} (for [t sandboxed] [t (mt/format-name (name t))]))
+                                  :table-ids (into {} (for [t sandboxed] [t (dataset/tid ids t)]))}
+                                 preprocessed
+                                 sql))
 
 ;;; ------------------------------------------- Detector cross-checks ----------------------------------------------
 
@@ -222,25 +233,74 @@
                     {:col col :user (u col) :expected (e col)})]
       (if (seq diffs) {:verdict :differs :diffs (vec diffs)} {:verdict :same}))))
 
+(def ^:private equivalence-col-keys [:name :base_type :effective_type :semantic_type :binning_info])
+
+(defn http-equivalence
+  "Looks at an HTTP entry point's response next to the processor's in-process result for the same query: the rows (as
+  strings, since JSON numbers and processor numbers differ in type) and the columns' names and types must agree, and
+  so must whether the query failed. A failure here is in the entry point's own context or post-processing, not in the
+  processor. `:n/a` when the state had no HTTP transport."
+  [http executed]
+  (if (nil? http)
+    {:verdict :n/a}
+    (let [norm (fn [{:keys [rows body error]}]
+                 (if error
+                   {:error? true}
+                   {:rows (frequencies (map #(mapv str %) rows))
+                    :cols (mapv #(select-keys % equivalence-col-keys) (get-in body [:data :cols]))}))
+          h    (norm http)
+          e    (norm executed)]
+      (if (= h e)
+        {:verdict :same}
+        {:verdict :differs :http (select-keys h [:error? :cols]) :executed (select-keys e [:error? :cols])
+         :rows-differ? (not= (:rows h) (:rows e))}))))
+
+(def outcomes
+  "Every outcome a result can have, worst first, with its meaning and whether it fails a test. `:rejected` is judged by
+  [[unexpected-outcome?]]: a hand-written probe that both users fail is a finding unless it is invalid on purpose."
+  (array-map
+   :canary-leak            {:fails? true  :doc "a canary of a hidden row is somewhere in the user's response"}
+   :raw-ref                {:fails? true  :doc "the preprocessed query reads the sandboxed table outside a sandbox stage"}
+   :raw-table-in-sql       {:fails? true  :doc "the compiled SQL reads the sandboxed table outside the sandbox subquery"}
+   :binning-bounds-leak    {:fails? true  :doc "binning bounds come from the whole table's fingerprint, not the sandboxed rows"}
+   :http-differs           {:fails? true  :doc "an HTTP entry point returned other rows or columns than the processor in-process"}
+   :extra-rows             {:fails? true  :doc "the user got rows the admin on the restricted variant did not"}
+   :missing-rows           {:fails? true  :doc "the user got fewer rows than the admin on the restricted variant"}
+   :extra-columns          {:fails? true  :doc "the user got a column the admin on the restricted variant did not"}
+   :missing-columns        {:fails? true  :doc "the user lost a column the admin on the restricted variant has"}
+   :hidden-column-values   {:fails? true  :doc "a column the sandbox hides carries a value"}
+   :missing-error          {:fails? true  :doc "a policy that must fail the query let it succeed with restricted data"}
+   :over-restricted        {:fails? true  :doc "nothing should be restricted, yet the user got less than the admin"}
+   :user-error             {:fails? true  :doc "only the user's query failed, in a way no policy declares acceptable"}
+   :known-rejection        {:fails? false :doc "only the user's query failed, in a way the policy declares as failing closed"}
+   :failed-as-expected     {:fails? false :doc "a policy that must fail the query did"}
+   :rejected               {:fails? false :doc "both the user's and the admin's query failed: the probe is invalid"}
+   :expected-error         {:fails? false :doc "only the admin's query on the restricted variant failed: the spec cannot answer"}
+   :vacuous                {:fails? false :doc "right, but the sandbox could not have changed this answer"}
+   :consistent             {:fails? false :doc "right, and the sandbox changed the answer"}
+   :sandbox-count-mismatch {:fails? false :doc "the compiled SQL has another number of sandbox subqueries than sandbox stages (a warning)"}
+   :unrenderable           {:fails? false :doc "the probe has no form in the requested query format"}
+   :generator-error        {:fails? false :doc "the query generator failed, before any query ran"}))
+
+(def failing-outcomes
+  "The outcomes that fail a test; see [[outcomes]]."
+  (into #{} (keep (fn [[k {:keys [fails?]}]] (when fails? k))) outcomes))
+
 (defn outcome
-  "One keyword for a result, worst first, from its separate verdicts."
-  [{:keys [differential canary structural metadata-diff]}]
+  "One keyword for a result, worst first, from its separate verdicts; see [[outcomes]]."
+  [{:keys [differential canary structural sql metadata-diff http-equivalence]}]
   (cond
-    (= :leak (:verdict canary))         :canary-leak
-    (= :raw-ref (:verdict structural))  :raw-ref
+    (= :leak (:verdict canary))                 :canary-leak
+    (= :raw-ref (:verdict structural))          :raw-ref
+    (= :raw-table-in-sql (:verdict sql))        :raw-table-in-sql
     ;; bin bounds come from fingerprints; bounds that differ from the restricted data's reveal the hidden range
     (some (fn [{u :user e :expected}]
             (let [bounds #(select-keys (:binning_info %) [:min_value :max_value])]
               (and (seq (bounds u)) (seq (bounds e)) (not= (bounds u) (bounds e)))))
           (:diffs metadata-diff))
     :binning-bounds-leak
-    :else                               differential))
-
-(def failing-outcomes
-  "The outcomes that fail a test. `:rejected` is not among them: a hand-written probe that both users fail is judged
-  by [[unexpected-outcome?]]."
-  #{:canary-leak :raw-ref :binning-bounds-leak :extra-rows :missing-rows :extra-columns :missing-columns
-    :hidden-column-values :missing-error :over-restricted :user-error})
+    (= :differs (:verdict http-equivalence))    :http-differs
+    :else                                       differential))
 
 (defn unexpected-outcome?
   "A failing outcome, or a hand-written probe that both users fail without being written to."
@@ -254,6 +314,8 @@
   #{:id :table_id :table-id :fk_target_field_id :fk-target-field-id :fk_field_id :fk-field-id :database_id :database
     :card-id :card_id :field-id :source-field :lib/card-id :lib/original-fk-field-id :source-table :source-card
     :field_ref :json_query :started_at :running_time :lib/uuid :query-hash
+    ;; a failed result's exception details: frames and classes, not data
+    :stacktrace :class :ex-data
     :metabase.query-processor.middleware.add-remaps/original-field-dimension-id
     :metabase.query-processor.middleware.add-remaps/new-field-dimension-id})
 

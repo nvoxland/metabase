@@ -343,21 +343,3 @@
    #'shops-hide-price       {:shops #{}                :regions #{1 2 3 4} :shop-rows 8}
    #'shops-tier1-hide-price {:shops #{}                :regions #{1 2 3 4} :shop-rows 4}
    #'shops-empty         {:shops #{}                :regions #{1 2 3 4} :shop-rows 0}})
-
-(defn shop-names-for-driver
-  "`SHOPS` column names as the current driver stores them, keyed by their lower-case name. Postgres lower-cases,
-  H2 upper-cases."
-  []
-  (into {} (for [col ["id" "name" "tier" "price" "region_id" "parent_shop_id" "rating" "opened_on" "secret" "secret_num"]]
-             [(keyword col) (mt/format-name col)])))
-
-(defn describe
-  "A one-line summary of the loaded dataset, for log sections: table -> row count."
-  []
-  (into (sorted-map)
-        (for [table [:regions :shops :orders :items]]
-          [table (-> (mt/user-http-request :crowberto :post 202 "dataset"
-                                           {:database (mt/id)
-                                            :type     "query"
-                                            :query    {:source-table (mt/id table) :aggregation [["count"]]}})
-                     :data :rows ffirst)])))

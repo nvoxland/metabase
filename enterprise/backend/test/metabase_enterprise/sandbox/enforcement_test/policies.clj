@@ -250,3 +250,24 @@
    #'dataset/shops-tier1-regions-tier1       [#'dataset/shops-tier2-varied]
    #'dataset/shops-hide-price       [#'dataset/shops-hidden-cols-varied]
    #'dataset/shops-tier1-hide-price [#'dataset/shops-tier2-varied #'dataset/shops-hidden-cols-varied]})
+
+;;; --------------------------------------------------- Scopes -----------------------------------------------------
+
+(defn full-run?
+  "Run both schema-check modes on every policy, as `MB_SANDBOX_FULL=true` asks for locally. CI runs production mode on
+  every policy and test mode on two representative ones: schema checks quadruple a query's cost, and production has
+  none."
+  []
+  (= "true" (System/getenv "MB_SANDBOX_FULL")))
+
+(def scopes
+  "Scope name -> the modes and policies a processor test runs under; see [[scope]]."
+  {:ci         {:modes [:production] :policies (keys all)}
+   :test-mode  {:modes [:test] :policies [:table-tier :card-hide-price]}
+   :attributes {:modes [:production] :policies (keys attribute-variants)}})
+
+(defn scope
+  "The modes and policies for scope `k`, widened to both modes on every policy for a full run."
+  [k]
+  (cond-> (scopes k)
+    (full-run?) (assoc :modes [:production :test])))

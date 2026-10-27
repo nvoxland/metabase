@@ -5,7 +5,9 @@
   [[parameters]], [[authored]] and [[saved-sql]] have their own runners in the harness."
   (:require
    [metabase-enterprise.sandbox.enforcement-test.dataset :as dataset]
+   [metabase.query-processor :as qp]
    [metabase.test :as mt]
+   [metabase.util.json :as json]
    [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
@@ -20,9 +22,11 @@
   [ids]
   (str (mt/format-name "shops") "__via__" (dataset/fname ids :orders :shop_id)))
 
-(def all
-  "Probe name -> fn of an ids map returning the inner query. One query per role of SHOPS and per source kind, written
-  the way the query builder would."
+(def roles
+  "SHOPS in every role a table can play, written as the query builder would: source, FK target through each edge,
+  explicit join, two hops, self join, FK out to REGIONS and back, breakout and order by an FK, a weighted average
+  through the join, a parameter on an implicit-join column. Reaches `add-implicit-joins`, `resolve-joins`,
+  `fix-bad-field-id-refs` and the sandbox rewrite's second pass."
   (array-map
    :shops-source            (fn [ids] {:query {:source-table (dataset/tid ids :shops)}})
    :shops-count             (fn [ids] {:query {:source-table (dataset/tid ids :shops) :aggregation [[:count]]}})
@@ -71,14 +75,6 @@
    :regions-into-shops      (fn [ids] {:query {:source-table (dataset/tid ids :regions)
                                                :fields       [[:field (dataset/fid ids :regions :id) nil]
                                                               (implicit ids :regions :hq_shop_id :shops :secret)]}})
-   :card-shops              (fn [ids] {:query {:source-table (dataset/card-source ids :card/shops)}})
-   :model-shops             (fn [ids] {:query {:source-table (dataset/card-source ids :model/shops)}})
-   :card-orders-implicit    (fn [ids] {:query {:source-table (dataset/card-source ids :card/orders-implicit)}})
-   :model-orders-implicit   (fn [ids] {:query {:source-table (dataset/card-source ids :model/orders-implicit)}})
-   :model-shops-count       (fn [ids] {:query {:source-table (dataset/card-source ids :model/shops) :aggregation [[:count]]}})
-   :nested-shops            (fn [ids] {:query {:source-query {:source-table (dataset/tid ids :shops)}}})
-   :nested-shops-name-ref   (fn [ids] {:query {:source-query {:source-table (dataset/tid ids :shops)}
-                                               :fields       [[:field (dataset/fname ids :shops :secret) {:base-type :type/Text}]]}})
    :parameter-on-shops      (fn [ids] {:query      {:source-table (dataset/tid ids :orders) :aggregation [[:count]]}
                                        :parameters [{:type   "number/!="
                                                      :target ["dimension" (implicit ids :orders :shop_id :shops :price)]
@@ -94,18 +90,30 @@
                                                                :condition    [:= [:field (dataset/fid ids :items :order_id) nil]
                                                                               [:field (dataset/fid ids :orders :id) {:join-alias "O"}]]
                                                                :fields       :all}]}})
-   ;; a ref through RETURN_SHOP_ID that claims the name SHOP_ID gets the implicit join alias of SHOP_ID; the two
-   ;; implicit joins collide and one is renamed
-   :colliding-implicit-joins (fn [ids] {:query {:source-table (dataset/tid ids :orders)
-                                                :fields       [[:field (dataset/fid ids :orders :id) nil]
-                                                               (implicit ids :orders :shop_id :shops :price)
-                                                               [:field (dataset/fid ids :shops :secret) {:source-field      (dataset/fid ids :orders :return_shop_id)
-                                                                                                         :source-field-name (dataset/fname ids :orders :shop_id)}]]}})
    ;; SHOPS rows bucketed by month through the implicit join; each tier is its own month
    :orders-breakout-shop-month (fn [ids] {:query {:source-table (dataset/tid ids :orders)
                                                   :breakout     [[:field (dataset/fid ids :shops :opened_on) {:source-field  (dataset/fid ids :orders :shop_id)
                                                                                                               :temporal-unit :month}]]
-                                                  :aggregation  [[:count]]}})
+                                                  :aggregation  [[:count]]}})))
+
+(def sources
+  "SHOPS behind a saved question, a model (with stored result metadata) and a nested query. Reaches
+  `fetch-source-query`, model metadata merging and persisted-model substitution."
+  (array-map
+   :card-shops              (fn [ids] {:query {:source-table (dataset/card-source ids :card/shops)}})
+   :model-shops             (fn [ids] {:query {:source-table (dataset/card-source ids :model/shops)}})
+   :card-orders-implicit    (fn [ids] {:query {:source-table (dataset/card-source ids :card/orders-implicit)}})
+   :model-orders-implicit   (fn [ids] {:query {:source-table (dataset/card-source ids :model/orders-implicit)}})
+   :model-shops-count       (fn [ids] {:query {:source-table (dataset/card-source ids :model/shops) :aggregation [[:count]]}})
+   :nested-shops            (fn [ids] {:query {:source-query {:source-table (dataset/tid ids :shops)}}})))
+
+(def name-refs
+  "Refs by column name instead of id: a nested stage read by name, a month-bucketed column whose unit is
+  inherited, the joined-column naming convention, an expression, deduplicated names (`NAME_2`, `NAME_3`). Reaches
+  `lib.field.resolution` and `add-alias-info`."
+  (array-map
+   :nested-shops-name-ref   (fn [ids] {:query {:source-query {:source-table (dataset/tid ids :shops)}
+                                               :fields       [[:field (dataset/fname ids :shops :secret) {:base-type :type/Text}]]}})
    ;; the next stage reads the month-bucketed column by name, so its unit is inherited
    :month-bucket-name-ref   (fn [ids] {:query {:source-query {:source-table (dataset/tid ids :shops)
                                                               :breakout     [[:field (dataset/fid ids :shops :opened_on) {:temporal-unit :month}]]
@@ -132,6 +140,25 @@
                                                                              (implicit ids :orders :shop_id :shops :name)
                                                                              (implicit ids :orders :return_shop_id :shops :name)]}
                                                :fields       [[:field (str (dataset/fname ids :shops :name) "_3") {:base-type :type/Text}]]}})
+   ;; ORDERS.NAME and SHOPS.NAME in one stage come out as NAME and NAME_2; the next stage reads them by name
+   :deduplicated-name-ref   (fn [ids] {:query {:source-query {:source-table (dataset/tid ids :orders)
+                                                              :fields       [[:field (dataset/fid ids :orders :name) nil]
+                                                                             (implicit ids :orders :shop_id :shops :name)
+                                                                             (implicit ids :orders :shop_id :shops :secret)]}
+                                               :fields       [[:field (str (dataset/fname ids :shops :name) "_2") {:base-type :type/Text}]
+                                                              [:field (dataset/fname ids :shops :secret) {:base-type :type/Text}]]}})))
+
+(def join-forgery
+  "Explicit joins dressed up as, or colliding with, the implicit join to SHOPS, and two implicit joins that
+  collide. Reaches `add-implicit-joins`' alias handling. Two of these are invalid queries on purpose (see [[invalid]])."
+  (array-map
+   ;; a ref through RETURN_SHOP_ID that claims the name SHOP_ID gets the implicit join alias of SHOP_ID; the two
+   ;; implicit joins collide and one is renamed
+   :colliding-implicit-joins (fn [ids] {:query {:source-table (dataset/tid ids :orders)
+                                                :fields       [[:field (dataset/fid ids :orders :id) nil]
+                                                               (implicit ids :orders :shop_id :shops :price)
+                                                               [:field (dataset/fid ids :shops :secret) {:source-field      (dataset/fid ids :orders :return_shop_id)
+                                                                                                         :source-field-name (dataset/fname ids :orders :shop_id)}]]}})
    ;; an explicit REGIONS join dressed up as the implicit join through ORDERS.SHOP_ID; the implicit ref must not reuse it
    :forged-implicit-join    (fn [ids] {:query {:source-table (dataset/tid ids :orders)
                                                :joins        [{:source-table          (dataset/tid ids :regions)
@@ -151,20 +178,23 @@
                                                                               [:field (dataset/fid ids :regions :id) {:join-alias (implicit-join-alias ids)}]]
                                                                :fields       :none}]
                                                :fields       [[:field (dataset/fid ids :orders :id) nil]
-                                                              (implicit ids :orders :shop_id :shops :secret)]}})
-   ;; ORDERS.NAME and SHOPS.NAME in one stage come out as NAME and NAME_2; the next stage reads them by name
-   :deduplicated-name-ref   (fn [ids] {:query {:source-query {:source-table (dataset/tid ids :orders)
-                                                              :fields       [[:field (dataset/fid ids :orders :name) nil]
-                                                                             (implicit ids :orders :shop_id :shops :name)
-                                                                             (implicit ids :orders :shop_id :shops :secret)]}
-                                               :fields       [[:field (str (dataset/fname ids :shops :name) "_2") {:base-type :type/Text}]
-                                                              [:field (dataset/fname ids :shops :secret) {:base-type :type/Text}]]}})
+                                                              (implicit ids :orders :shop_id :shops :secret)]}})))
+
+(def bogus-join-aliases
+  "A join alias that names no join, over a card and over a model: invalid on purpose. Reaches the
+  validation that runs after the card's stage metadata is spliced in, whose error text echoes that metadata."
+  (array-map
    ;; a bogus join alias over a card source fails validation after the card's stage metadata is spliced in, and the
    ;; error text echoes that metadata, fingerprints included
    :model-bogus-join-alias  (fn [ids] {:query {:source-table (dataset/card-source ids :model/shops)
                                                :fields       [[:field (dataset/fid ids :shops :name) {:join-alias "Nope"}]]}})
    :card-bogus-join-alias   (fn [ids] {:query {:source-table (dataset/card-source ids :card/shops)
                                                :fields       [[:field (dataset/fid ids :shops :name) {:join-alias "Nope"}]]}})))
+
+(def all
+  "Every hand-written probe the processor tests run under every policy: the union of the groups above, each a fn of
+  an ids map returning the inner query."
+  (merge roles sources name-refs join-forgery bogus-join-aliases))
 
 (def invalid
   "Hand-written probes that are not valid queries on purpose (a join alias that names no join, a forged or colliding
@@ -251,10 +281,13 @@
   (mapv #(if (= col-name (:name %)) (f %) %) columns))
 
 (defn model-metadata
-  "Result metadata for `query`, computed as an admin, so a model has what a saved one would."
+  "Result metadata for `query`, computed as an admin in-process, so a model has what a saved one would; in the wire
+  shape, as the API would have stored it."
   [query]
-  (-> (mt/user-http-request :crowberto :post 202 "dataset" query)
-      (get-in [:data :results_metadata :columns])))
+  (-> (mt/with-test-user :crowberto (qp/process-query query))
+      (get-in [:data :results_metadata :columns])
+      json/encode
+      json/decode+kw))
 
 (defn- model-as!
   "Save a model over `table` as `user`, with the result metadata of column `col` changed by `f`. Returns `{:card id}`."

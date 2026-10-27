@@ -10,7 +10,7 @@
 (set! *warn-on-reflection* true)
 
 (defn- run-as-admin [inner-query]
-  (mt/user-http-request :crowberto :post 202 "dataset" {:database (mt/id) :type "query" :query inner-query}))
+  (:body (harness/execute-as :crowberto {:database (mt/id) :type "query" :query inner-query})))
 
 (defn- canary-ids-of [table body]
   (into (sorted-set) (keep (fn [[t id]] (when (= t table) id))) (dataset/canary-ids body)))

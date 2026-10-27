@@ -2,14 +2,30 @@
   "Set up one policy on a temporary copy of the dataset and run probes under it.
 
   [[do-with-policy!]] loads the base dataset and the policy's restricted variant, creates the same cards in both,
-  installs the sandbox for `:rasta` on a copy of the base database, and calls its fn with a ctx map. [[run-probe]]
-  sends one probe as the sandboxed user and as an admin on both databases, applies every invariant, and returns a
-  result map. The `run-*!` fns run one probe family under one policy; [[summarize]] and [[repro-report]] read results
-  at the REPL. [[modes]] runs a thunk with schema checks on or off."
+  installs the sandbox for `:rasta` on a copy of the base database, and calls its fn with a ctx map:
+
+    {:policy k :expect :restricted|:unrestricted|:error :hidden-cols #{\"PRICE\" ...} :accepted-rejections [..]
+     :sandboxed #{:shops} :ids {..} :restricted-ids {..} :allowed #{[:shops 1] ..}
+     :restricted-dataset #'dataset/shops-tier1 :remaps [..] :persist? bool}
+
+  [[run-probe]] runs one probe as the sandboxed user **in-process**, handing the query processor exactly what the
+  dataset endpoint would, and observes it at three points ([[observe]]): the preprocessed MBQL after alias
+  resolution, the compiled SQL, and the executed result. When `(:transport ctx)` is `[:http via]` it also sends the
+  probe through that HTTP entry point and the [[invariants/http-equivalence]] invariant compares the two. The
+  expected answers are admin runs, cached per query across policies ([[expected-results]]). Every invariant's verdict is
+  recorded on the result map:
+
+    {:policy :probe :format :transport :query :outcome
+     :differential :canary :structural :sql :hygiene :metadata-diff :http-equivalence
+     :user {:rows :cols | :error :status} :expected {..} :compiled \"sql\" :http {:rows :cols | :error :status}}
+
+  The `run-*!` fns run one probe family under one policy; [[summarize]] and [[repro-report]] read results at the
+  REPL. [[modes]] runs a thunk with schema checks on (`:test`) or off (`:production`)."
   (:require
    [clojure.string :as str]
    [clojure.test.check :as tc]
    [clojure.test.check.properties :as prop]
+   [mb.hawk.parallel]
    [metabase-enterprise.sandbox.enforcement-test.dataset :as dataset]
    [metabase-enterprise.sandbox.enforcement-test.invariants :as invariants]
    [metabase-enterprise.sandbox.enforcement-test.policies :as policies]
@@ -18,7 +34,17 @@
    [metabase-enterprise.sandbox.enforcement-test.queries.grid :as grid]
    [metabase-enterprise.sandbox.enforcement-test.queries.hand-written :as hand-written]
    [metabase-enterprise.sandbox.test-util :as met]
+   [metabase.api.common :as api]
+   [metabase.driver :as driver]
+   [metabase.lib-be.core :as lib-be]
+   [metabase.lib.core :as lib]
    [metabase.permissions.models.data-permissions :as data-perms]
+   [metabase.query-processor :as qp]
+   [metabase.query-processor.compile :as qp.compile]
+   [metabase.query-processor.error-type :as qp.error-type]
+   [metabase.query-processor.preprocess :as qp.preprocess]
+   [metabase.query-processor.setup :as qp.setup]
+   [metabase.query-processor.util.add-alias-info :as add]
    [metabase.sync.core :as sync]
    [metabase.test :as mt]
    [metabase.test.util :as tu]
@@ -29,7 +55,112 @@
 
 (set! *warn-on-reflection* true)
 
-;;; ---------------------------------------------- Cards and harness -----------------------------------------------
+;;; ------------------------------------------- Running the processor ----------------------------------------------
+
+(defn wire
+  "`x` as the wire would carry it: a JSON round trip, so numbers, dates and namespaced keys look the same whether a
+  result came from the processor in-process or through the API."
+  [x]
+  (json/decode+kw (json/encode x)))
+
+(defn- error-info [^Throwable e]
+  {:message (u/truncate (ex-message e) 300)
+   :type    (:type (ex-data e))
+   :class   (.getName (class e))})
+
+(defn- status-code
+  "The HTTP status the streaming response would give a failed userland result (the API's private rule, copied)."
+  [body]
+  (cond
+    (:status-code body)                                          (:status-code body)
+    (-> body :ex-data :status-code)                              (-> body :ex-data :status-code)
+    (-> body :error_type qp.error-type/connection-pool-saturated?) 503
+    (-> body :error_type qp.error-type/permission-error?)         403
+    (-> body :error_type qp.error-type/client-error?)             400
+    :else                                                        500))
+
+(defn- endpoint-query
+  "`outer` prepared the way `POST /api/dataset` prepares a body before the processor: normalized to MBQL 5 (the
+  endpoint's body schema does that, and it matters: a failure carries the preprocessed query, fingerprints included,
+  only when the processor was handed a legacy map), the userland middleware with default constraints, and an `:info`
+  map naming the source card and, for a model, its stored metadata."
+  [outer]
+  (let [query          (lib-be/normalize-query outer)
+        source-card-id (when (= (lib/normalized-query-type query) :mbql/query)
+                         (lib/primary-source-card-id query))
+        source-card    (when source-card-id
+                         (t2/select-one [:model/Card :type :result_metadata] :id source-card-id))
+        info           (cond-> {:executed-by api/*current-user-id*
+                                :context     :ad-hoc
+                                :card-id     source-card-id}
+                         (= (:type source-card) :model)
+                         (assoc :metadata/model-metadata (:result_metadata source-card)))]
+    (-> query
+        (dissoc :cache-strategy)
+        qp/userland-query-with-default-constraints
+        (assoc :info info))))
+
+(defn- query-response->result
+  "`:rows`, `:cols` (names) and `:body` of a query response, or `:error`, `:status` and `:body`."
+  [{:keys [status body]}]
+  (if (and (= 202 status) (= "completed" (:status body)))
+    {:rows (get-in body [:data :rows])
+     :cols (mapv :name (get-in body [:data :cols]))
+     :body body}
+    {:error  (u/truncate (str status " " (or (:error body) (:message body) body)) 300)
+     :status status
+     :body   body}))
+
+(defn execute-as
+  "Run `outer` through the processor as `user`, in-process, as the dataset endpoint would, and return the result in
+  the shape [[query-response->result]] gives an API response: a completed result becomes status 202 with the wire
+  body; a failed userland result gets the status the API would send; a throw before the pipeline becomes a 500 (or the
+  exception's own status) carrying its message, as the API catches it."
+  [user outer]
+  (mt/with-test-user user
+    (query-response->result
+     (try
+       (let [body (wire (qp/process-query (endpoint-query outer)))]
+         (if (= "completed" (:status body))
+           {:status 202 :body body}
+           {:status (status-code body) :body body}))
+       (catch Throwable e
+         {:status (or (:status-code (ex-data e)) 500) :body {:error (ex-message e)}})))))
+
+(defn- preprocess-as
+  "The preprocessed MBQL 5 query, after alias resolution, as `user` sees it; or the error."
+  [user outer]
+  (mt/with-test-user user
+    (try
+      (qp.setup/with-qp-setup [outer outer]
+        {:value (-> outer qp.preprocess/preprocess add/add-alias-info)})
+      (catch Throwable e
+        {:error (error-info e)}))))
+
+(defn- compile-as
+  "The compiled native query as `user`; or the error."
+  [user outer]
+  (mt/with-test-user user
+    (try
+      {:value (qp.compile/compile outer)}
+      (catch Throwable e
+        {:error (error-info e)}))))
+
+(defn observe
+  "`outer` as `user` sees it at the three in-process observation points, each taken on its own (a later point is still
+  tried when an earlier one failed, since compiling can fail where preprocessing passed):
+
+    {:preprocessed {:value mbql5 | :error {..}}
+     :compiled     {:value {:query \"sql\" :params [..]} | :error {..}}
+     :executed     {:rows :cols :body | :error :status :body}}
+
+  Each point binds the user afresh, as a request would: the permission caches are per-binding snapshots."
+  [user outer]
+  {:preprocessed (preprocess-as user outer)
+   :compiled     (compile-as user outer)
+   :executed     (execute-as user outer)})
+
+;;; ------------------------------------------------ Cards and setup -----------------------------------------------
 
 (defn- do-with-cards!
   "Create the source cards the probes use in the current database and call `(f cards)` with card key -> id."
@@ -69,9 +200,7 @@
   (into #{}
         (mapcat (fn [table]
                   (dataset/canary-ids
-                   (get-in (mt/user-http-request :crowberto :post 202 "dataset"
-                                                 {:database (mt/id) :type "query" :query {:source-table (mt/id table)}})
-                           [:data :rows]))))
+                   (:rows (execute-as :crowberto {:database (mt/id) :type "query" :query {:source-table (mt/id table)}})))))
         [:shops :regions]))
 
 (defonce ^:private fully-synced-dbs (atom #{}))
@@ -86,7 +215,7 @@
       (swap! fully-synced-dbs conj (:id db)))))
 
 (defn- do-with-remaps!
-  "Call `thunk` with the config's display remappings in place for the current database: an FK remap
+  "Call `thunk` with the policy's display remappings in place for the current database: an FK remap
   `[table column target-table target-column]`, or a value remap `[table column {value label}]`."
   [remaps thunk]
   (tu/do-with-column-remappings!
@@ -95,10 +224,9 @@
    thunk))
 
 (defn do-with-policy!
-  "Load the base dataset and the config's restricted variant, create the cards in both, set up the sandbox on a temp
-  copy of the base database as `:rasta`, and call `(f ctx)` inside it. `ctx` has `:ids` for the base copy,
-  `:restricted-ids` for the restricted database, `:allowed` canaries, and the config's fields. `base-dataset` (default
-  the corpus) is the dataset the sandboxed user queries."
+  "Load the base dataset and the policy's restricted variant, create the cards in both, set up the sandbox on a temp
+  copy of the base database as `:rasta`, and call `(f ctx)` inside it; see the namespace docstring for `ctx`.
+  `base-dataset` (default [[dataset/shops]]) is the dataset the sandboxed user queries."
   ([policy-k f]
    (do-with-policy! policy-k #'dataset/shops f))
   ([policy-k base-dataset f]
@@ -123,10 +251,13 @@
                                            ;; as the driver names the columns in a result
                                            :hidden-cols         (into #{} (map (comp mt/format-name name)) hidden-cols)
                                            :accepted-rejections (or accepted-rejections [])
-                                           :sandboxed      (policies/sandboxed-tables policy-k)
-                                           :ids            (dataset/ids-map cards)
-                                           :restricted-ids restricted-ids
-                                           :allowed        allowed})))))))))]
+                                           :sandboxed           (policies/sandboxed-tables policy-k)
+                                           :ids                 (dataset/ids-map cards)
+                                           :restricted-ids      restricted-ids
+                                           :restricted-dataset  restricted
+                                           :remaps              remaps
+                                           :persist?            (boolean persist?)
+                                           :allowed             allowed})))))))))]
      (mt/dataset (var-get base-dataset)
        (dataset/ensure-fk-metadata!)
        (fully-synced!)
@@ -144,43 +275,37 @@
 
 (defn do-without-schema-checks!
   "Call `thunk` with `mu/defn` input and output checks off. Production does not compile those checks in, so a query
-  that fails closed on a schema check in a test can fail open in production."
+  that fails closed on a schema check in a test can fail open in production. A binding: the mock HTTP client runs
+  handlers in a future, which conveys it."
   [thunk]
-  ;; the root value, not a binding: API requests run on other threads
-  (alter-var-root #'mu.fn/*enforce* (constantly false))
-  (try
-    (thunk)
-    (finally
-      (alter-var-root #'mu.fn/*enforce* (constantly true)))))
+  (mb.hawk.parallel/assert-test-is-not-parallel "do-without-schema-checks!")
+  (binding [mu.fn/*enforce* false]
+    (thunk)))
 
 (def modes
-  "Mode name -> fn of a thunk that runs it in that mode."
+  "Mode name -> fn of a thunk that runs it in that mode: `:test` with schema checks on, `:production` without."
   (array-map
-   :test-mode       (fn [thunk] (thunk))
-   :production-mode do-without-schema-checks!))
+   :test       (fn [thunk] (thunk))
+   :production do-without-schema-checks!))
 
-(defn- query-response->result
-  "`:rows`, `:cols` (names) and `:body` of a query response, or `:error`, `:status` and `:body`."
-  [{:keys [status body]}]
-  (if (and (= 202 status) (= "completed" (:status body)))
-    {:rows (get-in body [:data :rows])
-     :cols (mapv :name (get-in body [:data :cols]))
-     :body body}
-    {:error  (u/truncate (str status " " (or (:error body) (:message body) body)) 300)
-     :status status
-     :body   body}))
+(defn in-mode
+  "Run `thunk` in `mode`, a key of [[modes]]."
+  [mode thunk]
+  ((get modes mode) thunk))
 
-(defn- run-as
+;;; ------------------------------------------------- HTTP transports ----------------------------------------------
+
+(defn run-as
   "Run a probe (its `:outer` request body, or its legacy inner query and parameters) through the dataset API as `user`
   against `ids`' database. Returns `:rows`, `:cols` (names) and `:body`, or `:error` and `:body`."
   [user ids probe]
   (query-response->result
    (mt/user-http-request-full-response user :post "dataset" (or (:outer probe) (formats/legacy-outer ids probe)))))
 
-(defn- run-saved-as
+(defn run-saved-as
   "Like [[run-as]], but save the probe's query as a card declaring one parameter per probe parameter, put it on a
-  dashboard with each dashboard parameter mapped to the same target, and run it through `via`: `:card` sends the parameters to the
-  card query API, `:dashcard` sends their values to the dashcard query API."
+  dashboard with each dashboard parameter mapped to the same target, and run it through `via`: `:card` sends the
+  parameters to the card query API, `:dashcard` sends their values to the dashcard query API."
   [user via ids {:keys [parameters] :as probe}]
   (let [param-id    (fn [i] (str "p" i))
         card-params (map-indexed (fn [i {:keys [type target]}]
@@ -206,40 +331,101 @@
                     {:parameters (map-indexed (fn [i {:keys [type value]}] {:id (param-id i) :type type :value value})
                                               parameters)}))))))
 
+(defn- run-http
+  "The sandboxed user's result through the HTTP entry point `via`, or nil when the transport is in-process only."
+  [{:keys [ids transport]} probe]
+  (when-let [[_ via] (when (vector? transport) transport)]
+    (if (= via :dataset)
+      (run-as :rasta ids probe)
+      (run-saved-as :rasta via ids probe))))
+
+;;; ------------------------------------------------ Expected results ----------------------------------------------
+
+(defonce ^:private expected-cache
+  ;; see [[expected-results]]
+  (atom {}))
+
+(defn clear-expected-cache!
+  "Forget every cached admin result; for the REPL."
+  []
+  (reset! expected-cache {}))
+
+(defn- symbolic
+  "`outer`, built against `ids`, with every table, field and card id replaced by a made-up stable one, so that two
+  copies of the same database render the same query the same way."
+  [ids outer]
+  (generated/translate-query outer ids generated/fake-ids))
+
+(defn- cached-admin-run
+  "An admin's result for `outer` against the database `ids` describes, cached per driver, dataset, remaps,
+  persistence, schema-check mode and symbolic query. Datasets are immutable per JVM and the key holds no id, so the
+  cache never needs invalidating. `cacheable?` false runs it every time."
+  [{:keys [remaps persist?]} dataset-var ids outer cacheable?]
+  (let [key [driver/*driver* (:name (meta dataset-var)) remaps persist? mu.fn/*enforce* (symbolic ids outer)]]
+    (if-not cacheable?
+      (execute-as :crowberto outer)
+      (or (get @expected-cache key)
+          (let [r (execute-as :crowberto outer)]
+            (swap! expected-cache assoc key r)
+            r)))))
+
+(defn expected-results
+  "The admin's results a probe is judged against: `:restricted`, on the policy's restricted variant, and `:base`, on
+  the unrestricted dataset. Both cached across policies; see [[cached-admin-run]]."
+  [{:keys [ids restricted-ids restricted-dataset] :as ctx} probe-fn probe cacheable?]
+  {:restricted (cached-admin-run ctx restricted-dataset restricted-ids
+                                 (formats/legacy-outer restricted-ids (probe-fn restricted-ids)) cacheable?)
+   :base       (cached-admin-run ctx #'dataset/shops ids
+                                 (or (:outer probe) (formats/legacy-outer ids probe)) cacheable?)})
+
+;;; --------------------------------------------------- Running ----------------------------------------------------
+
+(defn- trim [result]
+  (-> result (dissoc :body) (update :rows #(some->> % (take 5)))))
+
 (defn- run-probe*
   "[[run-probe]] with the rendered `probe`."
-  [{:keys [ids restricted-ids expect via] :as ctx} probe-name probe-fn probe]
-  (let [user        (if via (run-saved-as :rasta via ids probe) (run-as :rasta ids probe))
-        admin-base  (run-as :crowberto ids probe)
-        expected    (if (= expect :unrestricted)
-                      admin-base
-                      (run-as :crowberto restricted-ids (probe-fn restricted-ids)))
-        verdicts    {:differential  (invariants/differential ctx user expected admin-base)
-                     :canary        (invariants/canary ctx user expected)
-                     :structural    (invariants/structural ctx probe)
-                     :hygiene       (invariants/hygiene ctx user)
-                     :metadata-diff (invariants/metadata user expected)}]
+  [{:keys [ids expect transport cacheable?] :or {transport :in-process cacheable? true} :as ctx} probe-name probe-fn probe]
+  (let [outer        (or (:outer probe) (formats/legacy-outer ids probe))
+        observations (observe :rasta outer)
+        http         (run-http ctx probe)
+        user         (:executed observations)
+        {:keys [restricted base]} (expected-results ctx probe-fn probe cacheable?)
+        expected     (if (= expect :unrestricted) base restricted)
+        sql          (get-in observations [:compiled :value :query])
+        verdicts     {:differential     (invariants/differential ctx user expected base)
+                      :canary           (invariants/canary ctx user expected)
+                      :structural       (invariants/structural ctx (:preprocessed observations))
+                      :sql              (invariants/sql ctx (:preprocessed observations) sql)
+                      ;; the API's response when there is one; the processor's result is a weaker stand-in
+                      :hygiene          (invariants/hygiene ctx (or http user))
+                      :metadata-diff    (invariants/metadata user expected)
+                      :http-equivalence (invariants/http-equivalence http user)}]
     (merge verdicts
-           {:policy   (:policy ctx)
-            :probe    probe-name
-            :outcome  (invariants/outcome verdicts)
-            :user     (-> user (dissoc :body) (update :rows #(some->> % (take 5))))
-            :expected (-> expected (dissoc :body) (update :rows #(some->> % (take 5))))
-            :format   (:format ctx :legacy)
-            :via      (:via ctx :dataset)
-            :query    probe})))
+           {:policy    (:policy ctx)
+            :probe     probe-name
+            :outcome   (invariants/outcome verdicts)
+            :user      (trim user)
+            :expected  (trim expected)
+            :http      (some-> http trim)
+            :compiled  (or sql (get-in observations [:compiled :error :message]))
+            :format    (:format ctx :legacy)
+            :transport transport
+            :query     probe})))
 
 (defn run-probe
   "Run `probe-fn`, a fn of an ids map returning `{:query inner-query, :parameters ...}`, under `ctx`, sending the
-  sandboxed user's query in `(:format ctx)` (default `:legacy`). Returns a result map with every detector's verdict
-  and `:outcome`; `:unrenderable` when the probe has no form in that format."
+  sandboxed user's query in `(:format ctx)` (default `:legacy`) and through `(:transport ctx)` (default
+  `:in-process`; `[:http :dataset]`, `[:http :card]` or `[:http :dashcard]` add that entry point). Returns a result
+  map with every invariant's verdict and `:outcome`; `:unrenderable` when the probe has no form in that format."
   [{:keys [ids] fmt :format :or {fmt :legacy} :as ctx} probe-name probe-fn]
   (if-let [probe (formats/render fmt ids (probe-fn ids))]
     (run-probe* ctx probe-name probe-fn probe)
     {:policy (:policy ctx) :probe probe-name :format fmt :outcome :unrenderable}))
 
 (defn run-hand-written!
-  "Run the hand-written probes (or those named by `probe-names`) under one config, or every config. Returns result maps."
+  "Run the hand-written probes (or those named by `probe-names`) under one policy, or every policy. Returns result
+  maps."
   ([]
    (mapcat run-hand-written! (keys policies/all)))
   ([policy-k]
@@ -262,22 +448,23 @@
       (doall (for [fmt fmts, probe-name probe-names]
                (run-probe (assoc ctx :format fmt) probe-name (hand-written/all probe-name))))))))
 
-(def ^:private parameter-paths
-  "How the sandboxed user's parameters reach the QP: ad hoc through the dataset API, or applied to a saved card by the
-  dashcard query API. The card query API is left out: it accepts only parameters that match a template tag."
-  [nil :dashcard])
+(def parameter-transports
+  "How the sandboxed user's parameters reach the processor: in-process as the dataset API would hand them over, and
+  applied to a saved card by the dashcard query API. The card query API is left out: it accepts only parameters
+  that match a template tag."
+  [:in-process [:http :dashcard]])
 
 (defn run-parameters!
-  "Run the parameter probes (or those named by `probe-names`) under `policy-k`, once per parameter path. Returns
-  result maps."
+  "Run the parameter probes (or those named by `probe-names`) under `policy-k`, once per parameter transport.
+  Returns result maps."
   ([policy-k]
    (run-parameters! policy-k (keys hand-written/parameters)))
   ([policy-k probe-names]
    (do-with-policy!
     policy-k
     (fn [ctx]
-      (doall (for [via parameter-paths, probe-name probe-names]
-               (run-probe (assoc ctx :via via) probe-name (hand-written/parameters probe-name))))))))
+      (doall (for [transport parameter-transports, probe-name probe-names]
+               (run-probe (assoc ctx :transport transport) probe-name (hand-written/parameters probe-name))))))))
 
 (defn run-authored!
   "Run the authored-content probes under `policy-k`: the sandboxed user saves the content in the sandboxed database and
@@ -290,13 +477,14 @@
               (let [created          (author ids :rasta)
                     expected-created (author restricted-ids :crowberto)]
                 (try
-                  (run-probe ctx probe-name #(probe % (if (= % ids) created expected-created)))
+                  ;; the content's ids change every run, so its expected results cannot be cached
+                  (run-probe (assoc ctx :cacheable? false) probe-name #(probe % (if (= % ids) created expected-created)))
                   (finally
                     (hand-written/delete-authored! created)
                     (hand-written/delete-authored! expected-created)))))))))
 
 (defn run-grid!
-  "Run the grid probes named by `probe-names` (default: all) under `policy-k`, or under every config."
+  "Run the grid probes named by `probe-names` (default: all) under `policy-k`, or under every policy."
   ([] (mapcat #(run-grid! % (grid/probe-names)) (keys policies/all)))
   ([policy-k probe-names]
    (do-with-policy!
@@ -345,32 +533,34 @@
 (defn run-generated!
   "Run `n` generated cases under `policy-k` with test.check seed `seed`. Returns the quick-check result and every
   case result, including those run while shrinking."
-  [policy-k n seed]
-  (do-with-policy!
-   policy-k
-   (fn [ctx]
-     (let [outcomes (atom [])
-           property (prop/for-all [c generated/gen-case]
-                      (let [r (run-case! ctx c)]
-                        (swap! outcomes conj r)
-                        (not (invariants/failing-outcomes (:outcome r)))))
-           ;; the property needs the expensive harness around it, so it cannot be a top-level `defspec`
-           result   #_{:clj-kondo/ignore [:discouraged-var]} (tc/quick-check n property :seed seed)]
-       {:result result :outcomes @outcomes}))))
+  ([policy-k n seed]
+   (run-generated! policy-k n seed :in-process))
+  ([policy-k n seed transport]
+   (do-with-policy!
+    policy-k
+    (fn [ctx]
+      (let [outcomes (atom [])
+            property (prop/for-all [c generated/gen-case]
+                       (let [r (run-case! (assoc ctx :transport transport) c)]
+                         (swap! outcomes conj r)
+                         (not (invariants/failing-outcomes (:outcome r)))))
+            ;; the property needs the expensive harness around it, so it cannot be a top-level `defspec`
+            result   #_{:clj-kondo/ignore [:discouraged-var]} (tc/quick-check n property :seed seed)]
+        {:result result :outcomes @outcomes})))))
 
 (defn- sandboxed-responses!
-  "Probe name -> the sandboxed user's masked response to each canonical and parameter probe under `policy-k`, on
-  `dataset`."
+  "Probe name -> the sandboxed user's masked executed result for each hand-written and parameter probe under
+  `policy-k`, on `dataset`."
   [policy-k dataset]
   (do-with-policy!
    policy-k dataset
    (fn [{:keys [ids]}]
      (into {} (for [[probe-name probe-fn] (merge hand-written/all hand-written/parameters)]
-                [probe-name (invariants/mask-response (:body (run-as :rasta ids (probe-fn ids))))])))))
+                [probe-name (invariants/mask-response (:body (execute-as :rasta (formats/legacy-outer ids (probe-fn ids)))))])))))
 
 (defn run-noninterference!
   "For `policy-k`, each varied dataset paired with its restricted dataset, and each probe, the sandboxed
-  user's masked responses on the base and the varied dataset, as `{:config :varied :probe :base :varied-response}`."
+  user's masked results on the base and the varied dataset, as `{:policy :varied :probe :base :varied-response}`."
   [policy-k]
   (let [base (sandboxed-responses! policy-k #'dataset/shops)]
     (doall (for [varied                (policies/varied-datasets (:restricted (policies/policy policy-k)))
@@ -380,10 +570,10 @@
               :base response :varied-response (responses probe-name)}))))
 
 (defn summarize
-  "Config -> outcome -> count, for reading at the REPL."
+  "Policy -> outcome -> count, for reading at the REPL."
   [results]
   (into (sorted-map)
-        (map (fn [[config rs]] [config (frequencies (map :outcome rs))]))
+        (map (fn [[policy rs]] [policy (frequencies (map :outcome rs))]))
         (group-by :policy results)))
 
 (defn repro-report
@@ -396,9 +586,10 @@
           exception (some-> (or (:result shrunk) (:result result)) ex-message)]
       (str/join "\n"
                 ["Smallest failing case:" (pr-str smallest)
-                 "Outcome:" (pr-str (select-keys r [:outcome :differential :canary :structural :hygiene :error]))
+                 "Outcome:" (pr-str (select-keys r [:outcome :differential :canary :structural :sql :hygiene :http-equivalence :error]))
                  "Exception:" (pr-str exception)
                  "Legacy query (base copy ids):" (json/encode (:query r))
+                 "Compiled:" (pr-str (:compiled r))
                  "Sandboxed user got:" (pr-str (:user r))
                  "Expected:" (pr-str (:expected r))]))))
 

@@ -1,7 +1,26 @@
 (ns ^:mb/driver-tests metabase-enterprise.sandbox.enforcement-test.qp-test
-  "Sandbox enforcement in the query processor: every hand-written, parameter, authored, grid and generated probe, under
-  every policy, with schema checks on and off, judged by every invariant. Tests that expose filed findings stay red on
-  purpose until the fixes land."
+  "Sandbox enforcement in the query processor, the theorem: for every input state handed to the processor as the
+  sandboxed user, every invariant holds. An input state is a policy (with its login attributes), a query from one of
+  the three sources, a query format and a transport; the processor runs in-process and, with the default transport,
+  the same state also goes through `POST /api/dataset`, whose response must equal the in-process result.
+
+  Coverage, as the tests below run it:
+
+  | probes                      | policies                      | modes        | formats | transports            | CI    |
+  |-----------------------------|-------------------------------|--------------|---------|-----------------------|-------|
+  | hand-written (all)          | every policy                  | production   | legacy  | in-process + dataset  | yes   |
+  | hand-written (all)          | table-tier, card-hide-price   | test         | legacy  | in-process + dataset  | yes   |
+  | parameters                  | every policy                  | production   | legacy  | + dataset, + dashcard | yes   |
+  | hand-written (all)          | every attribute variant       | production   | legacy  | in-process + dataset  | yes   |
+  | authored                    | every policy                  | production   | legacy  | in-process            | yes   |
+  | grid, CI slice              | table-tier, card-hide-price   | production   | legacy  | in-process + dataset  | yes   |
+  | generated, 40 per policy    | table-tier, card-hide-price, two-tables | production | any | in-process + dataset | yes |
+  | hand-written + grid slice   | table-tier, card-hide-price   | production   | all 3   | in-process            | yes   |
+  | hand-written + parameters   | policies with a varied dataset| production   | legacy  | in-process            | yes   |
+
+  `MB_SANDBOX_FULL=true` runs both modes on every row. The drivers are [[harness/drivers]]; the grid beyond its CI
+  slice and longer generated runs are REPL work (`MB_SANDBOX_GEN_CASES`, `MB_SANDBOX_GEN_SEED`). Tests that expose
+  filed findings stay red on purpose until the fixes land."
   (:require
    [clojure.data :as data]
    [clojure.test :refer :all]
@@ -18,77 +37,136 @@
 
 (set! *warn-on-reflection* true)
 
+;;; ------------------------------------------------- The test loop ------------------------------------------------
+
+(defn- run-states!
+  "Lazy seq of `[mode result]` for every state in the scope: each policy of `policies` (skipping those the driver
+  cannot run), in each of `modes`, with every probe of `probes` (name -> fn) in every format and through every
+  transport. `run`, when given, replaces the probe loop with `(run ctx)` for runners with their own loop."
+  [{:keys [modes policies probes formats transports run]
+    :or   {formats [:legacy] transports [[:http :dataset]]}}]
+  (for [mode     modes
+        policy-k policies
+        :when    (mt/dataset dataset/shops (policies/supported? policy-k))
+        result   (harness/in-mode
+                  mode
+                  #(harness/do-with-policy!
+                    policy-k
+                    (or run
+                        (fn [ctx]
+                          (doall (for [[probe-name probe-fn] probes, fmt formats, transport transports]
+                                   (harness/run-probe (assoc ctx :format fmt :transport transport) probe-name probe-fn)))))))]
+    [mode result]))
+
+(defn- holds?
+  "Assert one result's outcome is in order: not failing, and for a hand-written probe not rejected unless invalid on
+  purpose (`rejected-ok?` widens that to every probe, for the grid's malformed shapes)."
+  [[mode {:keys [probe outcome policy transport] fmt :format :as result}] & {:keys [rejected-ok?]}]
+  (testing (format "%s under %s, %s via %s, %s mode" (pr-str probe) policy fmt (pr-str transport) mode)
+    (is (not (if rejected-ok?
+               (invariants/failing-outcomes outcome)
+               (invariants/unexpected-outcome? probe outcome)))
+        (pr-str (select-keys result [:outcome :differential :canary :structural :sql :hygiene :metadata-diff
+                                     :http-equivalence :user :expected :http :compiled :query])))))
+
+(defn- grid-slice
+  "The CI slice of the grid as probe name -> fn."
+  []
+  (into {} (for [[edge-k shape-k position-k target :as probe-name] (grid/probe-names grid/ci-selection)
+                 :let [f (grid/probe-fn edge-k shape-k position-k target)]
+                 :when f]
+             [probe-name f])))
+
 ;;; --------------------------------------------------- Tests ------------------------------------------------------
 
-(deftest ^:synchronized canonical-probes-are-enforced-under-every-sandbox-test
+(deftest ^:synchronized hand-written-probes-hold-test
   (mt/test-drivers (harness/drivers)
-    (doseq [[mode run-in-mode] harness/modes
-            policy-k           (keys policies/all)]
-      (when (mt/dataset dataset/shops (policies/supported? policy-k))
-        (doseq [{:keys [probe outcome] :as result} (run-in-mode #(harness/run-hand-written! policy-k))]
-          (testing (format "%s under %s in %s" probe policy-k mode)
-            (is (not (invariants/unexpected-outcome? probe outcome))
-                (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
-                                             :user :expected :query])))))))))
+    (doseq [state (run-states! (assoc (policies/scope :ci) :probes hand-written/all))]
+      (holds? state))))
 
-(deftest ^:synchronized parameters-that-add-joins-are-sandboxed-test
-  (testing "A parameter whose target reaches SHOPS through an FK is filtered by the sandbox like the rest of the query"
+(deftest ^:synchronized representative-policies-hold-with-schema-checks-test
+  (testing "With schema checks on, as in a dev or test JVM, the same states hold under one row and one column sandbox"
     (mt/test-drivers (harness/drivers)
-      (doseq [[mode run-in-mode] harness/modes
-              policy-k           (keys policies/all)
-              :when              (mt/dataset dataset/shops (policies/supported? policy-k))
-              {:keys [probe outcome] :as result} (run-in-mode #(harness/run-parameters! policy-k))]
-        (testing (format "%s via %s under %s in %s" probe (:via result) policy-k mode)
-          (is (not (invariants/unexpected-outcome? probe outcome))
-              (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
-                                           :user :expected :query]))))))))
+      (doseq [state (run-states! (assoc (policies/scope :test-mode) :probes hand-written/all))]
+        (holds? state)))))
 
-(deftest ^:synchronized authored-content-is-sandboxed-test
+(deftest ^:synchronized parameters-hold-test
+  (testing "A parameter whose target reaches SHOPS through an FK is filtered by the sandbox, in-process, through the dataset API and through a dashcard"
+    (mt/test-drivers (harness/drivers)
+      (doseq [state (run-states! (assoc (policies/scope :ci)
+                                        :probes     hand-written/parameters
+                                        :transports [[:http :dataset] [:http :dashcard]]))]
+        (holds? state)))))
+
+(deftest ^:synchronized attribute-variants-hold-test
+  (testing "Every login attribute value either filters the sandboxed table or fails the query"
+    (mt/test-drivers (harness/drivers)
+      (doseq [state (run-states! (assoc (policies/scope :attributes)
+                                        ;; the bogus-join-alias probes are covered by the hand-written test
+                                        :probes (apply dissoc hand-written/all (keys hand-written/bogus-join-aliases))))]
+        (holds? state)))))
+
+(deftest ^:synchronized authored-content-holds-test
   (testing "Models with metadata the sandboxed user wrote, their own metrics, and admin segments are sandboxed"
     (mt/test-drivers (harness/drivers)
-      (doseq [[mode run-in-mode] harness/modes
-              policy-k           (keys policies/all)
-              :when              (mt/dataset dataset/shops (policies/supported? policy-k))
-              {:keys [probe outcome] :as result} (run-in-mode #(harness/run-authored! policy-k))]
-        (testing (format "%s under %s in %s" probe policy-k mode)
-          (is (not (invariants/unexpected-outcome? probe outcome))
-              (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
-                                           :user :expected :query]))))))))
+      (doseq [[mode policy-k] (for [mode (:modes (policies/scope :ci)), policy-k (:policies (policies/scope :ci))] [mode policy-k])
+              :when (mt/dataset dataset/shops (policies/supported? policy-k))
+              result (harness/in-mode mode #(harness/run-authored! policy-k))]
+        (holds? [mode result])))))
 
-(deftest ^:synchronized attribute-values-are-enforced-or-rejected-test
-  (testing "Every login attribute value either filters the sandboxed table or fails the query, with and without schema checks"
+(deftest ^:synchronized grid-slice-holds-test
+  (testing "Every ref shape in the positions that take different code paths cannot escape the sandbox"
     (mt/test-drivers (harness/drivers)
-      (doseq [[mode run-in-mode] harness/modes
-              policy-k           (keys policies/attribute-variants)
-              :when              (mt/dataset dataset/shops (policies/supported? policy-k))
-              ;; the bogus-join-alias probes are covered by the canonical test
-              {:keys [probe outcome] :as result} (run-in-mode
-                                                  #(harness/run-hand-written! policy-k (remove #{:model-bogus-join-alias :card-bogus-join-alias}
-                                                                                               (keys hand-written/all))))]
-        (testing (format "%s under %s in %s" probe policy-k mode)
-          (is (not (invariants/unexpected-outcome? probe outcome))
-              (pr-str (select-keys result [:outcome :differential :canary :user :expected]))))))))
+      (doseq [state (run-states! (assoc (policies/scope :test-mode) :modes (:modes (policies/scope :ci)) :probes (grid-slice)))]
+        ;; the grid's shapes are malformed on purpose, so a rejection of both users' queries is in order
+        (holds? state :rejected-ok? true)))))
 
-(deftest ^:synchronized saved-sql-results-are-not-sandboxed-as-documented-test
-  (testing "A sandboxed user who can see a saved SQL question gets its unsandboxed results, as the docs say"
-    (mt/test-drivers (harness/drivers)
-      (harness/do-with-policy!
-       :table-tier
-       (fn [ctx]
-         (doseq [[probe-name probe-fn] hand-written/saved-sql
-                 :let [{:keys [differential]} (harness/run-probe (assoc ctx :expect :unrestricted) probe-name probe-fn)]]
-           (testing probe-name
-             (is (= :consistent differential)))))))))
+(deftest ^:synchronized generated-queries-hold-test
+  (mt/test-drivers (harness/drivers)
+    (doseq [mode     (:modes (policies/scope :ci))
+            policy-k [:table-tier :card-hide-price :two-tables]]
+      (testing (format "%s in %s mode" policy-k mode)
+        (let [{:keys [result outcomes]} (harness/in-mode mode #(harness/run-generated! policy-k (generated/cases-per-policy)
+                                                                                       (generated/seed) [:http :dataset]))]
+          (is (true? (:pass? result)) (harness/repro-report result outcomes))
+          (is (invariants/meaningful? outcomes) (pr-str (frequencies (map :outcome outcomes)))))))))
 
-(deftest ^:synchronized sandboxed-user-responses-are-hygienic-test
-  (testing "Nothing in a sandboxed user's response reveals the sandbox or the raw table: no fingerprints, no native or preprocessed forms, no SQL text"
+(deftest ^:synchronized query-formats-hold-alike-test
+  (testing "A probe gets the same outcome sent as legacy MBQL, as MBQL 5, and as MBQL 5 with legacy-ordered refs"
     (mt/test-drivers (harness/drivers)
-      (doseq [{:keys [probe config hygiene]} (mapcat harness/run-hand-written! [:table-tier :card-hide-price])]
-        (testing (format "%s under %s" probe config)
+      (doseq [[probe results] (->> (run-states! (assoc (policies/scope :test-mode)
+                                                       :modes      (:modes (policies/scope :ci))
+                                                       :probes     (merge hand-written/all (grid-slice))
+                                                       :formats    (keys formats/query-formats)
+                                                       :transports [:in-process]))
+                                   (map second)
+                                   (group-by (juxt :policy :probe)))]
+        (testing (pr-str probe)
+          (is (= 1 (count (into #{} (map :outcome) results)))
+              (pr-str (map (juxt :format :outcome) results))))))))
+
+(deftest ^:synchronized hidden-data-does-not-change-sandboxed-results-test
+  (testing "Changing only the rows or columns a sandbox hides leaves every sandboxed result the same"
+    (mt/test-drivers (harness/drivers)
+      (doseq [mode               (:modes (policies/scope :ci))
+              [policy-k policy]  policies/all
+              :when              (and (policies/varied-datasets (:restricted policy))
+                                      (not (#{:error :unrestricted} (:expect policy)))
+                                      (mt/dataset dataset/shops (policies/supported? policy-k)))
+              {:keys [probe varied base varied-response]} (harness/in-mode mode #(harness/run-noninterference! policy-k))]
+        (testing (format "%s under %s on %s in %s mode" probe policy-k (:name (meta varied)) mode)
+          (is (= base varied-response)
+              (u/truncate (pr-str (take 2 (data/diff base varied-response))) 2000)))))))
+
+(deftest ^:synchronized responses-are-hygienic-test
+  (testing "Nothing in a sandboxed user's API response reveals the sandbox or the raw table: no fingerprints, no native or preprocessed forms, no SQL text"
+    (mt/test-drivers (harness/drivers)
+      (doseq [[_ {:keys [probe policy hygiene]}] (run-states! (assoc (policies/scope :test-mode) :modes [:production] :probes hand-written/all))]
+        (testing (format "%s under %s" probe policy)
           (is (= :clean (:verdict hygiene)) (pr-str hygiene)))))))
 
 (deftest ^:synchronized forged-internal-stage-keys-do-not-skip-sandbox-test
-  (testing "Client-supplied internal stage keys, in legacy and MBQL 5 form, do not make the rewrite skip a stage"
+  (testing "Client-supplied internal stage keys, in legacy and MBQL 5 form, do not make the rewrite skip a stage, in-process or through the API"
     (mt/test-drivers (harness/drivers)
       (harness/do-with-policy!
        :table-tier
@@ -104,56 +182,21 @@
                                         :stages   [(merge {:lib/type     "mbql.stage/mbql"
                                                            :source-table (dataset/tid ids :shops)
                                                            :fields       [["field" {:lib/uuid (str (random-uuid))} (dataset/fid ids :shops :secret)]]}
-                                                          extra)]}}]
-           (testing (format "%s as %s" k fmt)
-             (let [{:keys [body]} (mt/user-http-request-full-response :rasta :post "dataset" query)]
-               (is (= "completed" (:status body)) (:error body))
-               (is (empty? (remove allowed (dataset/canary-ids body)))
-                   "the sandboxed user saw a hidden row's canary")))))))))
+                                                          extra)]}}
+                 [how result] {:in-process (harness/execute-as :rasta query)
+                               :http       (harness/run-as :rasta ids {:outer query})}]
+           (testing (format "%s as %s, %s" k fmt how)
+             (is (nil? (:error result)) (:error result))
+             (is (empty? (remove allowed (dataset/canary-ids (:body result))))
+                 "the sandboxed user saw a hidden row's canary"))))))))
 
-(deftest ^:synchronized field-ref-grid-slice-cannot-escape-sandbox-test
-  (mt/test-drivers (harness/drivers)
-    (doseq [[mode run-in-mode]                  harness/modes
-            policy-k                            [:table-tier :card-hide-price]
-            {:keys [probe outcome] :as result} (run-in-mode #(harness/run-grid! policy-k (grid/probe-names grid/ci-selection)))]
-      (testing (format "%s under %s in %s" (pr-str probe) policy-k mode)
-        ;; the grid's shapes are malformed on purpose, so a rejection of both users' queries is in order
-        (is (not (invariants/failing-outcomes outcome))
-            (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :user :query])))))))
-
-(deftest ^:synchronized query-formats-are-sandboxed-alike-test
-  (testing "A probe gets the same outcome sent as legacy MBQL, as MBQL 5, and as MBQL 5 with legacy-ordered refs"
+(deftest ^:synchronized saved-sql-results-are-not-sandboxed-as-documented-test
+  (testing "A sandboxed user who can see a saved SQL question gets its unsandboxed results, as the docs say"
     (mt/test-drivers (harness/drivers)
-      (doseq [[mode run-in-mode] harness/modes
-              policy-k           [:table-tier :card-hide-price]
-              [probe results]    (group-by :probe
-                                           (run-in-mode
-                                            #(concat (harness/run-hand-written-formats! policy-k (keys formats/query-formats))
-                                                     (when (= policy-k :table-tier)
-                                                       (harness/run-grid-formats! policy-k (keys formats/query-formats)
-                                                                                  (grid/probe-names grid/ci-selection))))))]
-        (testing (format "%s under %s in %s" (pr-str probe) policy-k mode)
-          (is (= 1 (count (into #{} (map :outcome) results)))
-              (pr-str (map (juxt :format :outcome) results))))))))
-
-(deftest ^:synchronized hidden-data-does-not-change-sandboxed-responses-test
-  (testing "Changing only the rows or columns a sandbox hides leaves every sandboxed response the same"
-    (mt/test-drivers (harness/drivers)
-      (doseq [[mode run-in-mode] harness/modes
-              [policy-k config]  policies/all
-              :when              (and (policies/varied-datasets (:restricted config))
-                                      (not (#{:error :unrestricted} (:expect config)))
-                                      (mt/dataset dataset/shops (policies/supported? policy-k)))
-              {:keys [probe varied base varied-response]} (run-in-mode #(harness/run-noninterference! policy-k))]
-        (testing (format "%s under %s on %s in %s" probe policy-k (:name (meta varied)) mode)
-          (is (= base varied-response)
-              (u/truncate (pr-str (take 2 (data/diff base varied-response))) 2000)))))))
-
-(deftest ^:synchronized generated-queries-cannot-escape-sandbox-test
-  (mt/test-drivers (harness/drivers)
-    (doseq [[mode run-in-mode] harness/modes
-            policy-k           [:table-tier :card-hide-price :two-tables]]
-      (testing (format "%s in %s" policy-k mode)
-        (let [{:keys [result outcomes]} (run-in-mode #(harness/run-generated! policy-k (generated/cases-per-policy) (generated/seed)))]
-          (is (true? (:pass? result)) (harness/repro-report result outcomes))
-          (is (invariants/meaningful? outcomes) (pr-str (frequencies (map :outcome outcomes)))))))))
+      (harness/do-with-policy!
+       :table-tier
+       (fn [ctx]
+         (doseq [[probe-name probe-fn] hand-written/saved-sql
+                 :let [{:keys [differential]} (harness/run-probe (assoc ctx :expect :unrestricted) probe-name probe-fn)]]
+           (testing probe-name
+             (is (= :consistent differential)))))))))
