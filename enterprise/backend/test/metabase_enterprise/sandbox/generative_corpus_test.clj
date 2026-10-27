@@ -29,6 +29,8 @@
    [metabase-enterprise.sandbox.test-util :as met]
    [metabase.driver :as driver]
    [metabase.driver.util :as driver.u]
+   [metabase.legacy-mbql.normalize :as mbql.normalize]
+   [metabase.lib.convert :as lib.convert]
    [metabase.lib.core :as lib]
    [metabase.lib.metadata :as lib.metadata]
    [metabase.lib.test-util.generators :as lib.tu.gen]
@@ -412,12 +414,42 @@
 
 ;;; -------------------------------------------------- Detectors ---------------------------------------------------
 
+(defn- legacy-outer
+  "The legacy outer query for a probe's inner query and parameters against `ids`' database."
+  [ids {:keys [query parameters]}]
+  (cond-> {:database (:db ids) :type "query" :query query}
+    parameters (assoc :parameters parameters)))
+
+(defn- legacy->mbql5
+  "`outer`, a legacy query as a client would send it, converted to MBQL 5 the way a client using Lib would send it."
+  [outer]
+  (-> (json/decode+kw (json/encode outer))
+      mbql.normalize/normalize
+      lib.convert/->mbql5
+      (dissoc :lib.convert/converted?)))
+
+(defn- legacy-ref-order
+  "Every MBQL 5 `[:field opts id-or-name]` in `query` turned into the legacy order `[:field id-or-name opts]`: an MBQL 5
+  query carrying legacy-shaped refs, which no client produces."
+  [query]
+  (walk/postwalk (fn [x]
+                   (if (and (vector? x) (= 3 (count x)) (#{:field "field"} (first x)) (map? (second x)))
+                     [(first x) (nth x 2) (second x)]
+                     x))
+                 query))
+
+(def ^:private query-formats
+  "Format name -> fn turning a legacy outer query into the request body sent in that format."
+  (array-map
+   :legacy      identity
+   :mbql5       legacy->mbql5
+   :mbql5-mixed (comp legacy-ref-order legacy->mbql5)))
+
 (defn- run-as
-  "Run `inner-query` (with optional `parameters`) through the dataset API as `user` against `ids`' database.
-  Returns `:rows`, `:cols` (names) and `:body`, or `:error` and `:body`."
-  [user ids {:keys [query parameters]}]
-  (let [outer                 (cond-> {:database (:db ids) :type "query" :query query}
-                                parameters (assoc :parameters parameters))
+  "Run a probe (its `:outer` request body, or its legacy inner query and parameters) through the dataset API as `user`
+  against `ids`' database. Returns `:rows`, `:cols` (names) and `:body`, or `:error` and `:body`."
+  [user ids probe]
+  (let [outer                 (or (:outer probe) (legacy-outer ids probe))
         {:keys [status body]} (mt/user-http-request-full-response user :post "dataset" outer)]
     (if (and (= 202 status) (= "completed" (:status body)))
       {:rows (get-in body [:data :rows])
@@ -479,9 +511,8 @@
 (defn- raw-refs-to-tables
   "Field refs in the user's query, outside any sandbox stage, whose physical source after alias resolution is one of
   `table-ids`. Runs as the current user. `{:refs [...]}` or `{:error msg}` when the query does not preprocess."
-  [ids {:keys [query parameters]} table-ids]
-  (let [outer (json/decode+kw (json/encode (cond-> {:database (:db ids) :type "query" :query query}
-                                             parameters (assoc :parameters parameters))))
+  [ids probe table-ids]
+  (let [outer (json/decode+kw (json/encode (or (:outer probe) (legacy-outer ids probe))))
         acc   (volatile! [])]
     (try
       (qp.setup/with-qp-setup [outer outer]
@@ -600,12 +631,20 @@
 (def ^:private failing-outcomes
   #{:canary-leak :raw-ref :binning-bounds-leak :extra-rows :missing-rows :missing-error :over-restricted})
 
-(defn- run-probe
-  "Run `probe-fn`, a fn of an ids map returning `{:query inner-query, :parameters ...}`, under `ctx`. Returns a result
-  map with every detector's verdict and `:outcome`."
-  [{:keys [ids restricted-ids expect] :as ctx} probe-name probe-fn]
-  (let [probe       (probe-fn ids)
-        user        (run-as :rasta ids probe)
+(defn- render-probe
+  "`probe` with `:outer`, its request body in query format `fmt`, or nil when it cannot be rendered in that format."
+  [fmt ids probe]
+  (if (= fmt :legacy)
+    probe
+    (try
+      (assoc probe :outer ((query-formats fmt) (legacy-outer ids probe)))
+      (catch Throwable _
+        nil))))
+
+(defn- run-probe*
+  "[[run-probe]] with the rendered `probe`."
+  [{:keys [ids restricted-ids expect] :as ctx} probe-name probe-fn probe]
+  (let [user        (run-as :rasta ids probe)
         admin-base  (run-as :crowberto ids probe)
         expected    (if (= expect :unrestricted)
                       admin-base
@@ -621,7 +660,17 @@
             :outcome  (outcome verdicts)
             :user     (-> user (dissoc :body) (update :rows #(some->> % (take 5))))
             :expected (-> expected (dissoc :body) (update :rows #(some->> % (take 5))))
+            :format   (:format ctx :legacy)
             :query    probe})))
+
+(defn- run-probe
+  "Run `probe-fn`, a fn of an ids map returning `{:query inner-query, :parameters ...}`, under `ctx`, sending the
+  sandboxed user's query in `(:format ctx)` (default `:legacy`). Returns a result map with every detector's verdict
+  and `:outcome`; `:unrenderable` when the probe has no form in that format."
+  [{:keys [ids] fmt :format :or {fmt :legacy} :as ctx} probe-name probe-fn]
+  (if-let [probe (render-probe fmt ids (probe-fn ids))]
+    (run-probe* ctx probe-name probe-fn probe)
+    {:config (:config ctx) :probe probe-name :format fmt :outcome :unrenderable}))
 
 ;;; ------------------------------------------------ Smoke corpus --------------------------------------------------
 
@@ -790,6 +839,17 @@
       (doall (for [probe-name probe-names]
                (run-probe ctx probe-name (canonical-probes probe-name))))))))
 
+(defn run-canonical-formats!
+  "Run the canonical probes (or those named by `probe-names`) under `config-k`, once per query format in `fmts`."
+  ([config-k fmts]
+   (run-canonical-formats! config-k fmts (keys canonical-probes)))
+  ([config-k fmts probe-names]
+   (do-with-corpus-config!
+    config-k
+    (fn [ctx]
+      (doall (for [fmt fmts, probe-name probe-names]
+               (run-probe (assoc ctx :format fmt) probe-name (canonical-probes probe-name))))))))
+
 (defn summarize
   "Config -> outcome -> count, for reading at the REPL."
   [results]
@@ -947,6 +1007,18 @@
                    :let [probe-fn (grid-probe-fn edge-k shape-k position-k target)]
                    :when probe-fn]
                (run-probe ctx probe-name probe-fn)))))))
+
+(defn run-grid-formats!
+  "[[run-grid!]] once per query format in `fmts`."
+  [config-k fmts probe-names]
+  (do-with-corpus-config!
+   config-k
+   (fn [ctx]
+     (doall (for [fmt                                              fmts
+                  [edge-k shape-k position-k target :as probe-name] probe-names
+                  :let                                             [probe-fn (grid-probe-fn edge-k shape-k position-k target)]
+                  :when                                            probe-fn]
+              (run-probe (assoc ctx :format fmt) probe-name probe-fn))))))
 
 (defn grid-summary
   "Outcome -> count, and the probes per failing outcome."
@@ -1338,7 +1410,7 @@
 (defn- run-case!
   "Generate, mutate and run one case under `ctx`. A generator failure is recorded as `:generator-error`, not a
   sandbox failure."
-  [{:keys [ids restricted-ids] :as ctx} {:keys [source seed n-steps mutations] :as case}]
+  [{:keys [ids restricted-ids] :as ctx} {:keys [source seed n-steps mutations format] :or {format :legacy} :as case}]
   (let [generated (try (apply-mutations ids (generate-legacy-query ids case) mutations)
                        (catch Throwable e {::generator-error (ex-message e)}))]
     (if-let [error (::generator-error generated)]
@@ -1346,13 +1418,15 @@
       (let [q-base       (select-keys generated [:query :parameters])
             q-restricted (select-keys (translate-query generated ids restricted-ids) [:query :parameters])
             probe-fn     (fn [i] (if (= (:db i) (:db ids)) q-base q-restricted))]
-        (assoc (run-probe ctx [:generated source seed n-steps mutations] probe-fn) :case case)))))
+        (assoc (run-probe (assoc ctx :format format) [:generated source seed n-steps mutations format] probe-fn) :case case)))))
 
 (def ^:private gen-case
   (gen/hash-map :source    (gen/elements source-kinds)
                 :seed      (gen/no-shrink gen/large-integer)
                 :n-steps   (gen/choose 1 12)
-                :mutations (gen/vector (gen/tuple (gen/elements (keys mutation-kinds)) gen/nat) 0 3)))
+                :mutations (gen/vector (gen/tuple (gen/elements (keys mutation-kinds)) gen/nat) 0 3)
+                ;; shrinks toward `:legacy`, the first format
+                :format    (gen/elements (keys query-formats))))
 
 (defn- env-long [var-name default]
   (or (some-> (System/getenv var-name) parse-long) default))
@@ -1546,6 +1620,21 @@
       (testing (format "%s under %s in %s" (pr-str probe) config-k mode)
         (is (not (failing-outcomes outcome))
             (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :user :query])))))))
+
+(deftest ^:synchronized query-formats-are-sandboxed-alike-test
+  (testing "A probe gets the same outcome sent as legacy MBQL, as MBQL 5, and as MBQL 5 with legacy-ordered refs"
+    (mt/test-drivers (corpus-drivers)
+      (doseq [[mode run-in-mode] schema-check-modes
+              config-k           [:table-tier :card-hide-price]
+              [probe results]    (group-by :probe
+                                           (run-in-mode
+                                            #(concat (run-canonical-formats! config-k (keys query-formats))
+                                                     (when (= config-k :table-tier)
+                                                       (run-grid-formats! config-k (keys query-formats)
+                                                                          (grid-probe-names ci-grid-selection))))))]
+        (testing (format "%s under %s in %s" (pr-str probe) config-k mode)
+          (is (= 1 (count (into #{} (map :outcome) results)))
+              (pr-str (map (juxt :format :outcome) results))))))))
 
 (deftest ^:synchronized generated-queries-cannot-escape-sandbox-test
   (mt/test-drivers (corpus-drivers)
