@@ -25,7 +25,7 @@
 (def roles
   "SHOPS in every role a table can play, written as the query builder would: source, FK target through each edge,
   explicit join, two hops, self join, FK out to REGIONS and back, breakout and order by an FK, a weighted average
-  through the join, a parameter on an implicit-join column. Reaches `add-implicit-joins`, `resolve-joins`,
+  through the join. Reaches `add-implicit-joins`, `resolve-joins`,
   `fix-bad-field-id-refs` and the sandbox rewrite's second pass."
   (array-map
    :shops-source            (fn [ids] {:query {:source-table (dataset/tid ids :shops)}})
@@ -75,10 +75,6 @@
    :regions-into-shops      (fn [ids] {:query {:source-table (dataset/tid ids :regions)
                                                :fields       [[:field (dataset/fid ids :regions :id) nil]
                                                               (implicit ids :regions :hq_shop_id :shops :secret)]}})
-   :parameter-on-shops      (fn [ids] {:query      {:source-table (dataset/tid ids :orders) :aggregation [[:count]]}
-                                       :parameters [{:type   "number/!="
-                                                     :target ["dimension" (implicit ids :orders :shop_id :shops :price)]
-                                                     :value  [-1]}]})
    :orders-breakout-fk      (fn [ids] {:query {:source-table (dataset/tid ids :orders)
                                                :breakout     [[:field (dataset/fid ids :orders :shop_id) nil]]
                                                :aggregation  [[:count]]}})
@@ -224,6 +220,11 @@
   parameter adds a join the query did not have. Values pick tier 2 (hidden) rows where they can: tier 2 shops are
   2, 4, 6 and 8, opened in February 2024."
   (array-map
+   ;; a parameter the query builder itself would write: a filter on an implicit-join column
+   :parameter-on-shops      (fn [ids] {:query      {:source-table (dataset/tid ids :orders) :aggregation [[:count]]}
+                                       :parameters [{:type   "number/!="
+                                                     :target ["dimension" (implicit ids :orders :shop_id :shops :price)]
+                                                     :value  [-1]}]})
    :param-string=          (fn [ids] (orders-with-parameter ids "string/=" (implicit ids :orders :shop_id :shops :name) ["Beta" "Delta"]))
    :param-contains-secret  (fn [ids] (orders-with-parameter ids "string/contains" (implicit ids :orders :shop_id :shops :secret) ["CANARY"]))
    :param-number-between   (fn [ids] (orders-with-parameter ids "number/between" (implicit ids :orders :shop_id :shops :price) [2 3]))

@@ -6,6 +6,7 @@
   (:require
    [metabase-enterprise.sandbox.enforcement-test.dataset :as dataset]
    [metabase.driver :as driver]
+   [metabase.driver.sql :as driver.sql]
    [metabase.driver.util :as driver.u]
    [metabase.permissions.core :as perms]
    [metabase.permissions.models.data-permissions :as data-perms]
@@ -238,11 +239,13 @@
     (if (contains? config :sandboxed) (:sandboxed config) #{:shops})))
 
 (defn supported?
-  "Does the current driver support the feature `policy-k` needs?"
+  "Does the current driver support the feature `policy-k` needs? Impersonation also needs a default database role,
+  which MySQL and MariaDB only have when the connection details name one."
   [policy-k]
-  (if-let [feature (:feature (policy policy-k))]
-    (driver.u/supports? driver/*driver* feature (mt/db))
-    true))
+  (let [feature (:feature (policy policy-k))]
+    (and (or (nil? feature) (driver.u/supports? driver/*driver* feature (mt/db)))
+         (or (not= feature :connection-impersonation)
+             (some? (driver.sql/default-database-role driver/*driver* (mt/db)))))))
 
 (def varied-datasets
   "Restricted dataset -> the varied datasets that change only data it hides."

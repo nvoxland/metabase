@@ -194,18 +194,38 @@
 
 (def ^:private sql-text-pattern #"(?i)\bSELECT\b|\bFROM\b.*\bJOIN\b")
 
+(defn- fingerprinted-maps
+  "`[path m]` for every map in `x` that carries a non-nil `:fingerprint`."
+  [x]
+  (let [acc (volatile! [])]
+    (letfn [(scan [path v]
+              (cond
+                (map? v)        (do (when (some? (:fingerprint v)) (vswap! acc conj [path v]))
+                                    (doseq [[k child] v] (scan (conj path k) child)))
+                (sequential? v) (doall (map-indexed (fn [i child] (scan (conj path i) child)) v))))]
+      (scan [] x))
+    @acc))
+
 (defn hygiene
-  "What a sandboxed user's response must never carry, wherever it sits: a fingerprint, a native or preprocessed form,
-  internal query stages, the physical name of a sandboxed table, or SQL text in an error. `:json_query` echoes the
-  user's own input and is skipped."
-  [{:keys [sandboxed]} user]
+  "Looks at the response text, wherever it sits: a fingerprint of a sandboxed table's column (a column of another
+  table is the user's to see; an aggregation's fingerprint comes from the sandboxed rows), a native or
+  preprocessed form, internal query stages, the physical name of a sandboxed table, or SQL text in an error. A failure
+  here is in error handling, metadata stripping or the driver. `:json_query` echoes the user's own input and is
+  skipped."
+  [{:keys [ids sandboxed]} user]
   (let [body        (let [b (:body user)] (if (map? b) (dissoc b :json_query :dataset_query) b))
         table-names (into #{} (map #(mt/format-name (name %))) sandboxed)
+        table-ids   (into #{} (map #(dataset/tid ids %)) sandboxed)
         problems    (concat
+                     (for [[path m] (fingerprinted-maps body)
+                           :let [table-id (or (:table_id m) (:table-id m))]
+                           ;; a column that names a field but no table is treated as sandboxed; one that names
+                           ;; neither (an aggregation, an expression) was fingerprinted from the sandboxed rows
+                           :when (if table-id (contains? table-ids table-id) (some? (:id m)))]
+                       {:kind :internal-metadata :path (conj path :fingerprint)})
                      (for [[path v] (scan-paths body)
                            :when (and (some? v)
-                                      (or (some #{:fingerprint "fingerprint"} path)
-                                          (some #{:native :preprocessed :native_form "native_form"} path)))]
+                                      (some #{:native :preprocessed :native_form "native_form"} path))]
                        {:kind :internal-metadata :path path})
                      (for [[path v] (scan-paths body)
                            :when (and (string? v)
@@ -326,6 +346,8 @@
   [s]
   (-> s
       (str/replace #"(databaseID|queryHash): \w+" "$1: _")
+      ;; MariaDB prefixes its error messages with the connection id
+      (str/replace #"\(conn=\d+\)" "(conn=_)")
       (str/replace #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" "_")
       (str/replace #"(:source-table|:source-card|:table-id|:card-id) \d+" "$1 _")
       (str/replace #"\} \d+\]" "} _]")))
