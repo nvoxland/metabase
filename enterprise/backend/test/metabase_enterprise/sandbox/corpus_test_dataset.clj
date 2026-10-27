@@ -95,6 +95,12 @@
 (defn- int-col [n] {:field-name n :base-type :type/Integer})
 (defn- pk [] {:field-name "id" :base-type :type/Integer :pk? true})
 (defn- big [n] {:field-name n :base-type :type/BigInteger})
+(defn- float-col [n] {:field-name n :base-type :type/Float})
+
+(defn- with-ratings
+  "Append each SHOPS row's RATING, its tier plus one half: exact in binary floating point, and one rating per tier."
+  [rows]
+  (mapv (fn [[_id _name tier :as row]] (conj row (+ tier 0.5))) rows))
 
 (defn- with-canaries
   "Append the canary columns' values to each row of `table`, where the row's id is its first value."
@@ -112,16 +118,17 @@
        [4 "West"  2 nil]])]
    ["shops"
     [(pk) (text "name") (int-col "tier") (int-col "price") (int-col "region_id") (int-col "parent_shop_id")
-     (text "secret") (big "secret_num")]
+     (float-col "rating") (text "secret") (big "secret_num")]
     (with-canaries :shops
-      [[1 "Alpha" 1 1 1   nil]
-       [2 "Beta"  2 2 1   1]
-       [3 "Gamma" 1 3 2   1]
-       [4 "Delta" 2 1 2   2]
-       [5 "Alpha" 1 2 3   3]
-       [6 "Zeta"  2 3 3   4]
-       [7 "Eta"   1 1 4   nil]
-       [8 "Theta" 2 2 nil 7]])]
+      (with-ratings
+        [[1 "Alpha" 1 1 1   nil]
+         [2 "Beta"  2 2 1   1]
+         [3 "Gamma" 1 3 2   1]
+         [4 "Delta" 2 1 2   2]
+         [5 "Alpha" 1 2 3   3]
+         [6 "Zeta"  2 3 3   4]
+         [7 "Eta"   1 1 4   nil]
+         [8 "Theta" 2 2 nil 7]]))]
    ["orders"
     [(pk) (text "name") (int-col "shop_id") (int-col "return_shop_id") (int-col "amount")]
     [[1  "o1"  1 nil 10]
@@ -230,7 +237,7 @@
   "`SHOPS` column names as the current driver stores them, keyed by their lower-case name. Postgres lower-cases,
   H2 upper-cases."
   []
-  (into {} (for [col ["id" "name" "tier" "price" "region_id" "parent_shop_id" "secret" "secret_num"]]
+  (into {} (for [col ["id" "name" "tier" "price" "region_id" "parent_shop_id" "rating" "secret" "secret_num"]]
              [(keyword col) (mt/format-name col)])))
 
 (defn describe

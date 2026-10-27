@@ -57,7 +57,7 @@
 
 (def ^:private columns
   {:regions [:id :name :tier :hq_shop_id :secret :secret_num]
-   :shops   [:id :name :tier :price :region_id :parent_shop_id :secret :secret_num]
+   :shops   [:id :name :tier :price :region_id :parent_shop_id :rating :secret :secret_num]
    :orders  [:id :name :shop_id :return_shop_id :amount]
    :items   [:id :name :order_id :qty]})
 
@@ -97,7 +97,7 @@
                                     :alias        "R"
                                     :condition    [:= $region_id &R.regions.id]
                                     :fields       :none}]
-                          :fields [$id $name $tier $price $region_id $parent_shop_id $secret $secret_num]})
+                          :fields [$id $name $tier $price $region_id $parent_shop_id $rating $secret $secret_num]})
            :remappings {"tier" ["dimension" [:field (mt/id :regions :tier) {:join-alias "R"}]]}}})
 
 (defn- shops-card-extra-column-gtap
@@ -109,6 +109,16 @@
                                     :condition    [:= $region_id &R.regions.id]
                                     :fields       [&R.regions.name]}]})
            :remappings (tier-dimension-remapping :shops)}})
+
+(defn- shops-rating-gtap
+  "A table sandbox on the Float column RATING, so the attribute is coerced to a double."
+  []
+  {:shops {:remappings {"rating" ["variable" [:field (mt/id :shops :rating) nil]]}}})
+
+(defn- persist-sandbox-card!
+  "Turn the SHOPS sandbox card into a model, so that it is persisted along with the other models."
+  []
+  (t2/update! :model/Card (t2/select-one-fn :card_id :model/Sandbox :table_id (mt/id :shops)) {:type :model}))
 
 (defn- shops-hide-price-gtap []
   {:shops {:query (mt/mbql-query shops {:fields [$id $name $tier $region_id $parent_shop_id]})}})
@@ -152,6 +162,11 @@
       (data-perms/set-database-permission! group (mt/id) :perms/create-queries :query-builder))
     group))
 
+(def ^:private secret-num-labels
+  "A value remap of SHOPS.SECRET_NUM whose labels carry each row's text canary, so a label of a hidden row anywhere in
+  a response is a leak."
+  (into {} (for [id (range 1 9)] [(corpus/canary-num :shops id) (str "label " (corpus/canary-text :shops id))])))
+
 (def ^:private sandbox-configs
   "Config name -> how VENUES-style sandboxing is set up on SHOPS (and REGIONS):
 
@@ -162,7 +177,7 @@
   * `:hidden-cols` SHOPS columns the sandbox card leaves out
   * `:sandboxed`   tables with an enforced sandbox, for the structural detector
   * `:setup`       fn run inside `with-gtaps!` for extra arrangements (second groups)
-  * `:remaps`      FK display remappings `[[table column target-table target-column] ...]`, set up in both databases
+  * `:remaps`      display remappings, set up in both databases; see [[do-with-remaps!]]
   * `:feature`     driver feature the config needs
   * `:persist?`    persist every model as an admin before probing
   * `:premium-features` features granted besides `:sandboxes`"
@@ -170,6 +185,11 @@
    :table-tier      {:gtaps shops-table-gtap           :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
    :card-rows       {:gtaps shops-card-gtap            :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
    :card-join       {:gtaps shops-card-join-gtap       :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-region-tier1}
+   ;; ratings are tier + 0.5, so rating 1.5 selects the tier 1 rows
+   :table-rating    {:gtaps shops-rating-gtap :attributes {"rating" "1.5"} :restricted #'corpus/sandbox-corpus-tier1}
+   ;; the sandbox card itself is a persisted model: its cache holds every row
+   :card-rows+persisted-sandbox {:gtaps shops-card-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
+                                 :setup persist-sandbox-card! :persist? true :feature :persist-models}
    :card-extra-column {:gtaps shops-card-extra-column-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
    :card-hide-price {:gtaps shops-hide-price-gtap      :attributes {}           :restricted #'corpus/sandbox-corpus-hide-price
                      :hidden-cols #{:price :secret :secret_num}}
@@ -192,6 +212,9 @@
                           :persist? true :feature :persist-models}
    :card-hide-price+persisted {:gtaps shops-hide-price-gtap :attributes {} :restricted #'corpus/sandbox-corpus-hide-price
                                :hidden-cols #{:price :secret :secret_num} :persist? true :feature :persist-models}
+   ;; SHOPS.SECRET_NUM displays admin-entered labels, one per row, from FieldValues of the whole table
+   :table-tier+value-remap {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
+                            :remaps [[:shops :secret_num secret-num-labels]]}
    ;; another group grants unrestricted access, so the sandbox is not enforced (by design)
    :cancelled       {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus :expect :unrestricted
                      :sandboxed #{} :setup #(add-rasta-to-group-with-view-data! :unrestricted)}
@@ -234,6 +257,9 @@
    :card-list         {:base :card-rows  :attributes {"tier" ["3"]}      :expect :error}
    ;; a native sandbox fails safe on a list: its `{{tier}}` matches nothing
    :native-list       {:base :native     :attributes {"tier" ["3"]}      :restricted #'corpus/sandbox-corpus-no-shops}
+   :rating-integer    {:base :table-rating :attributes {"rating" "1"}   :restricted #'corpus/sandbox-corpus-no-shops}
+   :rating-junk       {:base :table-rating :attributes {"rating" "1.5x"} :expect :error}
+   :rating-list       {:base :table-rating :attributes {"rating" ["2.5"]} :expect :error}
    :native-sql-like   {:base :native     :attributes {"tier" "1 OR 1=1"} :expect :error}
    :native-missing    {:base :native     :attributes {}                  :expect :error}))
 
@@ -283,19 +309,20 @@
       (do-with-cards! (fn [cards]
                         (mt/with-test-user :crowberto
                           (persist-models!))
-                        (assert (every? #{"persisted"}
-                                        (t2/select-fn-vec :state :model/PersistedInfo :card_id [:in (vals cards)]))
+                        (assert (every? #{"persisted"} (t2/select-fn-vec :state :model/PersistedInfo :database_id (mt/id)))
                                 "every model persisted")
                         (f cards))))))
 
 (defn- allowed-canary-ids
-  "The canaries an admin can see in the current (restricted) database."
+  "The canaries in the rows an admin gets from the current (restricted) database. Rows only: response metadata can
+  carry values of the whole table (a value remap's list, for one), which would hide a leak."
   []
   (into #{}
         (mapcat (fn [table]
                   (corpus/canary-ids
-                   (mt/user-http-request :crowberto :post 202 "dataset"
-                                         {:database (mt/id) :type "query" :query {:source-table (mt/id table)}}))))
+                   (get-in (mt/user-http-request :crowberto :post 202 "dataset"
+                                                 {:database (mt/id) :type "query" :query {:source-table (mt/id table)}})
+                           [:data :rows]))))
         [:shops :regions]))
 
 (defonce ^:private fully-synced-dbs (atom #{}))
@@ -315,11 +342,12 @@
     true))
 
 (defn- do-with-remaps!
-  "Call `thunk` with the config's FK display remappings in place for the current database."
+  "Call `thunk` with the config's display remappings in place for the current database: an FK remap
+  `[table column target-table target-column]`, or a value remap `[table column {value label}]`."
   [remaps thunk]
   (tu/do-with-column-remappings!
    (into {} (for [[table column target-table target-column] remaps]
-              [(mt/id table column) (mt/id target-table target-column)]))
+              [(mt/id table column) (if (map? target-table) target-table (mt/id target-table target-column))]))
    thunk))
 
 (defn- do-with-corpus-config!
@@ -658,6 +686,24 @@
                                        :parameters [{:type   "number/!="
                                                      :target ["dimension" (implicit ids :orders :shop_id :shops :price)]
                                                      :value  [-1]}]})
+   :orders-breakout-fk      (fn [ids] {:query {:source-table (tid ids :orders)
+                                               :breakout     [[:field (fid ids :orders :shop_id) nil]]
+                                               :aggregation  [[:count]]}})
+   :orders-order-by-fk      (fn [ids] {:query {:source-table (tid ids :orders)
+                                               :order-by     [[:asc [:field (fid ids :orders :shop_id) nil]]]}})
+   :items-join-orders-all   (fn [ids] {:query {:source-table (tid ids :items)
+                                               :joins        [{:source-table (tid ids :orders)
+                                                               :alias        "O"
+                                                               :condition    [:= [:field (fid ids :items :order_id) nil]
+                                                                              [:field (fid ids :orders :id) {:join-alias "O"}]]
+                                                               :fields       :all}]}})
+   ;; a ref through RETURN_SHOP_ID that claims the name SHOP_ID gets the implicit join alias of SHOP_ID; the two
+   ;; implicit joins collide and one is renamed
+   :colliding-implicit-joins (fn [ids] {:query {:source-table (tid ids :orders)
+                                                :fields       [[:field (fid ids :orders :id) nil]
+                                                               (implicit ids :orders :shop_id :shops :price)
+                                                               [:field (fid ids :shops :secret) {:source-field      (fid ids :orders :return_shop_id)
+                                                                                                 :source-field-name (fname ids :orders :shop_id)}]]}})
    ;; an explicit REGIONS join dressed up as the implicit join through ORDERS.SHOP_ID; the implicit ref must not reuse it
    :forged-implicit-join    (fn [ids] {:query {:source-table (tid ids :orders)
                                                :joins        [{:source-table          (tid ids :regions)
@@ -750,6 +796,7 @@
 (def ^:private targets
   {:price      {:base-type :type/Integer    :param {:type "number/!=" :value [-1]}}
    :secret     {:base-type :type/Text       :param {:type "string/!=" :value ["__none__"]}}
+   :rating     {:base-type :type/Float      :param {:type "number/!=" :value [-1]}}
    ;; the numeric canary: its hidden rows extend the column's range, which binning bounds would reveal
    :secret_num {:base-type :type/BigInteger :param {:type "number/!=" :value [-1]}}})
 
@@ -855,7 +902,7 @@
    (for [edge-k     (or edges* (keys edges))
          shape-k    (or shapes (keys ref-shapes))
          position-k (or positions* grid-position-names)
-         target     (or targets* [:price :secret])]
+         target     (or targets* [:price :secret :rating])]
      [edge-k shape-k position-k target])))
 
 (defn run-grid!
@@ -1075,7 +1122,7 @@
 
 (deftest ^:synchronized endpoints-reveal-nothing-outside-the-sandbox-test
   (mt/test-drivers #{:h2}
-    (doseq [config-k [:table-tier :card-hide-price]
+    (doseq [config-k [:table-tier :card-hide-price :table-tier+value-remap]
             [endpoint {:keys [status leaked hygiene]}] (run-canary-endpoints! config-k)]
       (testing (format "%s under %s (HTTP %s)" endpoint config-k status)
         (testing "no canary of a hidden row"
@@ -1155,7 +1202,8 @@
 (def ^:private column-base-types
   {:id :type/Integer :name :type/Text :tier :type/Integer :price :type/Integer :amount :type/Integer :qty :type/Integer
    :region_id :type/Integer :parent_shop_id :type/Integer :hq_shop_id :type/Integer :shop_id :type/Integer
-   :return_shop_id :type/Integer :order_id :type/Integer :secret :type/Text :secret_num :type/BigInteger})
+   :return_shop_id :type/Integer :order_id :type/Integer :secret :type/Text :secret_num :type/BigInteger
+   :rating :type/Float})
 
 (defn- ref-column
   "`[table column]` a field ref names, when it names one by id."
