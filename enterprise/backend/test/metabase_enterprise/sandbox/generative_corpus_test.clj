@@ -921,6 +921,135 @@
       (doall (for [via parameter-paths, probe-name probe-names]
                (run-probe (assoc ctx :via via) probe-name (parameter-probes probe-name))))))))
 
+;;; ----------------------------------------------- Authored content -----------------------------------------------
+;;;
+;;; Content the sandboxed user saves (models with metadata they wrote, metrics) and content an admin saves that the
+;;; sandboxed user uses (segments). One probe per path; the same content is created by an admin in the restricted copy
+;;; for the expected answer.
+
+(defn- table-query [ids table]
+  {:database (:db ids) :type "query" :query {:source-table (tid ids table)}})
+
+(defn- create-card-as!
+  "Save a card as `user` through the API. Returns its id."
+  [user body]
+  (:id (mt/user-http-request user :post 200 "card" (merge {:name "authored" :display "table" :visualization_settings {}}
+                                                          body))))
+
+(defn- forge-column
+  "`columns`, result metadata, with the column named `col-name` changed by `f`."
+  [columns col-name f]
+  (mapv #(if (= col-name (:name %)) (f %) %) columns))
+
+(defn- model-as!
+  "Save a model over `table` as `user`, with the result metadata of column `col` changed by `f`. Returns `{:card id}`."
+  [user ids table col f]
+  (let [query (table-query ids table)]
+    {:card (create-card-as! user {:type            "model"
+                                  :dataset_query   query
+                                  :result_metadata (forge-column (model-metadata query) (fname ids table col) f)})}))
+
+(def ^:private authored-probes
+  "Probe name -> `{:author (fn [ids user] created), :probe (fn [ids created] probe)}`. `created` maps `:card` or
+  `:segment` to the id of what `:author` saved."
+  (array-map
+   ;; a model over SHOPS whose NAME column claims to be SECRET, queried by SECRET's field id
+   :model-forged-field-id {:author (fn [ids user]
+                                     (model-as! user ids :shops :name
+                                                #(assoc % :id (fid ids :shops :secret)
+                                                        :field_ref ["field" (fid ids :shops :secret) nil])))
+                           :probe  (fn [ids {:keys [card]}]
+                                     {:query {:source-table (str "card__" card)
+                                              :fields       [["field" (fid ids :shops :secret) nil]]}})}
+   ;; a model over ORDERS whose AMOUNT column claims to be an FK to SHOPS, used for an implicit join
+   :model-forged-fk       {:author (fn [ids user]
+                                     (model-as! user ids :orders :amount
+                                                #(assoc % :semantic_type "type/FK"
+                                                        :fk_target_field_id (fid ids :shops :id))))
+                           :probe  (fn [ids {:keys [card]}]
+                                     {:query {:source-table (str "card__" card)
+                                              :fields       [["field" (fid ids :orders :id) nil]
+                                                             ["field" (fid ids :shops :secret)
+                                                              {:source-field (fid ids :orders :amount)}]]}})}
+   ;; a model over ORDERS whose NAME column is mapped to SHOPS.SECRET, as the model metadata editor does
+   :model-mapped-to-shops {:author (fn [ids user]
+                                     (model-as! user ids :orders :name
+                                                #(assoc % :id (fid ids :shops :secret)
+                                                        :field_ref ["field" (fid ids :shops :secret) nil]
+                                                        :semantic_type "type/Category")))
+                           :probe  (fn [ids {:keys [card]}]
+                                     {:query {:source-table (str "card__" card)
+                                              :breakout     [["field" (fname ids :orders :name) {:base-type "type/Text"}]]
+                                              :aggregation  [["count"]]}})}
+   ;; a metric over SHOPS saved by the user, used from SHOPS
+   :own-metric            {:author (fn [ids user]
+                                     {:card (create-card-as!
+                                             user {:type          "metric"
+                                                   :display       "scalar"
+                                                   :dataset_query (assoc-in (table-query ids :shops) [:query :aggregation]
+                                                                            [["sum" ["field" (fid ids :shops :secret_num) nil]]])})})
+                           :probe  (fn [_ids {:keys [card]}]
+                                     {:query {:source-table (str "card__" card)
+                                              :aggregation  [["metric" card]]}})}
+   ;; an admin's segment on SHOPS (sandboxed users cannot create segments), used from SHOPS and from ORDERS
+   :admin-segment         {:author (fn [ids _user]
+                                     {:segment (:id (mt/user-http-request
+                                                     :crowberto :post 200 "segment"
+                                                     {:name       "tier 2"
+                                                      :table_id   (tid ids :shops)
+                                                      :definition (assoc-in (table-query ids :shops) [:query :filter]
+                                                                            ["=" ["field" (fid ids :shops :tier) nil] 2])}))})
+                           :probe  (fn [ids {:keys [segment]}]
+                                     {:query {:source-table (tid ids :shops)
+                                              :filter       ["segment" segment]
+                                              :fields       [["field" (fid ids :shops :id) nil] ["field" (fid ids :shops :secret) nil]]}})}))
+
+(defn- delete-authored! [created]
+  (doseq [[k id] created]
+    (t2/delete! (case k :card :model/Card :segment :model/Segment) id)))
+
+(defn run-authored!
+  "Run the authored-content probes under `config-k`: the sandboxed user saves the content in the sandboxed database and
+  an admin saves the same in the restricted copy. Returns result maps."
+  [config-k]
+  (do-with-corpus-config!
+   config-k
+   (fn [{:keys [ids restricted-ids] :as ctx}]
+     (doall (for [[probe-name {:keys [author probe]}] authored-probes]
+              (let [created          (author ids :rasta)
+                    expected-created (author restricted-ids :crowberto)]
+                (try
+                  (run-probe ctx probe-name #(probe % (if (= % ids) created expected-created)))
+                  (finally
+                    (delete-authored! created)
+                    (delete-authored! expected-created)))))))))
+
+(defn mapped-model-filter-values!
+  "Under `config-k`, the canaries the sandboxed user gets from a dashboard filter on their model column that is mapped
+  to SHOPS.SECRET (see `:model-mapped-to-shops`), by filter target and endpoint. Returns `[target endpoint leaked]`,
+  where `leaked` is the canary ids outside the sandbox."
+  [config-k]
+  (do-with-corpus-config!
+   config-k
+   (fn [{:keys [ids allowed]}]
+     (let [{:keys [card] :as created} ((:author (authored-probes :model-mapped-to-shops)) ids :rasta)]
+       (try
+         (doall
+          (for [[target-k target] {:name-ref ["field" (fname ids :orders :name) {:base-type "type/Text"}]
+                                   :id-ref   ["field" (fid ids :shops :secret) nil]}
+                [endpoint leaked] (mt/with-temp [:model/Dashboard {dash :id} {:parameters [{:id "p" :slug "p" :name "p" :type "string/="}]}
+                                                 :model/DashboardCard _ {:dashboard_id       dash
+                                                                         :card_id            card
+                                                                         :parameter_mappings [{:parameter_id "p" :card_id card
+                                                                                               :target       ["dimension" target]}]}]
+                                    (doall (for [[endpoint path] {:values (format "dashboard/%d/params/p/values" dash)
+                                                                  :search (format "dashboard/%d/params/p/search/CANARY" dash)}]
+                                             [endpoint (not-empty (into (sorted-set) (remove allowed)
+                                                                        (corpus/canary-ids (mt/user-http-request :rasta :get 200 path))))])))]
+            [target-k endpoint leaked]))
+         (finally
+           (delete-authored! created)))))))
+
 (def ^:private saved-sql-probes
   "Probes over a saved SQL question on SHOPS. Sandboxes do not apply to SQL results, by design: see \"You cannot
   secure the rows or columns of SQL results\" in docs/permissions/row-and-column-security.md."
@@ -1708,6 +1837,39 @@
           (is (not (failing-outcomes outcome))
               (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
                                            :user :expected :query]))))))))
+
+(deftest ^:synchronized authored-content-is-sandboxed-test
+  (testing "Models with metadata the sandboxed user wrote, their own metrics, and admin segments are sandboxed"
+    (mt/test-drivers (corpus-drivers)
+      (doseq [[mode run-in-mode] schema-check-modes
+              config-k           (keys sandbox-configs)
+              :when              (mt/dataset corpus/sandbox-corpus (config-supported? config-k))
+              {:keys [probe outcome] :as result} (run-in-mode #(run-authored! config-k))]
+        (testing (format "%s under %s in %s" probe config-k mode)
+          (is (not (failing-outcomes outcome))
+              (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
+                                           :user :expected :query]))))))))
+
+(deftest ^:synchronized mapped-model-column-filter-values-are-sandboxed-test
+  (testing "A dashboard filter on a model column mapped to a sandboxed column offers only values the sandbox allows"
+    (mt/test-drivers #{:h2}
+      (doseq [config-k                  [:table-tier :card-hide-price]
+              [target endpoint leaked] (mapped-model-filter-values! config-k)]
+        (testing (format "%s %s under %s" target endpoint config-k)
+          (is (nil? leaked)))))))
+
+(deftest ^:synchronized sandboxed-users-cannot-create-segments-test
+  (testing "Segments are admin content, so a sandboxed user cannot define one over the sandboxed table"
+    (mt/test-drivers #{:h2}
+      (do-with-corpus-config!
+       :table-tier
+       (fn [{:keys [ids]}]
+         (is (= "You don't have permissions to do that."
+                (mt/user-http-request :rasta :post 403 "segment"
+                                      {:name       "tier 2"
+                                       :table_id   (tid ids :shops)
+                                       :definition (assoc-in (table-query ids :shops) [:query :filter]
+                                                             ["=" ["field" (fid ids :shops :tier) nil] 2])}))))))))
 
 (deftest ^:synchronized saved-sql-results-are-not-sandboxed-as-documented-test
   (testing "A sandboxed user who can see a saved SQL question gets its unsandboxed results, as the docs say"
