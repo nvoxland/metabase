@@ -1,9 +1,9 @@
-(ns metabase-enterprise.sandbox.corpus-test-dataset
-  "A small synthetic dataset for sandboxing tests, built so that the sandboxed table SHOPS plays every role a table can
-  play in a query: query source, explicit join target, implicit-join target through one FK (ORDERS.SHOP_ID), target of
-  two FKs from one table (ORDERS.SHOP_ID and ORDERS.RETURN_SHOP_ID), end of a multi-hop chain (ITEMS -> ORDERS -> SHOPS),
-  self-referencing (SHOPS.PARENT_SHOP_ID), source of an FK out (SHOPS.REGION_ID), and one half of a two-table cycle
-  (REGIONS.HQ_SHOP_ID). Every table has ID and NAME, so name refs are ambiguous on purpose.
+(ns metabase-enterprise.sandbox.enforcement-test.dataset
+  "A small synthetic dataset for sandbox enforcement tests, built so that the sandboxed table SHOPS plays every role a
+  table can play in a query: query source, explicit join target, implicit-join target through one FK (ORDERS.SHOP_ID),
+  target of two FKs from one table (ORDERS.SHOP_ID and ORDERS.RETURN_SHOP_ID), end of a multi-hop chain (ITEMS -> ORDERS
+  -> SHOPS), self-referencing (SHOPS.PARENT_SHOP_ID), source of an FK out (SHOPS.REGION_ID), and one half of a two-table
+  cycle (REGIONS.HQ_SHOP_ID). Every table has ID and NAME, so name refs are ambiguous on purpose.
 
   Every SHOPS and REGIONS row carries two canary values that decode back to the row: a text token in SECRET and a
   number in SECRET_NUM. A canary from a row the sandbox hides, anywhere in a response the sandboxed user gets, is a
@@ -13,9 +13,12 @@
   reject the cycle and the dangling keys of the restricted variants. [[ensure-fk-metadata!]] sets the FK metadata by
   hand after a dataset is loaded.
 
-  The restricted variants ([[sandbox-corpus-tier1]] and friends) are the same dataset with a sandbox applied by hand:
-  rows deleted or columns nulled. A query run as a sandboxed user on the base dataset must return what an admin gets
-  from the matching variant."
+  The restricted variants ([[shops-tier1]] and friends) are the same dataset with a sandbox applied by hand: rows
+  deleted or columns nulled. They are the specification of every policy: a query run as a sandboxed user on the base
+  dataset must return what an admin gets from the matching variant. [[variant-contents]] tables what each holds.
+
+  [[tables]], [[columns]], [[base-types]] and [[fks]] describe the schema for the other namespaces; [[ids-map]] and the
+  accessors [[tid]], [[fid]], [[fname]] and [[card-source]] name the loaded copy's ids."
   (:require
    [clojure.walk :as walk]
    [metabase.test :as mt]
@@ -27,6 +30,7 @@
 ;;; ------------------------------------------------- Canaries -----------------------------------------------------
 
 (def ^:private canary-nonce "5b0dca7e")
+
 (def ^:private canary-num-step 7919)
 
 (def ^:private canary-table-codes
@@ -48,6 +52,7 @@
 (def ^:private canary-text-pattern (re-pattern (str "CANARY-([SR])(\\d+)-" canary-nonce)))
 
 ;; 12-digit numbers starting with 8 or 9, or the same printed as a double such as 9.00000007919E11
+
 (def ^:private canary-num-pattern #"(?<![\d.])[89](?:\d{11}|\.\d+E11)(?![\d.])")
 
 (def ^:private code->table (into {} (map (fn [[table [code _]]] [code table])) canary-table-codes))
@@ -95,10 +100,15 @@
 ;;; -------------------------------------------------- Dataset -----------------------------------------------------
 
 (defn- text [n] {:field-name n :base-type :type/Text})
+
 (defn- int-col [n] {:field-name n :base-type :type/Integer})
+
 (defn- pk [] {:field-name "id" :base-type :type/Integer :pk? true})
+
 (defn- big [n] {:field-name n :base-type :type/BigInteger})
+
 (defn- float-col [n] {:field-name n :base-type :type/Float})
+
 (defn- date-col [n] {:field-name n :base-type :type/Date})
 
 (defn- with-ratings-and-dates
@@ -112,7 +122,7 @@
   [table rows]
   (mapv (fn [[id :as row]] (conj row (canary-text table id) (canary-num table id))) rows))
 
-(mt/defdataset sandbox-corpus
+(mt/defdataset shops
   "See the namespace docstring. Columns in row order."
   [["regions"
     [(pk) (text "name") (int-col "tier") (int-col "hq_shop_id") (text "secret") (big "secret_num")]
@@ -166,12 +176,61 @@
 
 (defn ensure-fk-metadata!
   "Mark every entry of [[fks]] as a foreign key in the metadata of the current test database, the way sync would from
-  a real constraint. Idempotent. Call it inside `mt/dataset` right after loading any variant of the corpus."
+  a real constraint. Idempotent. Call it inside `mt/dataset` right after loading any variant of the dataset."
   []
   (doseq [[from-table from-col to-table to-col] fks]
     (t2/update! :model/Field (mt/id from-table from-col)
                 {:semantic_type      :type/FK
                  :fk_target_field_id (mt/id to-table to-col)})))
+
+;;; ---------------------------------------------------- Ids -------------------------------------------------------
+
+(def tables
+  "The tables, in the order the harness grants permissions on them."
+  [:regions :shops :orders :items])
+
+(def columns
+  "Table -> its columns, in row order."
+  {:regions [:id :name :tier :hq_shop_id :secret :secret_num]
+   :shops   [:id :name :tier :price :region_id :parent_shop_id :rating :opened_on :secret :secret_num]
+   :orders  [:id :name :shop_id :return_shop_id :amount]
+   :items   [:id :name :order_id :qty]})
+
+(def base-types
+  "Column -> its base type, for name refs and field literals."
+  {:id :type/Integer :name :type/Text :tier :type/Integer :price :type/Integer :amount :type/Integer :qty :type/Integer
+   :region_id :type/Integer :parent_shop_id :type/Integer :hq_shop_id :type/Integer :shop_id :type/Integer
+   :return_shop_id :type/Integer :order_id :type/Integer :secret :type/Text :secret_num :type/BigInteger
+   :rating :type/Float :opened_on :type/Date})
+
+(defn ids-map
+  "Every table, field and card id of the current database, by name, plus the physical column names."
+  [cards]
+  {:db     (mt/id)
+   :tables (into {} (for [t tables] [t (mt/id t)]))
+   :fields (into {} (for [[t cols] columns, c cols] [[t c] (mt/id t c)]))
+   :names  (into {} (for [[t cols] columns, c cols] [[t c] (mt/format-name (name c))]))
+   :cards  cards})
+
+(defn tid
+  "The id of `table` in the database `ids` describes."
+  [ids table]
+  (get-in ids [:tables table]))
+
+(defn fid
+  "The id of `table`.`column` in the database `ids` describes."
+  [ids table column]
+  (get-in ids [:fields [table column]]))
+
+(defn fname
+  "The physical name of `table`.`column` as the driver stores it."
+  [ids table column]
+  (get-in ids [:names [table column]]))
+
+(defn card-source
+  "The `card__N` source-table string for the card `card-k` names in `ids`."
+  [ids card-k]
+  (str "card__" (get-in ids [:cards card-k])))
 
 ;;; -------------------------------------------- Restricted variants -----------------------------------------------
 
@@ -219,10 +278,10 @@
          :secret     (str "VARIED-" id)
          :secret_num (+ 100000 id)))
 
-(def sandbox-corpus-varied-tier2
+(def shops-tier2-varied
   "The base dataset with only the tier 2 SHOPS rows changed: every column but id and tier, a later opening date, and
   shop 8 removed. A sandbox that hides tier 2 must give the same answers here as on the base dataset."
-  (tx/transformed-dataset-definition "sandbox-corpus-varied-tier2" sandbox-corpus
+  (tx/transformed-dataset-definition "shops-tier2-varied" shops
                                      (update-rows "shops" #(= 2 (:tier %))
                                                   #(-> (vary-hidden-columns %)
                                                        (assoc :name      (str "Varied " (:id %))
@@ -230,50 +289,60 @@
                                                               :opened_on (java.time.LocalDate/of 2025 6 (int (:id %))))))
                                      (keep-rows "shops" #(not= 8 (:id %)))))
 
-(def sandbox-corpus-varied-hidden-cols
+(def shops-hidden-cols-varied
   "The base dataset with PRICE and the canary columns of every SHOPS row changed. A sandbox that hides those columns
   must give the same answers here as on the base dataset."
-  (tx/transformed-dataset-definition "sandbox-corpus-varied-hidden-cols" sandbox-corpus
+  (tx/transformed-dataset-definition "shops-hidden-cols-varied" shops
                                      (update-rows "shops" (constantly true) vary-hidden-columns)))
 
 (def tier-1-regions
   "IDs of the REGIONS rows with tier 1."
   #{1 3})
 
-(def sandbox-corpus-tier1
+(def shops-tier1
   "SHOPS restricted to tier 1 rows."
-  (tx/transformed-dataset-definition "sandbox-corpus-tier1" sandbox-corpus
+  (tx/transformed-dataset-definition "shops-tier1" shops
                                      (keep-rows "shops" #(= 1 (:tier %)))))
 
-(def sandbox-corpus-tier1-both
+(def shops-tier1-regions-tier1
   "SHOPS and REGIONS both restricted to tier 1 rows."
-  (tx/transformed-dataset-definition "sandbox-corpus-tier1-both" sandbox-corpus
+  (tx/transformed-dataset-definition "shops-tier1-regions-tier1" shops
                                      (keep-rows "shops" #(= 1 (:tier %)))
                                      (keep-rows "regions" #(= 1 (:tier %)))))
 
-(def sandbox-corpus-region-tier1
+(def shops-in-tier1-regions
   "SHOPS restricted to the shops whose region is tier 1, as a sandbox card that joins REGIONS would."
-  (tx/transformed-dataset-definition "sandbox-corpus-region-tier1" sandbox-corpus
+  (tx/transformed-dataset-definition "shops-in-tier1-regions" shops
                                      (keep-rows "shops" #(contains? tier-1-regions (:region_id %)))))
 
-(def sandbox-corpus-no-shops
+(def shops-empty
   "No SHOPS rows at all, as a sandbox whose filter matches nothing."
-  (tx/transformed-dataset-definition "sandbox-corpus-no-shops" sandbox-corpus
+  (tx/transformed-dataset-definition "shops-empty" shops
                                      (keep-rows "shops" (constantly false))))
 
-(def ^:private hidden-shop-columns [:price :secret :secret_num])
+(def ^:private hidden-columns [:price :secret :secret_num])
 
-(def sandbox-corpus-hide-price
+(def shops-hide-price
   "Every SHOPS row, with PRICE and the canary columns hidden, as a sandbox card that leaves them out would. A hidden
   column reads as NULL here; Metabase may instead drop it or fail, which the classifier must allow for."
-  (tx/transformed-dataset-definition "sandbox-corpus-hide-price" sandbox-corpus
-                                     (null-columns "shops" hidden-shop-columns)))
+  (tx/transformed-dataset-definition "shops-hide-price" shops
+                                     (null-columns "shops" hidden-columns)))
 
-(def sandbox-corpus-tier1-hide-price
+(def shops-tier1-hide-price
   "Tier 1 SHOPS rows with PRICE and the canary columns hidden."
-  (tx/transformed-dataset-definition "sandbox-corpus-tier1-hide-price" sandbox-corpus
+  (tx/transformed-dataset-definition "shops-tier1-hide-price" shops
                                      (keep-rows "shops" #(= 1 (:tier %)))
-                                     (null-columns "shops" hidden-shop-columns)))
+                                     (null-columns "shops" hidden-columns)))
+
+(def variant-contents
+  "Dataset variant -> the SHOPS and REGIONS rows whose canaries an admin sees in it, and the SHOPS row count."
+  {#'shops                  {:shops #{1 2 3 4 5 6 7 8} :regions #{1 2 3 4} :shop-rows 8}
+   #'shops-tier1            {:shops #{1 3 5 7}         :regions #{1 2 3 4} :shop-rows 4}
+   #'shops-tier1-regions-tier1       {:shops #{1 3 5 7}         :regions #{1 3}     :shop-rows 4}
+   #'shops-in-tier1-regions     {:shops #{1 2 5 6}         :regions #{1 2 3 4} :shop-rows 4}
+   #'shops-hide-price       {:shops #{}                :regions #{1 2 3 4} :shop-rows 8}
+   #'shops-tier1-hide-price {:shops #{}                :regions #{1 2 3 4} :shop-rows 4}
+   #'shops-empty         {:shops #{}                :regions #{1 2 3 4} :shop-rows 0}})
 
 (defn shop-names-for-driver
   "`SHOPS` column names as the current driver stores them, keyed by their lower-case name. Postgres lower-cases,
