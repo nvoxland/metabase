@@ -100,6 +100,16 @@
                           :fields [$id $name $tier $price $region_id $parent_shop_id $secret $secret_num]})
            :remappings {"tier" ["dimension" [:field (mt/id :regions :tier) {:join-alias "R"}]]}}})
 
+(defn- shops-card-extra-column-gtap
+  "A sandbox card that also returns a REGIONS column, which the sandbox drops in an appended stage."
+  []
+  {:shops {:query      (mt/mbql-query shops
+                         {:joins  [{:source-table $$regions
+                                    :alias        "R"
+                                    :condition    [:= $region_id &R.regions.id]
+                                    :fields       [&R.regions.name]}]})
+           :remappings (tier-dimension-remapping :shops)}})
+
 (defn- shops-hide-price-gtap []
   {:shops {:query (mt/mbql-query shops {:fields [$id $name $tier $region_id $parent_shop_id]})}})
 
@@ -160,6 +170,7 @@
    :table-tier      {:gtaps shops-table-gtap           :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
    :card-rows       {:gtaps shops-card-gtap            :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
    :card-join       {:gtaps shops-card-join-gtap       :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-region-tier1}
+   :card-extra-column {:gtaps shops-card-extra-column-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
    :card-hide-price {:gtaps shops-hide-price-gtap      :attributes {}           :restricted #'corpus/sandbox-corpus-hide-price
                      :hidden-cols #{:price :secret :secret_num}}
    :card-rows+hide  {:gtaps shops-rows+hide-price-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1-hide-price
