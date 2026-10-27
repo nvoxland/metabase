@@ -449,18 +449,51 @@
    :mbql5       legacy->mbql5
    :mbql5-mixed (comp legacy-ref-order legacy->mbql5)))
 
+(defn- query-response->result
+  "`:rows`, `:cols` (names) and `:body` of a query response, or `:error` and `:body`."
+  [{:keys [status body]}]
+  (if (and (= 202 status) (= "completed" (:status body)))
+    {:rows (get-in body [:data :rows])
+     :cols (mapv :name (get-in body [:data :cols]))
+     :body body}
+    {:error (u/truncate (str status " " (or (:error body) (:message body) body)) 300)
+     :body  body}))
+
 (defn- run-as
   "Run a probe (its `:outer` request body, or its legacy inner query and parameters) through the dataset API as `user`
   against `ids`' database. Returns `:rows`, `:cols` (names) and `:body`, or `:error` and `:body`."
   [user ids probe]
-  (let [outer                 (or (:outer probe) (legacy-outer ids probe))
-        {:keys [status body]} (mt/user-http-request-full-response user :post "dataset" outer)]
-    (if (and (= 202 status) (= "completed" (:status body)))
-      {:rows (get-in body [:data :rows])
-       :cols (mapv :name (get-in body [:data :cols]))
-       :body body}
-      {:error (u/truncate (str status " " (or (:error body) (:message body) body)) 300)
-       :body  body})))
+  (query-response->result
+   (mt/user-http-request-full-response user :post "dataset" (or (:outer probe) (legacy-outer ids probe)))))
+
+(defn- run-saved-as
+  "Like [[run-as]], but save the probe's query as a card declaring one parameter per probe parameter, put it on a
+  dashboard with each dashboard parameter mapped to the same target, and run it through `via`: `:card` sends the parameters to the
+  card query API, `:dashcard` sends their values to the dashcard query API."
+  [user via ids {:keys [parameters] :as probe}]
+  (let [param-id    (fn [i] (str "p" i))
+        card-params (map-indexed (fn [i {:keys [type target]}]
+                                   {:id (param-id i) :slug (param-id i) :name (param-id i) :type type :target target})
+                                 parameters)]
+    (mt/with-temp [:model/Card {card-id :id} {:dataset_query (legacy-outer ids (dissoc probe :parameters))
+                                              :parameters    card-params}
+                   :model/Dashboard {dash-id :id} {:parameters (map-indexed (fn [i {:keys [type]}]
+                                                                              {:id (param-id i) :slug (param-id i) :name (param-id i) :type type})
+                                                                            parameters)}
+                   :model/DashboardCard {dashcard-id :id} {:dashboard_id       dash-id
+                                                           :card_id            card-id
+                                                           :parameter_mappings (map-indexed (fn [i {:keys [target]}]
+                                                                                              {:parameter_id (param-id i) :card_id card-id :target target})
+                                                                                            parameters)}]
+      (query-response->result
+       (case via
+         :card     (mt/user-http-request-full-response
+                    user :post (format "card/%d/query" card-id)
+                    {:parameters (map-indexed (fn [i param] (assoc param :id (param-id i))) parameters)})
+         :dashcard (mt/user-http-request-full-response
+                    user :post (format "dashboard/%d/dashcard/%d/card/%d/query" dash-id dashcard-id card-id)
+                    {:parameters (map-indexed (fn [i {:keys [type value]}] {:id (param-id i) :type type :value value})
+                                              parameters)}))))))
 
 (defn- project
   "The rows of `result` restricted to `col-names`, as a multiset."
@@ -647,8 +680,8 @@
 
 (defn- run-probe*
   "[[run-probe]] with the rendered `probe`."
-  [{:keys [ids restricted-ids expect] :as ctx} probe-name probe-fn probe]
-  (let [user        (run-as :rasta ids probe)
+  [{:keys [ids restricted-ids expect via] :as ctx} probe-name probe-fn probe]
+  (let [user        (if via (run-saved-as :rasta via ids probe) (run-as :rasta ids probe))
         admin-base  (run-as :crowberto ids probe)
         expected    (if (= expect :unrestricted)
                       admin-base
@@ -665,6 +698,7 @@
             :user     (-> user (dissoc :body) (update :rows #(some->> % (take 5))))
             :expected (-> expected (dissoc :body) (update :rows #(some->> % (take 5))))
             :format   (:format ctx :legacy)
+            :via      (:via ctx :dataset)
             :query    probe})))
 
 (defn- run-probe
@@ -822,6 +856,71 @@
    :card-bogus-join-alias   (fn [ids] {:query {:source-table (card-source ids :card/shops)
                                                :fields       [[:field (fid ids :shops :name) {:join-alias "Nope"}]]}})))
 
+(defn- orders-with-parameter
+  "A probe listing ORDERS ids (from `source`, default the table) filtered by one parameter of `type` on `target`, a
+  field ref, with `value`."
+  ([ids type target value]
+   (orders-with-parameter ids {:source-table (tid ids :orders)} type target value))
+  ([ids source type target value]
+   {:query      (merge source {:fields [[:field (fid ids :orders :id) nil]]})
+    :parameters [{:type type :target ["dimension" target] :value value}]}))
+
+(def ^:private parameter-probes
+  "Probe name -> fn of an ids map returning a query whose parameter target reaches SHOPS through an FK, so the
+  parameter adds a join the query did not have. Values pick tier 2 (hidden) rows where they can: tier 2 shops are
+  2, 4, 6 and 8, opened in February 2024."
+  (array-map
+   :param-string=          (fn [ids] (orders-with-parameter ids "string/=" (implicit ids :orders :shop_id :shops :name) ["Beta" "Delta"]))
+   :param-contains-secret  (fn [ids] (orders-with-parameter ids "string/contains" (implicit ids :orders :shop_id :shops :secret) ["CANARY"]))
+   :param-number-between   (fn [ids] (orders-with-parameter ids "number/between" (implicit ids :orders :shop_id :shops :price) [2 3]))
+   :param-category-tier    (fn [ids] (orders-with-parameter ids "category" (implicit ids :orders :shop_id :shops :tier) [2]))
+   :param-id               (fn [ids] (orders-with-parameter ids "id" (implicit ids :orders :shop_id :shops :id) [2 4]))
+   :param-float            (fn [ids] (orders-with-parameter ids "number/>=" (implicit ids :orders :shop_id :shops :rating) [2.5]))
+   :param-month-year       (fn [ids] (orders-with-parameter ids "date/month-year" (implicit ids :orders :shop_id :shops :opened_on) "2024-02"))
+   :param-date-range       (fn [ids] (orders-with-parameter ids "date/range" (implicit ids :orders :shop_id :shops :opened_on) "2024-02-01~2024-02-29"))
+   :param-second-fk        (fn [ids] (orders-with-parameter ids "category" (implicit ids :orders :return_shop_id :shops :tier) [2]))
+   :param-name-ref         (fn [ids] (orders-with-parameter ids "category"
+                                                            [:field (fname ids :shops :tier) {:base-type    :type/Integer
+                                                                                              :source-field (fid ids :orders :shop_id)}]
+                                                            [2]))
+   :param-bogus-join-alias (fn [ids] (orders-with-parameter ids "category"
+                                                            [:field (fid ids :shops :tier) {:join-alias "Shops"}]
+                                                            [2]))
+   :param-on-model         (fn [ids] (orders-with-parameter ids {:source-table (card-source ids :model/orders-implicit)}
+                                                            "category" (implicit ids :orders :shop_id :shops :tier) [2]))
+   :param-on-nested        (fn [ids] (orders-with-parameter ids {:source-query {:source-table (tid ids :orders)}}
+                                                            "category" (implicit ids :orders :shop_id :shops :tier) [2]))
+   :param-two-fks          (fn [ids] {:query      {:source-table (tid ids :orders)
+                                                   :fields       [[:field (fid ids :orders :id) nil]]}
+                                      :parameters [{:type   "category"
+                                                    :target ["dimension" (implicit ids :orders :shop_id :shops :tier)]
+                                                    :value  [2]}
+                                                   {:type   "number/>="
+                                                    :target ["dimension" (implicit ids :orders :return_shop_id :shops :secret_num)]
+                                                    :value  [0]}]})
+   :param-temporal-unit    (fn [ids] (let [opened (assoc-in (implicit ids :orders :shop_id :shops :opened_on) [2 :temporal-unit] :day)]
+                                       {:query      {:source-table (tid ids :orders)
+                                                     :breakout     [opened]
+                                                     :aggregation  [[:count]]}
+                                        :parameters [{:type "temporal-unit" :target ["dimension" opened] :value "month"}]}))))
+
+(def ^:private parameter-paths
+  "How the sandboxed user's parameters reach the QP: ad hoc through the dataset API, or applied to a saved card by the
+  dashcard query API. The card query API is left out: it accepts only parameters that match a template tag."
+  [nil :dashcard])
+
+(defn run-parameters!
+  "Run the parameter probes (or those named by `probe-names`) under `config-k`, once per parameter path. Returns
+  result maps."
+  ([config-k]
+   (run-parameters! config-k (keys parameter-probes)))
+  ([config-k probe-names]
+   (do-with-corpus-config!
+    config-k
+    (fn [ctx]
+      (doall (for [via parameter-paths, probe-name probe-names]
+               (run-probe (assoc ctx :via via) probe-name (parameter-probes probe-name))))))))
+
 (def ^:private saved-sql-probes
   "Probes over a saved SQL question on SHOPS. Sandboxes do not apply to SQL results, by design: see \"You cannot
   secure the rows or columns of SQL results\" in docs/permissions/row-and-column-security.md."
@@ -866,36 +965,49 @@
    #'corpus/sandbox-corpus-tier1-hide-price [#'corpus/sandbox-corpus-varied-tier2 #'corpus/sandbox-corpus-varied-hidden-cols]})
 
 (def ^:private masked-response-keys
-  "Response keys whose values differ between two databases with the same data: ids, timings and the echoed query."
+  "Response keys whose values differ between two databases with the same data, or between two runs: ids, uuids,
+  timings and the echoed query."
   #{:id :table_id :table-id :fk_target_field_id :fk-target-field-id :fk_field_id :fk-field-id :database_id :database
     :card-id :card_id :field-id :source-field :lib/card-id :lib/original-fk-field-id :source-table :source-card
-    :field_ref :json_query :started_at :running_time
+    :field_ref :json_query :started_at :running_time :lib/uuid :query-hash
     :metabase.query-processor.middleware.add-remaps/original-field-dimension-id
     :metabase.query-processor.middleware.add-remaps/new-field-dimension-id})
 
+(defn- mask-ids-in-text
+  "`s` with the ids and uuids that error messages echo replaced by `_`: the database id and query hash in SQL comments,
+  and in printed queries uuids, source table and card ids, and the id ending an MBQL 5 field ref. Other numbers stay,
+  since they may be leaked data."
+  [s]
+  (-> s
+      (str/replace #"(databaseID|queryHash): \w+" "$1: _")
+      (str/replace #"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}" "_")
+      (str/replace #"(:source-table|:source-card|:table-id|:card-id) \d+" "$1 _")
+      (str/replace #"\} \d+\]" "} _]")))
+
 (defn- mask-response
-  "`body` without [[masked-response-keys]], with the ids in field refs replaced by `_`, and with the database id and
-  query hash in SQL comments replaced by `_`."
+  "`body` without [[masked-response-keys]], with the ids in field refs replaced by `_`, and with [[mask-ids-in-text]]
+  applied to every string."
   [body]
   (walk/postwalk (fn [x]
                    (cond
                      (map? x)                                        (apply dissoc x masked-response-keys)
-                     (and (vector? x) (#{:field "field"} (first x))) (mapv #(if (int? %) '_ %) x)
-                     (string? x)                                     (str/replace x #"(databaseID|queryHash): \w+" "$1: _")
+                     (and (sequential? x) (#{:field "field"} (first x))) (mapv #(if (int? %) '_ %) x)
+                     (string? x)                                     (mask-ids-in-text x)
                      :else                                           x))
                  body))
 
 (defn- sandboxed-responses!
-  "Probe name -> the sandboxed user's masked response to each canonical probe under `config-k`, on `dataset`."
+  "Probe name -> the sandboxed user's masked response to each canonical and parameter probe under `config-k`, on
+  `dataset`."
   [config-k dataset]
   (do-with-corpus-config!
    config-k dataset
    (fn [{:keys [ids]}]
-     (into {} (for [[probe-name probe-fn] canonical-probes]
+     (into {} (for [[probe-name probe-fn] (merge canonical-probes parameter-probes)]
                 [probe-name (mask-response (:body (run-as :rasta ids (probe-fn ids))))])))))
 
 (defn run-noninterference!
-  "For `config-k`, each varied dataset paired with its restricted dataset, and each canonical probe, the sandboxed
+  "For `config-k`, each varied dataset paired with its restricted dataset, and each probe, the sandboxed
   user's masked responses on the base and the varied dataset, as `{:config :varied :probe :base :varied-response}`."
   [config-k]
   (let [base (sandboxed-responses! config-k #'corpus/sandbox-corpus)]
@@ -1584,6 +1696,18 @@
             (is (not (failing-outcomes outcome))
                 (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
                                              :user :expected :query])))))))))
+
+(deftest ^:synchronized parameters-that-add-joins-are-sandboxed-test
+  (testing "A parameter whose target reaches SHOPS through an FK is filtered by the sandbox like the rest of the query"
+    (mt/test-drivers (corpus-drivers)
+      (doseq [[mode run-in-mode] schema-check-modes
+              config-k           (keys sandbox-configs)
+              :when              (mt/dataset corpus/sandbox-corpus (config-supported? config-k))
+              {:keys [probe outcome] :as result} (run-in-mode #(run-parameters! config-k))]
+        (testing (format "%s via %s under %s in %s" probe (:via result) config-k mode)
+          (is (not (failing-outcomes outcome))
+              (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
+                                           :user :expected :query]))))))))
 
 (deftest ^:synchronized saved-sql-results-are-not-sandboxed-as-documented-test
   (testing "A sandboxed user who can see a saved SQL question gets its unsandboxed results, as the docs say"
