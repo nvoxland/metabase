@@ -704,6 +704,26 @@
                                                                (implicit ids :orders :shop_id :shops :price)
                                                                [:field (fid ids :shops :secret) {:source-field      (fid ids :orders :return_shop_id)
                                                                                                  :source-field-name (fname ids :orders :shop_id)}]]}})
+   ;; a name ref "S__SECRET" that points into join S by the joined-column naming convention
+   :joined-dunder-name-ref  (fn [ids] {:query {:source-table (tid ids :orders)
+                                               :joins        [{:source-table (tid ids :shops)
+                                                               :alias        "S"
+                                                               :condition    [:= [:field (fid ids :orders :shop_id) nil]
+                                                                              [:field (fid ids :shops :id) {:join-alias "S"}]]
+                                                               :fields       :all}]
+                                               :fields       [[:field (fid ids :orders :id) nil]
+                                                              [:field (str "S__" (fname ids :shops :secret)) {:base-type :type/Text}]]}})
+   ;; a name ref to an expression over a SHOPS column
+   :expression-name-ref     (fn [ids] {:query {:source-table (tid ids :shops)
+                                               :expressions  {"secret_copy" [:concat [:field (fid ids :shops :secret) nil] ""]}
+                                               :fields       [[:field (fid ids :shops :id) nil]
+                                                              [:field "secret_copy" {:base-type :type/Text}]]}})
+   ;; NAME, NAME_2 and NAME_3 in one stage; the next stage reads NAME_3 by name
+   :deduplicated-name-ref-3 (fn [ids] {:query {:source-query {:source-table (tid ids :orders)
+                                                              :fields       [[:field (fid ids :orders :name) nil]
+                                                                             (implicit ids :orders :shop_id :shops :name)
+                                                                             (implicit ids :orders :return_shop_id :shops :name)]}
+                                               :fields       [[:field (str (fname ids :shops :name) "_3") {:base-type :type/Text}]]}})
    ;; an explicit REGIONS join dressed up as the implicit join through ORDERS.SHOP_ID; the implicit ref must not reuse it
    :forged-implicit-join    (fn [ids] {:query {:source-table (tid ids :orders)
                                                :joins        [{:source-table          (tid ids :regions)
