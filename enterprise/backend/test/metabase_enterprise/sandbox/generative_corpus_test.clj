@@ -57,7 +57,7 @@
 
 (def ^:private columns
   {:regions [:id :name :tier :hq_shop_id :secret :secret_num]
-   :shops   [:id :name :tier :price :region_id :parent_shop_id :rating :secret :secret_num]
+   :shops   [:id :name :tier :price :region_id :parent_shop_id :rating :opened_on :secret :secret_num]
    :orders  [:id :name :shop_id :return_shop_id :amount]
    :items   [:id :name :order_id :qty]})
 
@@ -97,7 +97,7 @@
                                     :alias        "R"
                                     :condition    [:= $region_id &R.regions.id]
                                     :fields       :none}]
-                          :fields [$id $name $tier $price $region_id $parent_shop_id $rating $secret $secret_num]})
+                          :fields [$id $name $tier $price $region_id $parent_shop_id $rating $opened_on $secret $secret_num]})
            :remappings {"tier" ["dimension" [:field (mt/id :regions :tier) {:join-alias "R"}]]}}})
 
 (defn- shops-card-extra-column-gtap
@@ -704,6 +704,17 @@
                                                                (implicit ids :orders :shop_id :shops :price)
                                                                [:field (fid ids :shops :secret) {:source-field      (fid ids :orders :return_shop_id)
                                                                                                  :source-field-name (fname ids :orders :shop_id)}]]}})
+   ;; SHOPS rows bucketed by month through the implicit join; each tier is its own month
+   :orders-breakout-shop-month (fn [ids] {:query {:source-table (tid ids :orders)
+                                                  :breakout     [[:field (fid ids :shops :opened_on) {:source-field  (fid ids :orders :shop_id)
+                                                                                                      :temporal-unit :month}]]
+                                                  :aggregation  [[:count]]}})
+   ;; the next stage reads the month-bucketed column by name, so its unit is inherited
+   :month-bucket-name-ref   (fn [ids] {:query {:source-query {:source-table (tid ids :shops)
+                                                              :breakout     [[:field (fid ids :shops :opened_on) {:temporal-unit :month}]]
+                                                              :aggregation  [[:sum [:field (fid ids :shops :secret_num) nil]]]}
+                                               :fields       [[:field (fname ids :shops :opened_on) {:base-type :type/Date}]
+                                                              [:field "sum" {:base-type :type/BigInteger}]]}})
    ;; a name ref "S__SECRET" that points into join S by the joined-column naming convention
    :joined-dunder-name-ref  (fn [ids] {:query {:source-table (tid ids :orders)
                                                :joins        [{:source-table (tid ids :shops)
@@ -1223,7 +1234,7 @@
   {:id :type/Integer :name :type/Text :tier :type/Integer :price :type/Integer :amount :type/Integer :qty :type/Integer
    :region_id :type/Integer :parent_shop_id :type/Integer :hq_shop_id :type/Integer :shop_id :type/Integer
    :return_shop_id :type/Integer :order_id :type/Integer :secret :type/Text :secret_num :type/BigInteger
-   :rating :type/Float})
+   :rating :type/Float :opened_on :type/Date})
 
 (defn- ref-column
   "`[table column]` a field ref names, when it names one by id."

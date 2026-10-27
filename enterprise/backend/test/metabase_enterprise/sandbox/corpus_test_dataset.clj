@@ -96,11 +96,13 @@
 (defn- pk [] {:field-name "id" :base-type :type/Integer :pk? true})
 (defn- big [n] {:field-name n :base-type :type/BigInteger})
 (defn- float-col [n] {:field-name n :base-type :type/Float})
+(defn- date-col [n] {:field-name n :base-type :type/Date})
 
-(defn- with-ratings
-  "Append each SHOPS row's RATING, its tier plus one half: exact in binary floating point, and one rating per tier."
+(defn- with-ratings-and-dates
+  "Append each SHOPS row's RATING, its tier plus one half (exact in binary floating point), and OPENED_ON, in 2024 with
+  the tier as month and the id as day, so that each tier is its own month."
   [rows]
-  (mapv (fn [[_id _name tier :as row]] (conj row (+ tier 0.5))) rows))
+  (mapv (fn [[id _name tier :as row]] (conj row (+ tier 0.5) (java.time.LocalDate/of 2024 (int tier) (int id)))) rows))
 
 (defn- with-canaries
   "Append the canary columns' values to each row of `table`, where the row's id is its first value."
@@ -118,9 +120,9 @@
        [4 "West"  2 nil]])]
    ["shops"
     [(pk) (text "name") (int-col "tier") (int-col "price") (int-col "region_id") (int-col "parent_shop_id")
-     (float-col "rating") (text "secret") (big "secret_num")]
+     (float-col "rating") (date-col "opened_on") (text "secret") (big "secret_num")]
     (with-canaries :shops
-      (with-ratings
+      (with-ratings-and-dates
         [[1 "Alpha" 1 1 1   nil]
          [2 "Beta"  2 2 1   1]
          [3 "Gamma" 1 3 2   1]
@@ -237,7 +239,7 @@
   "`SHOPS` column names as the current driver stores them, keyed by their lower-case name. Postgres lower-cases,
   H2 upper-cases."
   []
-  (into {} (for [col ["id" "name" "tier" "price" "region_id" "parent_shop_id" "rating" "secret" "secret_num"]]
+  (into {} (for [col ["id" "name" "tier" "price" "region_id" "parent_shop_id" "rating" "opened_on" "secret" "secret_num"]]
              [(keyword col) (mt/format-name col)])))
 
 (defn describe
