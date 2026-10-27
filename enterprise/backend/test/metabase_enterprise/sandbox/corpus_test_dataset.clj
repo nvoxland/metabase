@@ -196,6 +196,43 @@
                     #(mapv (fn [row] (map->row tabledef (merge (row->map tabledef row) (zipmap columns (repeat nil)))))
                            %)))))
 
+(defn- update-rows
+  "Transform fn: replace each row of `table-name` for which `pred` of the row as a map is truthy with `(f row-map)`."
+  [table-name pred f]
+  (tx/transform-dataset-update-table
+   table-name
+   :table (fn [tabledef]
+            (update tabledef :rows
+                    #(mapv (fn [row]
+                             (let [m (row->map tabledef row)]
+                               (if (pred m) (map->row tabledef (f m)) row)))
+                           %)))))
+
+(defn- vary-hidden-columns
+  "A SHOPS row map with PRICE and the canary columns changed. The new values are not canaries."
+  [{:keys [id price] :as shop}]
+  (assoc shop
+         :price      (+ 100 price)
+         :secret     (str "VARIED-" id)
+         :secret_num (+ 100000 id)))
+
+(def sandbox-corpus-varied-tier2
+  "The base dataset with only the tier 2 SHOPS rows changed: every column but id and tier, a later opening date, and
+  shop 8 removed. A sandbox that hides tier 2 must give the same answers here as on the base dataset."
+  (tx/transformed-dataset-definition "sandbox-corpus-varied-tier2" sandbox-corpus
+                                     (update-rows "shops" #(= 2 (:tier %))
+                                                  #(-> (vary-hidden-columns %)
+                                                       (assoc :name      (str "Varied " (:id %))
+                                                              :rating    9.5
+                                                              :opened_on (java.time.LocalDate/of 2025 6 (int (:id %))))))
+                                     (keep-rows "shops" #(not= 8 (:id %)))))
+
+(def sandbox-corpus-varied-hidden-cols
+  "The base dataset with PRICE and the canary columns of every SHOPS row changed. A sandbox that hides those columns
+  must give the same answers here as on the base dataset."
+  (tx/transformed-dataset-definition "sandbox-corpus-varied-hidden-cols" sandbox-corpus
+                                     (update-rows "shops" (constantly true) vary-hidden-columns)))
+
 (def tier-1-regions
   "IDs of the REGIONS rows with tier 1."
   #{1 3})

@@ -17,6 +17,7 @@
 
   See the dataset namespace for the schema, the canaries, and the restricted variants."
   (:require
+   [clojure.data :as data]
    [clojure.string :as str]
    [clojure.test :refer :all]
    [clojure.test.check :as tc]
@@ -355,43 +356,46 @@
 (defn- do-with-corpus-config!
   "Load the base dataset and the config's restricted variant, create the cards in both, set up the sandbox on a temp
   copy of the base database as `:rasta`, and call `(f ctx)` inside it. `ctx` has `:ids` for the base copy,
-  `:restricted-ids` for the restricted database, `:allowed` canaries, and the config's fields."
-  [config-k f]
-  (let [{:keys [gtaps attributes restricted setup expect hidden-cols remaps persist? premium-features]
-         :or   {expect :restricted}} (corpus-config config-k)
-        in-sandbox-copy (fn [base restricted-ids allowed]
-                          (mt/with-db base
-                            (met/with-gtaps! {:gtaps (gtaps) :attributes attributes}
-                              (doseq [table tables]
-                                (data-perms/set-table-permission! &group (mt/id table) :perms/create-queries :query-builder))
-                              (data-perms/set-database-permission! &group (mt/id) :perms/download-results :one-million-rows)
-                              (when setup (setup))
-                              (mt/with-additional-premium-features (or premium-features #{})
-                                (do-with-remaps!
-                                 remaps
-                                 (fn []
-                                   (do-with-maybe-persisted-cards!
-                                    persist?
-                                    (fn [cards]
-                                      (f {:config         config-k
-                                          :expect         expect
-                                          :hidden-cols    (or hidden-cols #{})
-                                          :sandboxed      (config-sandboxed-tables config-k)
-                                          :ids            (ids-map cards)
-                                          :restricted-ids restricted-ids
-                                          :allowed        allowed})))))))))]
-    (mt/dataset corpus/sandbox-corpus
-      (corpus/ensure-fk-metadata!)
-      (fully-synced!)
-      (let [base (mt/db)]
-        (mt/dataset (var-get restricted)
-          (corpus/ensure-fk-metadata!)
-          (fully-synced!)
-          (do-with-remaps! remaps
-                           (fn []
-                             (do-with-cards!
-                              (fn [restricted-cards]
-                                (in-sandbox-copy base (ids-map restricted-cards) (allowed-canary-ids)))))))))))
+  `:restricted-ids` for the restricted database, `:allowed` canaries, and the config's fields. `base-dataset` (default
+  the corpus) is the dataset the sandboxed user queries."
+  ([config-k f]
+   (do-with-corpus-config! config-k #'corpus/sandbox-corpus f))
+  ([config-k base-dataset f]
+   (let [{:keys [gtaps attributes restricted setup expect hidden-cols remaps persist? premium-features]
+          :or   {expect :restricted}} (corpus-config config-k)
+         in-sandbox-copy (fn [base restricted-ids allowed]
+                           (mt/with-db base
+                             (met/with-gtaps! {:gtaps (gtaps) :attributes attributes}
+                               (doseq [table tables]
+                                 (data-perms/set-table-permission! &group (mt/id table) :perms/create-queries :query-builder))
+                               (data-perms/set-database-permission! &group (mt/id) :perms/download-results :one-million-rows)
+                               (when setup (setup))
+                               (mt/with-additional-premium-features (or premium-features #{})
+                                 (do-with-remaps!
+                                  remaps
+                                  (fn []
+                                    (do-with-maybe-persisted-cards!
+                                     persist?
+                                     (fn [cards]
+                                       (f {:config         config-k
+                                           :expect         expect
+                                           :hidden-cols    (or hidden-cols #{})
+                                           :sandboxed      (config-sandboxed-tables config-k)
+                                           :ids            (ids-map cards)
+                                           :restricted-ids restricted-ids
+                                           :allowed        allowed})))))))))]
+     (mt/dataset (var-get base-dataset)
+       (corpus/ensure-fk-metadata!)
+       (fully-synced!)
+       (let [base (mt/db)]
+         (mt/dataset (var-get restricted)
+           (corpus/ensure-fk-metadata!)
+           (fully-synced!)
+           (do-with-remaps! remaps
+                            (fn []
+                              (do-with-cards!
+                               (fn [restricted-cards]
+                                 (in-sandbox-copy base (ids-map restricted-cards) (allowed-canary-ids))))))))))))
 
 ;;; ------------------------------------------------ Schema checks -------------------------------------------------
 
@@ -849,6 +853,57 @@
     (fn [ctx]
       (doall (for [fmt fmts, probe-name probe-names]
                (run-probe (assoc ctx :format fmt) probe-name (canonical-probes probe-name))))))))
+
+;;; ----------------------------------------------- Noninterference ------------------------------------------------
+;;;
+;;; Change only the data a sandbox hides; the sandboxed user's responses must not change.
+
+(def ^:private varied-datasets
+  "Restricted dataset -> the varied datasets that change only data it hides."
+  {#'corpus/sandbox-corpus-tier1            [#'corpus/sandbox-corpus-varied-tier2]
+   #'corpus/sandbox-corpus-tier1-both       [#'corpus/sandbox-corpus-varied-tier2]
+   #'corpus/sandbox-corpus-hide-price       [#'corpus/sandbox-corpus-varied-hidden-cols]
+   #'corpus/sandbox-corpus-tier1-hide-price [#'corpus/sandbox-corpus-varied-tier2 #'corpus/sandbox-corpus-varied-hidden-cols]})
+
+(def ^:private masked-response-keys
+  "Response keys whose values differ between two databases with the same data: ids, timings and the echoed query."
+  #{:id :table_id :table-id :fk_target_field_id :fk-target-field-id :fk_field_id :fk-field-id :database_id :database
+    :card-id :card_id :field-id :source-field :lib/card-id :lib/original-fk-field-id :source-table :source-card
+    :field_ref :json_query :started_at :running_time
+    :metabase.query-processor.middleware.add-remaps/original-field-dimension-id
+    :metabase.query-processor.middleware.add-remaps/new-field-dimension-id})
+
+(defn- mask-response
+  "`body` without [[masked-response-keys]], with the ids in field refs replaced by `_`, and with the database id and
+  query hash in SQL comments replaced by `_`."
+  [body]
+  (walk/postwalk (fn [x]
+                   (cond
+                     (map? x)                                        (apply dissoc x masked-response-keys)
+                     (and (vector? x) (#{:field "field"} (first x))) (mapv #(if (int? %) '_ %) x)
+                     (string? x)                                     (str/replace x #"(databaseID|queryHash): \w+" "$1: _")
+                     :else                                           x))
+                 body))
+
+(defn- sandboxed-responses!
+  "Probe name -> the sandboxed user's masked response to each canonical probe under `config-k`, on `dataset`."
+  [config-k dataset]
+  (do-with-corpus-config!
+   config-k dataset
+   (fn [{:keys [ids]}]
+     (into {} (for [[probe-name probe-fn] canonical-probes]
+                [probe-name (mask-response (:body (run-as :rasta ids (probe-fn ids))))])))))
+
+(defn run-noninterference!
+  "For `config-k`, each varied dataset paired with its restricted dataset, and each canonical probe, the sandboxed
+  user's masked responses on the base and the varied dataset, as `{:config :varied :probe :base :varied-response}`."
+  [config-k]
+  (let [base (sandboxed-responses! config-k #'corpus/sandbox-corpus)]
+    (doall (for [varied                (varied-datasets (:restricted (corpus-config config-k)))
+                 :let                  [responses (sandboxed-responses! config-k varied)]
+                 [probe-name response] base]
+             {:config config-k :varied varied :probe probe-name
+              :base response :varied-response (responses probe-name)}))))
 
 (defn summarize
   "Config -> outcome -> count, for reading at the REPL."
@@ -1635,6 +1690,19 @@
         (testing (format "%s under %s in %s" (pr-str probe) config-k mode)
           (is (= 1 (count (into #{} (map :outcome) results)))
               (pr-str (map (juxt :format :outcome) results))))))))
+
+(deftest ^:synchronized hidden-data-does-not-change-sandboxed-responses-test
+  (testing "Changing only the rows or columns a sandbox hides leaves every sandboxed response the same"
+    (mt/test-drivers (corpus-drivers)
+      (doseq [[mode run-in-mode] schema-check-modes
+              [config-k config]  sandbox-configs
+              :when              (and (varied-datasets (:restricted config))
+                                      (not (#{:error :unrestricted} (:expect config)))
+                                      (mt/dataset corpus/sandbox-corpus (config-supported? config-k)))
+              {:keys [probe varied base varied-response]} (run-in-mode #(run-noninterference! config-k))]
+        (testing (format "%s under %s on %s in %s" probe config-k (:name (meta varied)) mode)
+          (is (= base varied-response)
+              (u/truncate (pr-str (take 2 (data/diff base varied-response))) 2000)))))))
 
 (deftest ^:synchronized generated-queries-cannot-escape-sandbox-test
   (mt/test-drivers (corpus-drivers)
