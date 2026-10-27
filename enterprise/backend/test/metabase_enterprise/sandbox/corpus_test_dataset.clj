@@ -207,6 +207,11 @@
   (tx/transformed-dataset-definition "sandbox-corpus-region-tier1" sandbox-corpus
                                      (keep-rows "shops" #(contains? tier-1-regions (:region_id %)))))
 
+(def sandbox-corpus-no-shops
+  "No SHOPS rows at all, as a sandbox whose filter matches nothing."
+  (tx/transformed-dataset-definition "sandbox-corpus-no-shops" sandbox-corpus
+                                     (keep-rows "shops" (constantly false))))
+
 (def ^:private hidden-shop-columns [:price :secret :secret_num])
 
 (def sandbox-corpus-hide-price

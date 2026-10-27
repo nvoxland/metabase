@@ -45,6 +45,7 @@
    [metabase.test.util.random :as tu.rng]
    [metabase.util :as u]
    [metabase.util.json :as json]
+   [metabase.util.malli.fn :as mu.fn]
    [metabase.util.match :as match]
    [toucan2.core :as t2]))
 
@@ -106,18 +107,29 @@
   {:shops {:query      (mt/mbql-query shops {:fields [$id $name $tier $region_id $parent_shop_id]})
            :remappings (tier-dimension-remapping :shops)}})
 
-(defn- shops-native-gtap
-  "A native sandbox card with a `{{tier}}` template tag. Unquoted identifiers, which every supported driver resolves
-  in its own case."
-  []
-  {:shops {:query      (mt/native-query {:query         (format "SELECT * FROM %s WHERE %s = {{tier}}"
-                                                                (mt/format-name "shops")
-                                                                (mt/format-name "tier"))
+(defn- native-shops-gtap
+  "A native sandbox card on SHOPS with a `{{tier}}` template tag. `sql` is a format string over `[[mt/format-name]]`d
+  `names`; unquoted identifiers, which every supported driver resolves in its own case."
+  [sql & names]
+  {:shops {:query      (mt/native-query {:query         (apply format sql (map mt/format-name names))
                                          :template-tags {"tier" {:name         "tier"
                                                                  :display-name "tier"
                                                                  :type         :number
                                                                  :required     true}}})
            :remappings {"tier" ["variable" ["template-tag" "tier"]]}}})
+
+(defn- shops-native-gtap []
+  (native-shops-gtap "SELECT * FROM %s WHERE %s = {{tier}}" "shops" "tier"))
+
+(defn- shops-native-extra-column-gtap
+  "A native sandbox card that also returns a REGIONS column, which the sandbox drops in an appended stage."
+  []
+  (native-shops-gtap "SELECT s.*, r.%s AS %s FROM %s s LEFT JOIN %s r ON s.%s = r.%s WHERE s.%s = {{tier}}"
+                     "name" "region_name" "shops" "regions" "region_id" "id" "tier"))
+
+(defn- shops-native-hide-price-gtap []
+  (native-shops-gtap "SELECT %s, %s, %s, %s, %s FROM %s WHERE %s = {{tier}}"
+                     "id" "name" "tier" "region_id" "parent_shop_id" "shops" "tier"))
 
 (defn- add-rasta-to-group-with-view-data!
   "Put `:rasta` in a fresh group whose view-data on the current database is `level`. Granting query access too would
@@ -141,7 +153,9 @@
   * `:sandboxed`   tables with an enforced sandbox, for the structural detector
   * `:setup`       fn run inside `with-gtaps!` for extra arrangements (second groups)
   * `:remaps`      FK display remappings `[[table column target-table target-column] ...]`, set up in both databases
-  * `:feature`     driver feature the config needs"
+  * `:feature`     driver feature the config needs
+  * `:persist?`    persist every model as an admin before probing
+  * `:premium-features` features granted besides `:sandboxes`"
   (array-map
    :table-tier      {:gtaps shops-table-gtap           :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
    :card-rows       {:gtaps shops-card-gtap            :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
@@ -152,17 +166,36 @@
                      :hidden-cols #{:price :secret :secret_num}}
    :native          {:gtaps shops-native-gtap          :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
                      :feature :native-parameters}
+   :native-extra-column {:gtaps shops-native-extra-column-gtap :attributes {"tier" "1"}
+                         :restricted #'corpus/sandbox-corpus-tier1 :feature :native-parameters}
+   :native-hide-price {:gtaps shops-native-hide-price-gtap :attributes {"tier" "1"}
+                       :restricted #'corpus/sandbox-corpus-tier1-hide-price :feature :native-parameters
+                       :hidden-cols #{:price :secret :secret_num}}
    :two-tables      {:gtaps (fn [] (merge (shops-table-gtap) {:regions {:remappings (tier-remapping :regions)}}))
                      :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1-both :sandboxed #{:shops :regions}}
    ;; ORDERS.SHOP_ID displays SHOPS.NAME: remaps add implicit joins to the sandboxed table in the outer query
    :table-tier+remap {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
                       :remaps [[:orders :shop_id :shops :name]]}
+   ;; every model persisted by an admin: the cache tables hold every row and column
+   :table-tier+persisted {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
+                          :persist? true :feature :persist-models}
+   :card-hide-price+persisted {:gtaps shops-hide-price-gtap :attributes {} :restricted #'corpus/sandbox-corpus-hide-price
+                               :hidden-cols #{:price :secret :secret_num} :persist? true :feature :persist-models}
    ;; another group grants unrestricted access, so the sandbox is not enforced (by design)
    :cancelled       {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus :expect :unrestricted
                      :sandboxed #{} :setup #(add-rasta-to-group-with-view-data! :unrestricted)}
    ;; another group blocks the database; the sandbox must still apply
    :plus-blocked    {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
                      :setup #(add-rasta-to-group-with-view-data! :blocked)}
+   ;; another group impersonates a database role: sandbox and impersonation on one database conflict, an error
+   :plus-impersonation {:gtaps shops-table-gtap :attributes {"tier" "1" "role" "corpus_role"}
+                        :restricted #'corpus/sandbox-corpus-tier1 :expect :error
+                        :feature :connection-impersonation :premium-features #{:advanced-permissions}
+                        :setup (fn []
+                                 (let [group (add-rasta-to-group-with-view-data! :unrestricted)]
+                                   (t2/insert! :model/ConnectionImpersonation {:db_id     (mt/id)
+                                                                               :group_id  (:id group)
+                                                                               :attribute "role"})))}
    ;; two sandboxed groups on one table is an error, and must stay one
    :two-sandboxes   {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1 :expect :error
                      :setup (fn []
@@ -171,9 +204,38 @@
                                                             :table_id             (mt/id :shops)
                                                             :attribute_remappings (tier-remapping :shops)})))}))
 
+(def ^:private attribute-variants
+  "Variant name -> a base config from [[sandbox-configs]] run with other login attributes. Attribute values reach the
+  sandbox as parameter values; JWT attributes merge into login attributes, so numbers and lists can arrive too."
+  (array-map
+   :attr-leading-zero {:base :table-tier :attributes {"tier" "01"}}
+   :attr-number       {:base :table-tier :attributes {"tier" 1}}
+   :attr-padded       {:base :table-tier :attributes {"tier" " 1"}       :expect :error}
+   :attr-decimal      {:base :table-tier :attributes {"tier" "1.0"}      :expect :error}
+   :attr-sql-like     {:base :table-tier :attributes {"tier" "1 OR 1=1"} :expect :error}
+   :attr-empty        {:base :table-tier :attributes {"tier" ""}         :expect :error}
+   :attr-missing      {:base :table-tier :attributes {}                  :expect :error}
+   :attr-wrong-case   {:base :table-tier :attributes {"Tier" "1"}        :expect :error}
+   ;; no shop has tier 3, so a list that lifts the filter shows as extra rows
+   :attr-list         {:base :table-tier :attributes {"tier" ["3"]}      :expect :error}
+   :attr-map          {:base :table-tier :attributes {"tier" {"a" "1"}}  :expect :error}
+   :card-sql-like     {:base :card-rows  :attributes {"tier" "1 OR 1=1"} :expect :error}
+   :card-list         {:base :card-rows  :attributes {"tier" ["3"]}      :expect :error}
+   ;; a native sandbox fails safe on a list: its `{{tier}}` matches nothing
+   :native-list       {:base :native     :attributes {"tier" ["3"]}      :restricted #'corpus/sandbox-corpus-no-shops}
+   :native-sql-like   {:base :native     :attributes {"tier" "1 OR 1=1"} :expect :error}
+   :native-missing    {:base :native     :attributes {}                  :expect :error}))
+
+(defn- corpus-config
+  "The config named `config-k`, from [[sandbox-configs]] or [[attribute-variants]]."
+  [config-k]
+  (or (sandbox-configs config-k)
+      (let [{:keys [base] :as variant} (attribute-variants config-k)]
+        (merge (sandbox-configs base) (dissoc variant :base)))))
+
 (defn- config-sandboxed-tables [config-k]
-  (let [{:keys [sandboxed]} (sandbox-configs config-k)]
-    (if (contains? (sandbox-configs config-k) :sandboxed) sandboxed #{:shops})))
+  (let [config (corpus-config config-k)]
+    (if (contains? config :sandboxed) (:sandboxed config) #{:shops})))
 
 ;;; ---------------------------------------------- Cards and harness -----------------------------------------------
 
@@ -188,10 +250,29 @@
   [f]
   (let [shops-q  (mt/mbql-query shops)
         orders-q (mt/mbql-query orders {:fields [$id $name $shop_id $shop_id->shops.name $shop_id->shops.price]})]
-    (mt/with-temp [:model/Card {shops-card :id}  {:dataset_query shops-q}
-                   :model/Card {shops-model :id} {:dataset_query shops-q :type :model :result_metadata (model-metadata shops-q)}
-                   :model/Card {orders-card :id} {:dataset_query orders-q}]
-      (f {:card/shops shops-card :model/shops shops-model :card/orders-implicit orders-card}))))
+    (mt/with-temp [:model/Card {shops-card :id}   {:dataset_query shops-q}
+                   :model/Card {shops-model :id}  {:dataset_query shops-q :type :model :result_metadata (model-metadata shops-q)}
+                   :model/Card {orders-card :id}  {:dataset_query orders-q}
+                   :model/Card {orders-model :id} {:dataset_query orders-q :type :model :result_metadata (model-metadata orders-q)}]
+      (f {:card/shops            shops-card
+          :model/shops           shops-model
+          :card/orders-implicit  orders-card
+          :model/orders-implicit orders-model}))))
+
+(defn- do-with-maybe-persisted-cards!
+  "[[do-with-cards!]], with every model persisted by an admin first when `persist?`. The cache tables hold unsandboxed
+  rows, so a sandboxed user's query must never read them."
+  [persist? f]
+  (if-not persist?
+    (do-with-cards! f)
+    (mt/with-persistence-enabled! [persist-models!]
+      (do-with-cards! (fn [cards]
+                        (mt/with-test-user :crowberto
+                          (persist-models!))
+                        (assert (every? #{"persisted"}
+                                        (t2/select-fn-vec :state :model/PersistedInfo :card_id [:in (vals cards)]))
+                                "every model persisted")
+                        (f cards))))))
 
 (defn- allowed-canary-ids
   "The canaries an admin can see in the current (restricted) database."
@@ -215,7 +296,7 @@
       (swap! fully-synced-dbs conj (:id db)))))
 
 (defn- config-supported? [config-k]
-  (if-let [feature (get-in sandbox-configs [config-k :feature])]
+  (if-let [feature (:feature (corpus-config config-k))]
     (driver.u/supports? driver/*driver* feature (mt/db))
     true))
 
@@ -232,7 +313,8 @@
   copy of the base database as `:rasta`, and call `(f ctx)` inside it. `ctx` has `:ids` for the base copy,
   `:restricted-ids` for the restricted database, `:allowed` canaries, and the config's fields."
   [config-k f]
-  (let [{:keys [gtaps attributes restricted setup expect hidden-cols remaps] :or {expect :restricted}} (sandbox-configs config-k)
+  (let [{:keys [gtaps attributes restricted setup expect hidden-cols remaps persist? premium-features]
+         :or   {expect :restricted}} (corpus-config config-k)
         in-sandbox-copy (fn [base restricted-ids allowed]
                           (mt/with-db base
                             (met/with-gtaps! {:gtaps (gtaps) :attributes attributes}
@@ -240,17 +322,20 @@
                                 (data-perms/set-table-permission! &group (mt/id table) :perms/create-queries :query-builder))
                               (data-perms/set-database-permission! &group (mt/id) :perms/download-results :one-million-rows)
                               (when setup (setup))
-                              (do-with-remaps! remaps
-                                               (fn []
-                                                 (do-with-cards!
-                                                  (fn [cards]
-                                                    (f {:config         config-k
-                                                        :expect         expect
-                                                        :hidden-cols    (or hidden-cols #{})
-                                                        :sandboxed      (config-sandboxed-tables config-k)
-                                                        :ids            (ids-map cards)
-                                                        :restricted-ids restricted-ids
-                                                        :allowed        allowed}))))))))]
+                              (mt/with-additional-premium-features (or premium-features #{})
+                                (do-with-remaps!
+                                 remaps
+                                 (fn []
+                                   (do-with-maybe-persisted-cards!
+                                    persist?
+                                    (fn [cards]
+                                      (f {:config         config-k
+                                          :expect         expect
+                                          :hidden-cols    (or hidden-cols #{})
+                                          :sandboxed      (config-sandboxed-tables config-k)
+                                          :ids            (ids-map cards)
+                                          :restricted-ids restricted-ids
+                                          :allowed        allowed})))))))))]
     (mt/dataset corpus/sandbox-corpus
       (corpus/ensure-fk-metadata!)
       (fully-synced!)
@@ -263,6 +348,25 @@
                              (do-with-cards!
                               (fn [restricted-cards]
                                 (in-sandbox-copy base (ids-map restricted-cards) (allowed-canary-ids)))))))))))
+
+;;; ------------------------------------------------ Schema checks -------------------------------------------------
+
+(defn do-without-schema-checks!
+  "Call `thunk` with `mu/defn` input and output checks off. Production does not compile those checks in, so a query
+  that fails closed on a schema check in a test can fail open in production."
+  [thunk]
+  ;; the root value, not a binding: API requests run on other threads
+  (alter-var-root #'mu.fn/*enforce* (constantly false))
+  (try
+    (thunk)
+    (finally
+      (alter-var-root #'mu.fn/*enforce* (constantly true)))))
+
+(def ^:private schema-check-modes
+  "Mode name -> fn of a thunk that runs it in that mode."
+  (array-map
+   :test-mode       (fn [thunk] (thunk))
+   :production-mode do-without-schema-checks!))
 
 ;;; -------------------------------------------------- Detectors ---------------------------------------------------
 
@@ -290,10 +394,14 @@
   "Compare the sandboxed user's result with the expected one (an admin on the restricted variant, or on the base
   database when nothing should be restricted). `admin-base` tells whether the probe could tell restricted data from
   unrestricted data at all."
-  [{:keys [expect hidden-cols]} user expected admin-base]
+  [{:keys [expect hidden-cols] :as ctx} user expected admin-base]
   (let [hidden-names (set (map name hidden-cols))]
     (cond
-      (= expect :error)                   (if (:error user) :user-error :missing-error)
+      ;; a probe that cannot tell the restricted data from the rest may succeed; one that can must fail
+      (= expect :error)                   (if (:error user)
+                                            :user-error
+                                            (let [v (differential-verdict (assoc ctx :expect :restricted) user expected admin-base)]
+                                              (if (= v :consistent) :missing-error v)))
       (= expect :unrestricted)            (cond
                                             (and (:error expected) (:error user)) :rejected
                                             (:error user)                         :over-restricted
@@ -522,6 +630,8 @@
    :card-shops              (fn [ids] {:query {:source-table (card-source ids :card/shops)}})
    :model-shops             (fn [ids] {:query {:source-table (card-source ids :model/shops)}})
    :card-orders-implicit    (fn [ids] {:query {:source-table (card-source ids :card/orders-implicit)}})
+   :model-orders-implicit   (fn [ids] {:query {:source-table (card-source ids :model/orders-implicit)}})
+   :model-shops-count       (fn [ids] {:query {:source-table (card-source ids :model/shops) :aggregation [[:count]]}})
    :nested-shops            (fn [ids] {:query {:source-query {:source-table (tid ids :shops)}}})
    :nested-shops-name-ref   (fn [ids] {:query {:source-query {:source-table (tid ids :shops)}
                                                :fields       [[:field (fname ids :shops :secret) {:base-type :type/Text}]]}})
@@ -537,15 +647,17 @@
                                                :fields       [[:field (fid ids :shops :name) {:join-alias "Nope"}]]}})))
 
 (defn run-canonical!
-  "Run the canonical probes under one config, or every config. Returns result maps."
+  "Run the canonical probes (or those named by `probe-names`) under one config, or every config. Returns result maps."
   ([]
    (mapcat run-canonical! (keys sandbox-configs)))
   ([config-k]
+   (run-canonical! config-k (keys canonical-probes)))
+  ([config-k probe-names]
    (do-with-corpus-config!
     config-k
     (fn [ctx]
-      (doall (for [[probe-name probe-fn] canonical-probes]
-               (run-probe ctx probe-name probe-fn)))))))
+      (doall (for [probe-name probe-names]
+               (run-probe ctx probe-name (canonical-probes probe-name))))))))
 
 (defn summarize
   "Config -> outcome -> count, for reading at the REPL."
@@ -786,6 +898,46 @@
 ;;; for canaries of hidden rows and for hygiene. The base database gets one full sync first, so fingerprints and
 ;;; field values exist as they would in a real instance.
 
+(defn- do-with-corpus-dashboard!
+  "Create a dashboard showing the SHOPS card and the ORDERS card with implicit SHOPS columns, with `secret` and `tier`
+  parameters wired to SHOPS directly and through the implicit join, and call `(f dashboard)`, where `dashboard` has
+  `:id` and `:dashcards`, card key -> `[dashcard-id card-id]`."
+  [ids f]
+  (let [orders-card (get-in ids [:cards :card/orders-implicit])
+        shops-card  (get-in ids [:cards :card/shops])
+        mappings    (fn [card-id field-ref-fn]
+                      (for [param ["secret" "tier"]]
+                        {:parameter_id param :card_id card-id :target ["dimension" (field-ref-fn (keyword param))]}))]
+    (mt/with-temp [:model/Dashboard {dash-id :id} {:parameters [{:id "secret" :slug "secret" :name "secret" :type "string/="}
+                                                                {:id "tier" :slug "tier" :name "tier" :type "number/="}]}
+                   :model/DashboardCard {orders-dc :id} {:dashboard_id       dash-id
+                                                         :card_id            orders-card
+                                                         :parameter_mappings (mappings orders-card #(implicit ids :orders :shop_id :shops %))}
+                   :model/DashboardCard {shops-dc :id} {:dashboard_id       dash-id
+                                                        :card_id            shops-card
+                                                        :parameter_mappings (mappings shops-card #(vector :field (fid ids :shops %) nil))}]
+      (f {:id dash-id :dashcards {:card/orders-implicit [orders-dc orders-card] :card/shops [shops-dc shops-card]}}))))
+
+(defn- dashboard-requests
+  "Endpoint name -> request for the dashboard of [[do-with-corpus-dashboard!]]. Tier 2 is hidden by the row sandboxes."
+  [ids {dash :id :keys [dashcards]}]
+  (let [run-dashcard (fn [card-k params]
+                       (let [[dashcard card] (dashcards card-k)]
+                         [:post (format "dashboard/%d/dashcard/%d/card/%d/query" dash dashcard card) {:parameters params}]))
+        hidden-tier  [{:id "tier" :type "number/=" :value [2]}]]
+    (array-map
+     :dashboard-get                [:get (format "dashboard/%d" dash)]
+     :dashboard-query-metadata     [:get (format "dashboard/%d/query_metadata" dash)]
+     :dashboard-param-values       [:get (format "dashboard/%d/params/secret/values" dash)]
+     :dashboard-param-search       [:get (format "dashboard/%d/params/secret/search/CANARY" dash)]
+     :dashboard-chain-filter       [:get (format "dashboard/%d/params/secret/values?tier=2" dash)]
+     :dashboard-chain-filter-tier  [:get (format "dashboard/%d/params/tier/values?secret=%s" dash
+                                                 (corpus/canary-text :shops 2))]
+     :dashcard-orders-hidden-tier  (run-dashcard :card/orders-implicit hidden-tier)
+     :dashcard-shops-hidden-tier   (run-dashcard :card/shops hidden-tier)
+     :xray-table                   [:get (format "automagic-dashboards/table/%d" (tid ids :shops))]
+     :xray-field-secret-num        [:get (format "automagic-dashboards/field/%d" (fid ids :shops :secret_num))])))
+
 (defn- endpoint-requests
   "Endpoint name -> `[method path body?]` for the current (base copy) database."
   [ids]
@@ -856,13 +1008,16 @@
   (do-with-corpus-config!
    config-k
    (fn [{:keys [ids allowed] :as ctx}]
-     (into (array-map)
-           (for [[endpoint request] (endpoint-requests ids)]
-             (let [{:keys [status body]} (request-as :rasta request)
-                   user                  {:body body}]
-               [endpoint {:status  status
-                          :leaked  (not-empty (into (sorted-set) (remove allowed) (corpus/canary-ids body)))
-                          :hygiene (hygiene-verdict ctx user)}]))))))
+     (do-with-corpus-dashboard!
+      ids
+      (fn [dashboard]
+        (into (array-map)
+              (for [[endpoint request] (concat (endpoint-requests ids) (dashboard-requests ids dashboard))]
+                (let [{:keys [status body]} (request-as :rasta request)
+                      user                  {:body body}]
+                  [endpoint {:status  status
+                             :leaked  (not-empty (into (sorted-set) (remove allowed) (corpus/canary-ids body)))
+                             :hygiene (hygiene-verdict ctx user)}]))))))))
 
 (deftest ^:synchronized endpoints-reveal-nothing-outside-the-sandbox-test
   (mt/test-drivers #{:h2}
@@ -1129,7 +1284,8 @@
    #'corpus/sandbox-corpus-tier1-both       {:shops #{1 3 5 7}         :regions #{1 3}     :shop-rows 4}
    #'corpus/sandbox-corpus-region-tier1     {:shops #{1 2 5 6}         :regions #{1 2 3 4} :shop-rows 4}
    #'corpus/sandbox-corpus-hide-price       {:shops #{}                :regions #{1 2 3 4} :shop-rows 8}
-   #'corpus/sandbox-corpus-tier1-hide-price {:shops #{}                :regions #{1 2 3 4} :shop-rows 4}})
+   #'corpus/sandbox-corpus-tier1-hide-price {:shops #{}                :regions #{1 2 3 4} :shop-rows 4}
+   #'corpus/sandbox-corpus-no-shops         {:shops #{}                :regions #{1 2 3 4} :shop-rows 0}})
 
 (deftest ^:synchronized corpus-dataset-loads-as-designed-test
   (mt/test-drivers (corpus-drivers)
@@ -1157,13 +1313,28 @@
 
 (deftest ^:synchronized canonical-probes-are-enforced-under-every-sandbox-test
   (mt/test-drivers (corpus-drivers)
-    (doseq [config-k (keys sandbox-configs)]
+    (doseq [[mode run-in-mode] schema-check-modes
+            config-k           (keys sandbox-configs)]
       (when (mt/dataset corpus/sandbox-corpus (config-supported? config-k))
-        (doseq [{:keys [probe outcome] :as result} (run-canonical! config-k)]
-          (testing (format "%s under %s" probe config-k)
+        (doseq [{:keys [probe outcome] :as result} (run-in-mode #(run-canonical! config-k))]
+          (testing (format "%s under %s in %s" probe config-k mode)
             (is (not (failing-outcomes outcome))
                 (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
                                              :user :expected :query])))))))))
+
+(deftest ^:synchronized attribute-values-are-enforced-or-rejected-test
+  (testing "Every login attribute value either filters the sandboxed table or fails the query, with and without schema checks"
+    (mt/test-drivers (corpus-drivers)
+      (doseq [[mode run-in-mode] schema-check-modes
+              config-k           (keys attribute-variants)
+              :when              (mt/dataset corpus/sandbox-corpus (config-supported? config-k))
+              ;; the bogus-join-alias probes are covered by the canonical test
+              {:keys [probe outcome] :as result} (run-in-mode
+                                                  #(run-canonical! config-k (remove #{:model-bogus-join-alias :card-bogus-join-alias}
+                                                                                    (keys canonical-probes))))]
+        (testing (format "%s under %s in %s" probe config-k mode)
+          (is (not (failing-outcomes outcome))
+              (pr-str (select-keys result [:outcome :differential :canary :user :expected]))))))))
 
 (deftest ^:synchronized sandboxed-user-responses-are-hygienic-test
   (testing "Nothing in a sandboxed user's response reveals the sandbox or the raw table: no fingerprints, no native or preprocessed forms, no SQL text"
@@ -1224,17 +1395,19 @@
 
 (deftest ^:synchronized field-ref-grid-slice-cannot-escape-sandbox-test
   (mt/test-drivers (corpus-drivers)
-    (doseq [config-k [:table-tier :card-hide-price]
-            {:keys [probe outcome] :as result} (run-grid! config-k (grid-probe-names ci-grid-selection))]
-      (testing (format "%s under %s" (pr-str probe) config-k)
+    (doseq [[mode run-in-mode]                  schema-check-modes
+            config-k                            [:table-tier :card-hide-price]
+            {:keys [probe outcome] :as result} (run-in-mode #(run-grid! config-k (grid-probe-names ci-grid-selection)))]
+      (testing (format "%s under %s in %s" (pr-str probe) config-k mode)
         (is (not (failing-outcomes outcome))
             (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :user :query])))))))
 
 (deftest ^:synchronized generated-queries-cannot-escape-sandbox-test
   (mt/test-drivers (corpus-drivers)
-    (doseq [config-k [:table-tier :card-hide-price :two-tables]]
-      (testing (str config-k)
-        (let [{:keys [result outcomes]} (run-generated! config-k (generated-cases-per-config) (generated-seed))]
+    (doseq [[mode run-in-mode] schema-check-modes
+            config-k           [:table-tier :card-hide-price :two-tables]]
+      (testing (format "%s in %s" config-k mode)
+        (let [{:keys [result outcomes]} (run-in-mode #(run-generated! config-k (generated-cases-per-config) (generated-seed)))]
           (is (true? (:pass? result)) (repro-report result outcomes))
           (is (meaningful? outcomes) (pr-str (frequencies (map :outcome outcomes)))))))))
 
