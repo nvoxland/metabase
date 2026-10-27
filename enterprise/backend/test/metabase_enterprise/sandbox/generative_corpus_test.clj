@@ -253,8 +253,11 @@
     (mt/with-temp [:model/Card {shops-card :id}   {:dataset_query shops-q}
                    :model/Card {shops-model :id}  {:dataset_query shops-q :type :model :result_metadata (model-metadata shops-q)}
                    :model/Card {orders-card :id}  {:dataset_query orders-q}
-                   :model/Card {orders-model :id} {:dataset_query orders-q :type :model :result_metadata (model-metadata orders-q)}]
-      (f {:card/shops            shops-card
+                   :model/Card {orders-model :id} {:dataset_query orders-q :type :model :result_metadata (model-metadata orders-q)}
+                   :model/Card {native-card :id}  {:dataset_query (mt/native-query {:query (format "SELECT * FROM %s"
+                                                                                                   (mt/format-name "shops"))})}]
+      (f {:native/shops          native-card
+          :card/shops            shops-card
           :model/shops           shops-model
           :card/orders-implicit  orders-card
           :model/orders-implicit orders-model}))))
@@ -586,6 +589,11 @@
 (defn- implicit [ids table fk target-table target-col]
   [:field (fid ids target-table target-col) {:source-field (fid ids table fk)}])
 
+(defn- implicit-join-alias
+  "The alias the QP gives the implicit join from ORDERS.SHOP_ID to SHOPS."
+  [ids]
+  (str (mt/format-name "shops") "__via__" (fname ids :orders :shop_id)))
+
 (def ^:private canonical-probes
   "Probe name -> fn of an ids map returning the inner query. One query per role of SHOPS and per source kind, written
   the way the query builder would."
@@ -639,12 +647,47 @@
                                        :parameters [{:type   "number/!="
                                                      :target ["dimension" (implicit ids :orders :shop_id :shops :price)]
                                                      :value  [-1]}]})
+   ;; an explicit REGIONS join dressed up as the implicit join through ORDERS.SHOP_ID; the implicit ref must not reuse it
+   :forged-implicit-join    (fn [ids] {:query {:source-table (tid ids :orders)
+                                               :joins        [{:source-table          (tid ids :regions)
+                                                               :alias                 (implicit-join-alias ids)
+                                                               :condition             [:= [:field (fid ids :orders :shop_id) nil]
+                                                                                       [:field (fid ids :regions :id) {:join-alias (implicit-join-alias ids)}]]
+                                                               :fields                :none
+                                                               :fk-field-id           (fid ids :orders :shop_id)
+                                                               :qp/is-implicit-join   true}]
+                                               :fields       [[:field (fid ids :orders :id) nil]
+                                                              (implicit ids :orders :shop_id :shops :secret)]}})
+   ;; the same explicit join without the forged keys: the implicit join's alias collides with it and must be renamed
+   :colliding-join-alias    (fn [ids] {:query {:source-table (tid ids :orders)
+                                               :joins        [{:source-table (tid ids :regions)
+                                                               :alias        (implicit-join-alias ids)
+                                                               :condition    [:= [:field (fid ids :orders :shop_id) nil]
+                                                                              [:field (fid ids :regions :id) {:join-alias (implicit-join-alias ids)}]]
+                                                               :fields       :none}]
+                                               :fields       [[:field (fid ids :orders :id) nil]
+                                                              (implicit ids :orders :shop_id :shops :secret)]}})
+   ;; ORDERS.NAME and SHOPS.NAME in one stage come out as NAME and NAME_2; the next stage reads them by name
+   :deduplicated-name-ref   (fn [ids] {:query {:source-query {:source-table (tid ids :orders)
+                                                              :fields       [[:field (fid ids :orders :name) nil]
+                                                                             (implicit ids :orders :shop_id :shops :name)
+                                                                             (implicit ids :orders :shop_id :shops :secret)]}
+                                               :fields       [[:field (str (fname ids :shops :name) "_2") {:base-type :type/Text}]
+                                                              [:field (fname ids :shops :secret) {:base-type :type/Text}]]}})
    ;; a bogus join alias over a card source fails validation after the card's stage metadata is spliced in, and the
    ;; error text echoes that metadata, fingerprints included
    :model-bogus-join-alias  (fn [ids] {:query {:source-table (card-source ids :model/shops)
                                                :fields       [[:field (fid ids :shops :name) {:join-alias "Nope"}]]}})
    :card-bogus-join-alias   (fn [ids] {:query {:source-table (card-source ids :card/shops)
                                                :fields       [[:field (fid ids :shops :name) {:join-alias "Nope"}]]}})))
+
+(def ^:private saved-sql-probes
+  "Probes over a saved SQL question on SHOPS. Sandboxes do not apply to SQL results, by design: see \"You cannot
+  secure the rows or columns of SQL results\" in docs/permissions/row-and-column-security.md."
+  (array-map
+   :native-card-source   (fn [ids] {:query {:source-table (card-source ids :native/shops)}})
+   :native-card-name-ref (fn [ids] {:query {:source-table (card-source ids :native/shops)
+                                            :fields       [[:field (fname ids :shops :secret) {:base-type :type/Text}]]}})))
 
 (defn run-canonical!
   "Run the canonical probes (or those named by `probe-names`) under one config, or every config. Returns result maps."
@@ -1084,7 +1127,8 @@
   (let [mp (mt/metadata-provider)]
     (binding [tu.rng/*generator*             (java.util.Random. ^long seed)
               lib.tu.gen/*safe-for-old-refs* false
-              lib.tu.gen/*available-cards*   (mapv #(lib.metadata/card mp %) (vals (:cards ids)))]
+              ;; SQL question results are not sandboxed, by design; see [[saved-sql-probes]]
+              lib.tu.gen/*available-cards*   (mapv #(lib.metadata/card mp %) (vals (dissoc (:cards ids) :native/shops)))]
       (-> (lib.tu.gen/random-queries-from (start-query ids source) n-steps)
           last
           lib/->legacy-MBQL))))
@@ -1321,6 +1365,17 @@
             (is (not (failing-outcomes outcome))
                 (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
                                              :user :expected :query])))))))))
+
+(deftest ^:synchronized saved-sql-results-are-not-sandboxed-as-documented-test
+  (testing "A sandboxed user who can see a saved SQL question gets its unsandboxed results, as the docs say"
+    (mt/test-drivers (corpus-drivers)
+      (do-with-corpus-config!
+       :table-tier
+       (fn [ctx]
+         (doseq [[probe-name probe-fn] saved-sql-probes
+                 :let [{:keys [differential]} (run-probe (assoc ctx :expect :unrestricted) probe-name probe-fn)]]
+           (testing probe-name
+             (is (= :consistent differential)))))))))
 
 (deftest ^:synchronized attribute-values-are-enforced-or-rejected-test
   (testing "Every login attribute value either filters the sandboxed table or fails the query, with and without schema checks"
