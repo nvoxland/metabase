@@ -123,11 +123,14 @@
   []
   (t2/update! :model/Card (t2/select-one-fn :card_id :model/Sandbox :table_id (mt/id :shops)) {:type :model}))
 
+;;; The column sandboxes leave out exactly the columns `corpus/sandbox-corpus-hide-price` nulls: PRICE and the two canary
+;;; columns. Every other SHOPS column stays, so the restricted dataset and the sandbox card describe one policy.
+
 (defn- shops-hide-price-gtap []
-  {:shops {:query (mt/mbql-query shops {:fields [$id $name $tier $region_id $parent_shop_id]})}})
+  {:shops {:query (mt/mbql-query shops {:fields [$id $name $tier $region_id $parent_shop_id $rating $opened_on]})}})
 
 (defn- shops-rows+hide-price-gtap []
-  {:shops {:query      (mt/mbql-query shops {:fields [$id $name $tier $region_id $parent_shop_id]})
+  {:shops {:query      (mt/mbql-query shops {:fields [$id $name $tier $region_id $parent_shop_id $rating $opened_on]})
            :remappings (tier-dimension-remapping :shops)}})
 
 (defn- native-shops-gtap
@@ -151,8 +154,22 @@
                      "name" "region_name" "shops" "regions" "region_id" "id" "tier"))
 
 (defn- shops-native-hide-price-gtap []
-  (native-shops-gtap "SELECT %s, %s, %s, %s, %s FROM %s WHERE %s = {{tier}}"
-                     "id" "name" "tier" "region_id" "parent_shop_id" "shops" "tier"))
+  (native-shops-gtap "SELECT %s, %s, %s, %s, %s, %s, %s FROM %s WHERE %s = {{tier}}"
+                     "id" "name" "tier" "region_id" "parent_shop_id" "rating" "opened_on" "shops" "tier"))
+
+(def ^:private column-sandbox-rejections
+  "How a column sandbox fails closed today, which the differential oracle accepts only when declared: a ref to a column
+  the sandbox card leaves out reaches the database, which rejects it, or an implicit join through the card gets no
+  alias and the query processor rejects it. Any other failure of the sandboxed user's query alone is a finding."
+  [#"missing join alias"
+   #"(?i)column .*(not found|does not exist)"
+   #"(?i)unknown column"
+   ;; Postgres, for a name ref the sandbox stage cannot provide
+   #"missing FROM-clause entry for table \"__mb_source\""])
+
+(def ^:private schema-check-rejections
+  "A `mu/defn` check that only runs with schema checks on; in production the same queries succeed."
+  [#"^500 Invalid (input|output): \["])
 
 (defn- add-rasta-to-group-with-view-data!
   "Put `:rasta` in a fresh group whose view-data on the current database is `level`. Granting query access too would
@@ -178,6 +195,8 @@
   * `:restricted`  the dataset variant that equals the sandbox applied by hand
   * `:expect`      `:restricted` (user == admin on restricted), `:unrestricted` (user == admin on base) or `:error`
   * `:hidden-cols` SHOPS columns the sandbox card leaves out
+  * `:accepted-rejections` patterns of the errors that are a known way for the sandbox to fail closed; any other
+    failure of the user's query alone is a finding
   * `:sandboxed`   tables with an enforced sandbox, for the structural detector
   * `:setup`       fn run inside `with-gtaps!` for extra arrangements (second groups)
   * `:remaps`      display remappings, set up in both databases; see [[do-with-remaps!]]
@@ -195,16 +214,17 @@
                                  :setup persist-sandbox-card! :persist? true :feature :persist-models}
    :card-extra-column {:gtaps shops-card-extra-column-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1}
    :card-hide-price {:gtaps shops-hide-price-gtap      :attributes {}           :restricted #'corpus/sandbox-corpus-hide-price
-                     :hidden-cols #{:price :secret :secret_num}}
+                     :hidden-cols #{:price :secret :secret_num} :accepted-rejections column-sandbox-rejections}
    :card-rows+hide  {:gtaps shops-rows+hide-price-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1-hide-price
-                     :hidden-cols #{:price :secret :secret_num}}
+                     :hidden-cols #{:price :secret :secret_num} :accepted-rejections column-sandbox-rejections}
    :native          {:gtaps shops-native-gtap          :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
                      :feature :native-parameters}
    :native-extra-column {:gtaps shops-native-extra-column-gtap :attributes {"tier" "1"}
-                         :restricted #'corpus/sandbox-corpus-tier1 :feature :native-parameters}
+                         :restricted #'corpus/sandbox-corpus-tier1 :feature :native-parameters
+                         :accepted-rejections schema-check-rejections}
    :native-hide-price {:gtaps shops-native-hide-price-gtap :attributes {"tier" "1"}
                        :restricted #'corpus/sandbox-corpus-tier1-hide-price :feature :native-parameters
-                       :hidden-cols #{:price :secret :secret_num}}
+                       :hidden-cols #{:price :secret :secret_num} :accepted-rejections column-sandbox-rejections}
    :two-tables      {:gtaps (fn [] (merge (shops-table-gtap) {:regions {:remappings (tier-remapping :regions)}}))
                      :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1-both :sandboxed #{:shops :regions}}
    ;; ORDERS.SHOP_ID displays SHOPS.NAME: remaps add implicit joins to the sandboxed table in the outer query
@@ -214,7 +234,8 @@
    :table-tier+persisted {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
                           :persist? true :feature :persist-models}
    :card-hide-price+persisted {:gtaps shops-hide-price-gtap :attributes {} :restricted #'corpus/sandbox-corpus-hide-price
-                               :hidden-cols #{:price :secret :secret_num} :persist? true :feature :persist-models}
+                               :hidden-cols #{:price :secret :secret_num} :accepted-rejections column-sandbox-rejections
+                               :persist? true :feature :persist-models}
    ;; SHOPS.SECRET_NUM displays admin-entered labels, one per row, from FieldValues of the whole table
    :table-tier+value-remap {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'corpus/sandbox-corpus-tier1
                             :remaps [[:shops :secret_num secret-num-labels]]}
@@ -259,7 +280,8 @@
    :card-sql-like     {:base :card-rows  :attributes {"tier" "1 OR 1=1"} :expect :error}
    :card-list         {:base :card-rows  :attributes {"tier" ["3"]}      :expect :error}
    ;; a native sandbox fails safe on a list: its `{{tier}}` matches nothing
-   :native-list       {:base :native     :attributes {"tier" ["3"]}      :restricted #'corpus/sandbox-corpus-no-shops}
+   :native-list       {:base :native     :attributes {"tier" ["3"]}      :restricted #'corpus/sandbox-corpus-no-shops
+                       :accepted-rejections schema-check-rejections}
    :rating-integer    {:base :table-rating :attributes {"rating" "1"}   :restricted #'corpus/sandbox-corpus-no-shops}
    :rating-junk       {:base :table-rating :attributes {"rating" "1.5x"} :expect :error}
    :rating-list       {:base :table-rating :attributes {"rating" ["2.5"]} :expect :error}
@@ -361,7 +383,7 @@
   ([config-k f]
    (do-with-corpus-config! config-k #'corpus/sandbox-corpus f))
   ([config-k base-dataset f]
-   (let [{:keys [gtaps attributes restricted setup expect hidden-cols remaps persist? premium-features]
+   (let [{:keys [gtaps attributes restricted setup expect hidden-cols accepted-rejections remaps persist? premium-features]
           :or   {expect :restricted}} (corpus-config config-k)
          in-sandbox-copy (fn [base restricted-ids allowed]
                            (mt/with-db base
@@ -377,9 +399,11 @@
                                     (do-with-maybe-persisted-cards!
                                      persist?
                                      (fn [cards]
-                                       (f {:config         config-k
-                                           :expect         expect
-                                           :hidden-cols    (or hidden-cols #{})
+                                       (f {:config              config-k
+                                           :expect              expect
+                                           ;; as the driver names the columns in a result
+                                           :hidden-cols         (into #{} (map (comp mt/format-name name)) hidden-cols)
+                                           :accepted-rejections (or accepted-rejections [])
                                            :sandboxed      (config-sandboxed-tables config-k)
                                            :ids            (ids-map cards)
                                            :restricted-ids restricted-ids
@@ -450,14 +474,15 @@
    :mbql5-mixed (comp legacy-ref-order legacy->mbql5)))
 
 (defn- query-response->result
-  "`:rows`, `:cols` (names) and `:body` of a query response, or `:error` and `:body`."
+  "`:rows`, `:cols` (names) and `:body` of a query response, or `:error`, `:status` and `:body`."
   [{:keys [status body]}]
   (if (and (= 202 status) (= "completed" (:status body)))
     {:rows (get-in body [:data :rows])
      :cols (mapv :name (get-in body [:data :cols]))
      :body body}
-    {:error (u/truncate (str status " " (or (:error body) (:message body) body)) 300)
-     :body  body}))
+    {:error  (u/truncate (str status " " (or (:error body) (:message body) body)) 300)
+     :status status
+     :body   body}))
 
 (defn- run-as
   "Run a probe (its `:outer` request body, or its legacy inner query and parameters) through the dataset API as `user`
@@ -501,48 +526,80 @@
   (let [idxs (keep #(let [i (.indexOf ^java.util.List cols %)] (when (nat-int? i) i)) col-names)]
     (frequencies (map (fn [row] (mapv #(nth row %) idxs)) rows))))
 
+(defn- column-verdict
+  "The columns the user got against the expected ones, as multisets of names with the hidden columns left out:
+  `:extra-columns` when the user has a column (or a copy of one) the expected result lacks, `:missing-columns` when
+  an expected column is gone, nil when they agree. The row comparison only means something once they agree."
+  [hidden-names user expected]
+  (let [visible    #(frequencies (remove hidden-names (:cols %)))
+        user-m     (visible user)
+        expected-m (visible expected)]
+    (cond
+      (some (fn [[col n]] (> n (get expected-m col 0))) user-m) :extra-columns
+      (not= user-m expected-m)                                 :missing-columns)))
+
+(defn- hidden-column-values?
+  "Does `result` carry a value in a column the sandbox hides?"
+  [hidden-names {:keys [cols rows]}]
+  (boolean (some (fn [[i col]] (and (hidden-names col) (some #(some? (nth % i)) rows)))
+                 (map-indexed vector cols))))
+
 (defn- differential-verdict
   "Compare the sandboxed user's result with the expected one (an admin on the restricted variant, or on the base
   database when nothing should be restricted). `admin-base` tells whether the probe could tell restricted data from
-  unrestricted data at all."
-  [{:keys [expect hidden-cols] :as ctx} user expected admin-base]
-  (let [hidden-names (set (map name hidden-cols))]
-    (cond
-      ;; a probe that cannot tell the restricted data from the rest may succeed; one that can must fail
-      (= expect :error)                   (if (:error user)
-                                            :user-error
+  unrestricted data at all. Column names are compared first, so a column that goes missing or appears cannot hide
+  behind a row comparison; `:hidden-cols` holds the names of the columns the sandbox leaves out, which the user may
+  omit or return empty. A failure of the user's query alone is `:user-error`, or `:known-rejection` when the config's
+  `:accepted-rejections` patterns match it; only the latter is an accepted way to fail closed."
+  [{:keys [expect hidden-cols accepted-rejections] :as ctx} user expected admin-base]
+  (cond
+    ;; a probe that cannot tell the restricted data from the rest may succeed; one that can must fail
+    (= expect :error)                     (if (:error user)
+                                            :failed-as-expected
                                             (let [v (differential-verdict (assoc ctx :expect :restricted) user expected admin-base)]
                                               (if (= v :consistent) :missing-error v)))
-      (= expect :unrestricted)            (cond
-                                            (and (:error expected) (:error user)) :rejected
-                                            (:error user)                         :over-restricted
-                                            (= (project user (:cols expected)) (project expected (:cols expected))) :consistent
-                                            :else                                 :over-restricted)
-      (and (:error expected) (:error user)) :rejected
-      (:error expected)                   :expected-error
-      (:error user)                       :user-error
-      :else
-      (let [common    (filter (set (:cols expected)) (:cols user))
-            user-m    (project user common)
-            expected-m (project expected common)]
-        (cond
-          ;; a column the sandbox hides must never carry a value for the user
-          (some (fn [col] (and (hidden-names col)
-                               (some some? (map #(nth % (.indexOf ^java.util.List (:cols user) col)) (:rows user)))))
-                (:cols user))
-          :extra-rows
+    (and (:error expected) (:error user)) :rejected
+    (:error expected)                     :expected-error
+    (:error user)                         (cond
+                                            (= expect :unrestricted)                                   :over-restricted
+                                            (some #(re-find % (:error user)) accepted-rejections)      :known-rejection
+                                            :else                                                      :user-error)
+    :else
+    (let [hidden-names (if (= expect :unrestricted) #{} hidden-cols)]
+      (or (column-verdict hidden-names user expected)
+          (when (hidden-column-values? hidden-names user) :hidden-column-values)
+          (let [common     (remove hidden-names (:cols expected))
+                user-m     (project user common)
+                expected-m (project expected common)]
+            (cond
+              (= expect :unrestricted)
+              (if (= user-m expected-m) :consistent :over-restricted)
 
-          (= user-m expected-m)
-          (if (= (project admin-base common) expected-m) :vacuous :consistent)
+              (= user-m expected-m)
+              ;; the probe told restricted data from the rest when the rows differ from the unrestricted ones, or
+              ;; when the unrestricted result showed a hidden column's values
+              (if (and (= (project admin-base common) expected-m)
+                       (not (hidden-column-values? hidden-names admin-base)))
+                :vacuous
+                :consistent)
 
-          (some (fn [[row n]] (> n (get expected-m row 0))) user-m)
-          :extra-rows
+              (some (fn [[row n]] (> n (get expected-m row 0))) user-m)
+              :extra-rows
 
-          :else
-          :missing-rows)))))
+              :else
+              :missing-rows))))))
 
-(defn- canary-verdict [{:keys [allowed]} user]
-  (let [leaked (into (sorted-set) (remove allowed) (corpus/canary-ids (:body user)))]
+(defn- canary-verdict
+  "Canaries of hidden rows anywhere in the user's response. A number that the expected response carries too is no
+  leak: it was computed from allowed rows alone, as a weighted average of allowed canaries can land on a hidden one."
+  [{:keys [allowed]} user expected]
+  (let [derivable (into #{} (comp (filter #(= :number (:kind %))) (map (juxt :table :id))) (corpus/canary-hits (:body expected)))
+        leaked    (into (sorted-set)
+                        (keep (fn [{:keys [table id kind]}]
+                                (let [hit [table id]]
+                                  (when-not (or (allowed hit) (and (= kind :number) (derivable hit)))
+                                    hit))))
+                        (corpus/canary-hits (:body user)))]
     (if (seq leaked) {:verdict :leak :leaked leaked} {:verdict :clean})))
 
 (defn- raw-refs-to-tables
@@ -666,7 +723,20 @@
     :else                               differential))
 
 (def ^:private failing-outcomes
-  #{:canary-leak :raw-ref :binning-bounds-leak :extra-rows :missing-rows :missing-error :over-restricted})
+  #{:canary-leak :raw-ref :binning-bounds-leak :extra-rows :missing-rows :extra-columns :missing-columns
+    :hidden-column-values :missing-error :over-restricted :user-error})
+
+(def ^:private rejectable-probes
+  "Hand-written probes that are not valid queries on purpose (a join alias that names no join, a forged or colliding
+  implicit join, a parameter target by name), so an admin's run fails like the user's."
+  #{:model-bogus-join-alias :card-bogus-join-alias :param-bogus-join-alias :model-forged-fk
+    :forged-implicit-join :colliding-join-alias :param-name-ref})
+
+(defn- unexpected-outcome?
+  "A failing outcome, or a hand-written probe that both users fail without being written to."
+  [probe outcome]
+  (boolean (or (failing-outcomes outcome)
+               (and (= :rejected outcome) (not (rejectable-probes probe))))))
 
 (defn- render-probe
   "`probe` with `:outer`, its request body in query format `fmt`, or nil when it cannot be rendered in that format."
@@ -687,7 +757,7 @@
                       admin-base
                       (run-as :crowberto restricted-ids (probe-fn restricted-ids)))
         verdicts    {:differential  (differential-verdict ctx user expected admin-base)
-                     :canary        (canary-verdict ctx user)
+                     :canary        (canary-verdict ctx user expected)
                      :structural    (structural-verdict ctx probe)
                      :hygiene       (hygiene-verdict ctx user)
                      :metadata-diff (metadata-diff-verdict user expected)}]
@@ -758,6 +828,16 @@
    :shops-out-to-regions    (fn [ids] {:query {:source-table (tid ids :shops)
                                                :fields       [[:field (fid ids :shops :id) nil]
                                                               (implicit ids :shops :region_id :regions :secret)]}})
+   :shops-filter-region-tier (fn [ids] {:query {:source-table (tid ids :shops)
+                                                :aggregation  [[:count]]
+                                                :filter       [:= (implicit ids :shops :region_id :regions :tier) 1]}})
+   :shops-breakout-region   (fn [ids] {:query {:source-table (tid ids :shops)
+                                               :aggregation  [[:count]]
+                                               :breakout     [(implicit ids :shops :region_id :regions :name)]}})
+   ;; orders 1, 9 and 3 point at shops 1, 1 and 3: the average of their SECRET_NUM canaries equals shop 2's
+   :orders-avg-secret-weighted (fn [ids] {:query {:source-table (tid ids :orders)
+                                                  :aggregation  [[:avg (implicit ids :orders :shop_id :shops :secret_num)]]
+                                                  :filter       [:= [:field (fid ids :orders :id) nil] 1 3 9]}})
    :regions-into-shops      (fn [ids] {:query {:source-table (tid ids :regions)
                                                :fields       [[:field (fid ids :regions :id) nil]
                                                               (implicit ids :regions :hq_shop_id :shops :secret)]}})
@@ -1233,12 +1313,14 @@
      :mixed-before-canon {:query (assoc base :fields [r canon] :limit 50)}
      :second-stage      {:query {:source-query base :fields [r] :limit 50}}
      :explicit-join-present
-     {:query (update base :joins (fnil conj [])
-                     {:source-table (tid ids :shops)
-                      :alias        "S"
-                      :condition    [:= [:field (fid ids (:fk-table e) (:fk e)) (when (:via-join e) {:join-alias (:via-join e)})]
-                                     [:field (fid ids :shops :id) {:join-alias "S"}]]
-                      :fields       :none})
+     {:query (-> base
+                 (update :joins (fnil conj [])
+                         {:source-table (tid ids :shops)
+                          :alias        "S"
+                          :condition    [:= [:field (fid ids (:fk-table e) (:fk e)) (when (:via-join e) {:join-alias (:via-join e)})]
+                                         [:field (fid ids :shops :id) {:join-alias "S"}]]
+                          :fields       :none})
+                 (assoc :fields [own-id r] :limit 50))
       :params-note "ref does not name the join"}
      :right-join-shops-preserved
      {:query (assoc base
@@ -1367,7 +1449,8 @@
 
 (defn- detectors-fired [{:keys [differential canary structural hygiene]}]
   (cond-> #{}
-    (#{:extra-rows :missing-rows :over-restricted} differential) (conj :differential)
+    (#{:extra-rows :missing-rows :extra-columns :missing-columns :hidden-column-values :over-restricted :user-error} differential)
+    (conj :differential)
     (= :leak (:verdict canary))                                  (conj :canary)
     (= :raw-ref (:verdict structural))                           (conj :structural)
     (= :dirty (:verdict hygiene))                                (conj :hygiene)))
@@ -1747,12 +1830,13 @@
        {:result result :outcomes @outcomes}))))
 
 (defn- meaningful?
-  "At least some of the cases ran for both users and compared rows; a run that only ever errors proves nothing."
+  "At least some of the cases compared rows that could have differed and found them right. A run that only ever
+  errors, or only asks what the sandbox cannot change (`:vacuous`), proves nothing about it."
   [outcomes]
   (let [counts (frequencies (map :outcome outcomes))
         total  (count outcomes)]
     (and (pos? total)
-         (>= (+ (get counts :consistent 0) (get counts :vacuous 0)) (* 0.3 total)))))
+         (>= (get counts :consistent 0) (* 0.3 total)))))
 
 (defn repro-report
   "The smallest failing case as a reproduction: its generator inputs, the legacy query as JSON, and every verdict."
@@ -1822,7 +1906,7 @@
       (when (mt/dataset corpus/sandbox-corpus (config-supported? config-k))
         (doseq [{:keys [probe outcome] :as result} (run-in-mode #(run-canonical! config-k))]
           (testing (format "%s under %s in %s" probe config-k mode)
-            (is (not (failing-outcomes outcome))
+            (is (not (unexpected-outcome? probe outcome))
                 (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
                                              :user :expected :query])))))))))
 
@@ -1834,7 +1918,7 @@
               :when              (mt/dataset corpus/sandbox-corpus (config-supported? config-k))
               {:keys [probe outcome] :as result} (run-in-mode #(run-parameters! config-k))]
         (testing (format "%s via %s under %s in %s" probe (:via result) config-k mode)
-          (is (not (failing-outcomes outcome))
+          (is (not (unexpected-outcome? probe outcome))
               (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
                                            :user :expected :query]))))))))
 
@@ -1846,7 +1930,7 @@
               :when              (mt/dataset corpus/sandbox-corpus (config-supported? config-k))
               {:keys [probe outcome] :as result} (run-in-mode #(run-authored! config-k))]
         (testing (format "%s under %s in %s" probe config-k mode)
-          (is (not (failing-outcomes outcome))
+          (is (not (unexpected-outcome? probe outcome))
               (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :metadata-diff
                                            :user :expected :query]))))))))
 
@@ -1893,7 +1977,7 @@
                                                   #(run-canonical! config-k (remove #{:model-bogus-join-alias :card-bogus-join-alias}
                                                                                     (keys canonical-probes))))]
         (testing (format "%s under %s in %s" probe config-k mode)
-          (is (not (failing-outcomes outcome))
+          (is (not (unexpected-outcome? probe outcome))
               (pr-str (select-keys result [:outcome :differential :canary :user :expected]))))))))
 
 (deftest ^:synchronized sandboxed-user-responses-are-hygienic-test
@@ -1959,6 +2043,7 @@
             config-k                            [:table-tier :card-hide-price]
             {:keys [probe outcome] :as result} (run-in-mode #(run-grid! config-k (grid-probe-names ci-grid-selection)))]
       (testing (format "%s under %s in %s" (pr-str probe) config-k mode)
+        ;; the grid's shapes are malformed on purpose, so a rejection of both users' queries is in order
         (is (not (failing-outcomes outcome))
             (pr-str (select-keys result [:outcome :differential :canary :structural :hygiene :user :query])))))))
 
@@ -2060,3 +2145,90 @@
       (is (= "string/!=" (-> (at :parameter 2) :parameters first :type))))
     (testing "k wraps around the five candidate refs"
       (is (= (at :id->name 1) (at :id->name 6))))))
+
+;;; The detectors have their own tests, so a red probe can be blamed on the sandbox and not on the harness.
+
+(deftest ^:parallel differential-verdict-test
+  (let [ctx      {:expect :restricted :hidden-cols #{"PRICE"}}
+        expected {:cols ["ID" "NAME" "PRICE"] :rows [[1 "Alpha" nil]]}
+        base     {:cols ["ID" "NAME" "PRICE"] :rows [[1 "Alpha" 10] [2 "Beta" 20]]}
+        verdict  (fn [user] (differential-verdict ctx user expected base))]
+    (testing "a hidden column may be left out or returned empty"
+      (is (= :consistent (verdict {:cols ["ID" "NAME"] :rows [[1 "Alpha"]]})))
+      (is (= :consistent (verdict {:cols ["ID" "NAME" "PRICE"] :rows [[1 "Alpha" nil]]}))))
+    (testing "a hidden column must not carry a value"
+      (is (= :hidden-column-values (verdict {:cols ["ID" "NAME" "PRICE"] :rows [[1 "Alpha" 10]]}))))
+    (testing "an allowed column that disappears"
+      (is (= :missing-columns (verdict {:cols ["ID"] :rows [[1]]}))))
+    (testing "a column nobody asked for, or an allowed column twice"
+      (is (= :extra-columns (verdict {:cols ["ID" "NAME" "hidden_price"] :rows [[1 "Alpha" 123456]]})))
+      (is (= :extra-columns (verdict {:cols ["ID" "NAME" "NAME"] :rows [[1 "Alpha" "Alpha"]]}))))
+    (testing "an allowed column under another name"
+      (is (= :extra-columns (verdict {:cols ["ID" "NAME_2"] :rows [[1 "Alpha"]]}))))
+    (testing "rows"
+      (is (= :extra-rows (verdict {:cols ["ID" "NAME"] :rows [[1 "Alpha"] [2 "Beta"]]})))
+      (is (= :missing-rows (verdict {:cols ["ID" "NAME"] :rows []}))))
+    (testing "a failure of the user's query alone is never a pass by itself"
+      (is (= :user-error (verdict {:error "500 boom" :status 500})))
+      (is (= :user-error (verdict {:error "400 nope" :status 400})))
+      (testing "unless the config declares that rejection"
+        (is (= :known-rejection (differential-verdict (assoc ctx :accepted-rejections [#"missing join alias"])
+                                                      {:error "500 Column with source :source/implicitly-joinable is missing join alias" :status 500}
+                                                      expected base)))
+        (is (= :user-error (differential-verdict (assoc ctx :accepted-rejections [#"missing join alias"])
+                                                 {:error "500 boom" :status 500} expected base)))))
+    (testing "the probe itself is invalid when the admin's run fails too"
+      (is (= :rejected (differential-verdict ctx {:error "500 x" :status 500} {:error "500 x" :status 500} base)))
+      (is (= :expected-error (differential-verdict ctx {:cols [] :rows []} {:error "500 x" :status 500} base))))
+    (testing "vacuous: the probe cannot tell restricted data from the rest"
+      (is (= :vacuous (differential-verdict ctx {:cols ["ID"] :rows [[1]]} {:cols ["ID"] :rows [[1]]} {:cols ["ID"] :rows [[1]]})))
+      (testing "unless the unrestricted data had values in a hidden column that the user did not get"
+        (is (= :consistent (differential-verdict ctx {:cols ["ID"] :rows [[1]]} {:cols ["ID" "PRICE"] :rows [[1 nil]]}
+                                                 {:cols ["ID" "PRICE"] :rows [[1 10]]}))))))
+  (testing "a cancelled sandbox: the user gets exactly what an admin gets"
+    (let [ctx  {:expect :unrestricted :hidden-cols #{}}
+          base {:cols ["ID" "NAME"] :rows [[1 "A"] [2 "B"]]}]
+      (is (= :consistent (differential-verdict ctx base base base)))
+      (is (= :over-restricted (differential-verdict ctx {:cols ["ID" "NAME"] :rows [[1 "A"]]} base base)))
+      (is (= :missing-columns (differential-verdict ctx {:cols ["ID"] :rows [[1] [2]]} base base)))
+      (is (= :extra-columns (differential-verdict ctx {:cols ["ID" "NAME" "X"] :rows [[1 "A" 1] [2 "B" 2]]} base base)))
+      (is (= :over-restricted (differential-verdict ctx {:error "500 boom" :status 500} base base)))))
+  (testing "a config whose queries must fail"
+    (let [ctx      {:expect :error :hidden-cols #{}}
+          expected {:cols ["ID"] :rows [[1]]}
+          base     {:cols ["ID"] :rows [[1] [2]]}]
+      (is (= :failed-as-expected (differential-verdict ctx {:error "400 x" :status 400} expected base)))
+      (is (= :missing-error (differential-verdict ctx expected expected base)))
+      (is (= :extra-rows (differential-verdict ctx base expected base))))))
+
+(deftest ^:parallel canary-verdict-test
+  (let [ctx      {:allowed #{[:shops 1] [:shops 3]}}
+        c        (partial corpus/canary-num :shops)
+        response (fn [& rows] {:body {:data {:rows (vec rows)}}})]
+    (testing "a hidden row's canary in the user's response is a leak"
+      (is (= {:verdict :leak :leaked (sorted-set [:shops 2])}
+             (canary-verdict ctx (response [(c 2)]) (response))))
+      (is (= {:verdict :leak :leaked (sorted-set [:shops 4])}
+             (canary-verdict ctx (response [(corpus/canary-text :shops 4)]) (response)))))
+    (testing "an aggregate of allowed canaries can equal a hidden one; it is no leak when the expected result has it too"
+      (is (= (c 2) (/ (+ (c 1) (c 1) (c 3)) 3)))
+      (is (= {:verdict :clean} (canary-verdict ctx (response [(c 2)]) (response [(c 2)]))))
+      (testing "but a hidden row's text canary is a leak even then"
+        (is (= :leak (:verdict (canary-verdict ctx (response [(corpus/canary-text :shops 2)]) (response [(c 2)])))))))))
+
+(deftest ^:parallel meaningful-run-test
+  (testing "a run that never compared rows that could differ proves nothing"
+    (is (not (meaningful? (repeat 40 {:outcome :vacuous}))))
+    (is (not (meaningful? (repeat 40 {:outcome :rejected}))))
+    (is (not (meaningful? [])))
+    (is (meaningful? (concat (repeat 12 {:outcome :consistent}) (repeat 28 {:outcome :vacuous}))))))
+
+(deftest ^:parallel grid-positions-use-the-ref-test
+  (testing "every grid position puts the ref somewhere, so changing the ref changes the query"
+    (doseq [[edge-k e] edges
+            position   grid-position-names
+            :let       [r1 ((ref-shapes :canonical) fake-ids e :price)
+                        r2 ((ref-shapes :bare-id) fake-ids e :price)]]
+      (testing (format "%s at %s" edge-k position)
+        (is (not= (get (grid-positions fake-ids e :price r1) position)
+                  (get (grid-positions fake-ids e :price r2) position)))))))

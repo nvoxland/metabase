@@ -62,15 +62,18 @@
                     [table (Long/numberOfTrailingZeros q)])))))
           canary-table-codes)))
 
-(defn- canaries-in-string [s]
+(defn- canaries-in-string
+  "`[table id kind]` for every canary in `s`; `kind` is `:text` or `:number`."
+  [s]
   (concat (for [[_ code id] (re-seq canary-text-pattern s)]
-            [(code->table code) (parse-long id)])
-          (keep decode-canary-num (re-seq canary-num-pattern s))))
+            [(code->table code) (parse-long id) :text])
+          (for [[table id] (keep decode-canary-num (re-seq canary-num-pattern s))]
+            [table id :number])))
 
 (defn canary-hits
-  "Every canary in `x`, a response body or any other value: a seq of `{:table t, :id n, :path p}` where `p` is the
-  path to the string or number that held it. Scalars are checked as strings, so numbers printed as doubles and
-  canaries inside error text or metadata are found too."
+  "Every canary in `x`, a response body or any other value: a seq of `{:table t, :id n, :kind k, :path p}` where `k`
+  is `:text` or `:number` and `p` is the path to the string or number that held it. Scalars are checked as strings,
+  so numbers printed as doubles and canaries inside error text or metadata are found too."
   [x]
   (let [hits (volatile! [])]
     (letfn [(scan [path v]
@@ -78,8 +81,8 @@
                 (map? v)        (doseq [[k child] v] (scan (conj path k) child))
                 (sequential? v) (doall (map-indexed (fn [i child] (scan (conj path i) child)) v))
                 (or (string? v) (number? v))
-                (doseq [[table id] (canaries-in-string (str v))]
-                  (vswap! hits conj {:table table :id id :path path}))
+                (doseq [[table id kind] (canaries-in-string (str v))]
+                  (vswap! hits conj {:table table :id id :kind kind :path path}))
                 :else           nil))]
       (scan [] (walk/keywordize-keys x)))
     @hits))
