@@ -22,8 +22,10 @@
    [metabase-enterprise.sandbox.enforcement-test.invariants :as invariants]
    [metabase-enterprise.sandbox.enforcement-test.policies :as policies]
    [metabase-enterprise.sandbox.enforcement-test.queries.hand-written :as hand-written]
+   [metabase.permissions.core :as perms]
    [metabase.test :as mt]
-   [metabase.util.json :as json]))
+   [metabase.util.json :as json]
+   [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
 
@@ -145,9 +147,12 @@
     :dashboard-param-search :dashboard-chain-filter :dashboard-chain-filter-tier :xray-table :xray-field-secret-num})
 
 (def ^:private setup
-  "Entry points that decide which sandboxes the processor sees, and the policies the processor tests cover them with."
+  "Entry points that decide which sandboxes the processor sees, and the policies the processor tests cover them with.
+  `:sandbox-card-edits` is `PUT /api/card/:id` on a sandbox card by a sandboxed user who curates its collection; its
+  own test is [[sandbox-card-edits-by-a-curator-test]]."
   {:group-combinations  {:policies [:cancelled :plus-blocked :plus-impersonation :two-sandboxes]}
-   :attribute-coercion  {:policies (keys policies/attribute-variants)}})
+   :attribute-coercion  {:policies (keys policies/attribute-variants)}
+   :sandbox-card-edits  {:policies [:card-rows :card-hide-price :native :native-hide-price]}})
 
 (def entry-points
   "Every entry point this suite tests: name -> `{:kind :routed|:bypassing|:setup}` plus how it is tested (`:transport`,
@@ -285,3 +290,62 @@
                                        :table_id   (dataset/tid ids :shops)
                                        :definition (assoc-in (hand-written/table-query ids :shops) [:query :filter]
                                                              ["=" ["field" (dataset/fid ids :shops :tier) nil] 2])}))))))))
+
+;;; ------------------------------------------- Edits to a sandbox card -------------------------------------------
+
+(def ^:private sandbox-card-edits
+  "Edit name -> `[expected-status body-fn]`, `body-fn` a fn of an ids map returning the `PUT /api/card/:id` body. The
+  guard refuses a non-admin's change to what a sandbox reads (`:dataset_query`, `:result_metadata`, `:archived`) on
+  any card in the sandbox dependency set. The rest is accepted, `:type` included; the probes then show whether any
+  accepted edit changes what the sandbox lets through."
+  (let [shops-md #(hand-written/model-metadata (hand-written/table-query % :shops))]
+    (array-map
+     :result-metadata     [403 (fn [ids] {:result_metadata (shops-md ids)})]
+     :dataset-query       [403 (fn [ids] {:dataset_query (hand-written/table-query ids :shops)})]
+     :archive             [403 (fn [_] {:archived true})]
+     :to-model-with-metadata [403 (fn [ids] {:type "model" :result_metadata (shops-md ids)})]
+     :rename              [200 (fn [_] {:name "renamed by a curator"})]
+     :move                [200 (fn [_] {:collection_id nil})]
+     :to-model            [#{200 400} (fn [_] {:type "model"})]
+     :to-metric           [200 (fn [_] {:type "metric"})])))
+
+(defn- do-with-curated-sandbox-card!
+  "Put the current SHOPS sandbox card in a collection All Users curate, call `(f card-id)`, then restore the card and
+  delete the collection. Setup and teardown run as an admin: the guard would refuse them as the sandboxed user."
+  [f]
+  (let [card-id (t2/select-one-fn :card_id :model/Sandbox :table_id (mt/id :shops))
+        card    (t2/select-one :model/Card :id card-id)
+        coll    (mt/with-test-user :crowberto
+                  (:id (t2/insert-returning-instance! :model/Collection {:name (str "sandbox questions " (random-uuid))})))]
+    (try
+      (mt/with-test-user :crowberto
+        (t2/update! :model/Card card-id {:collection_id coll})
+        ;; a new collection may inherit a grant from its parent; replace it
+        (t2/delete! :model/Permissions :group_id (:id (perms/all-users-group)) :collection_id coll)
+        (perms/grant-collection-readwrite-permissions! (perms/all-users-group) coll))
+      (f card-id)
+      (finally
+        (mt/with-test-user :crowberto
+          (t2/update! :model/Card card-id (select-keys card [:collection_id :archived :type :name]))
+          (t2/delete! :model/Collection :id coll))))))
+
+(deftest ^:synchronized sandbox-card-edits-by-a-curator-test
+  (testing "A sandboxed user who curates the sandbox card's collection cannot change what the sandbox reads, and no edit they can make widens it"
+    (mt/test-drivers #{:h2}
+      (doseq [policy-k                          (:policies (setup :sandbox-card-edits))
+              [edit-k [expected-status body-fn]] sandbox-card-edits]
+        (harness/in-mode
+         :production
+         #(harness/do-with-policy!
+           policy-k
+           (fn [{:keys [ids] :as ctx}]
+             (do-with-curated-sandbox-card!
+              (fn [card-id]
+                (let [status (:status (mt/user-http-request-full-response :rasta :put (str "card/" card-id) (body-fn ids)))]
+                  (testing (format "%s on the sandbox card under %s" edit-k policy-k)
+                    (is ((if (set? expected-status) expected-status #{expected-status}) status))
+                    (doseq [[probe-name probe-fn] hand-written/all
+                            :let [{:keys [outcome] :as result} (harness/run-probe (assoc ctx :transport :in-process) probe-name probe-fn)]]
+                      (testing (format "then %s" probe-name)
+                        (is (not (invariants/leak-outcomes outcome))
+                            (pr-str (select-keys result [:outcome :differential :canary :user :expected]))))))))))))))))

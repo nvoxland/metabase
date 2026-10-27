@@ -366,3 +366,131 @@
    :native-card-source   (fn [ids] {:query {:source-table (dataset/card-source ids :native/shops)}})
    :native-card-name-ref (fn [ids] {:query {:source-table (dataset/card-source ids :native/shops)
                                             :fields       [[:field (dataset/fname ids :shops :secret) {:base-type :type/Text}]]}})))
+
+;;; ------------------------------------------------ Forged metadata -----------------------------------------------
+;;;
+;;; A model's result metadata is the user's to write: the card API keeps every key a client sends, the Lib name keys
+;;; (`:lib/original-name`, `:lib/deduplicated-name`, `:lib/source-column-alias`, `:lib/desired-column-alias`) and
+;;; `:lib/source` included, and no guard applies to a model that no sandbox reads. These models disagree with their
+;;; own queries on purpose; the probes ask whether the query processor trusts the metadata over the query in any way
+;;; that reaches data the sandbox hides. Reaches model metadata merging (`lib.card`), `lib.field.resolution`,
+;;; `add-alias-info` (whose desired aliases become a positional CTE column list) and `add-remaps`.
+
+(defn- format-name [c] (mt/format-name (name c)))
+
+(def ^:private all-shops-columns [:id :name :tier :price :region_id :parent_shop_id :rating :opened_on :secret :secret_num])
+
+(defn- shops-columns-query [ids cols]
+  (assoc-in (table-query ids :shops) [:query :fields] (mapv (fn [c] [:field (dataset/fid ids :shops c) nil]) cols)))
+
+(defn- orders-implicit-query [ids]
+  (assoc-in (table-query ids :orders) [:query :fields]
+            [[:field (dataset/fid ids :orders :id) nil]
+             [:field (dataset/fid ids :orders :name) nil]
+             [:field (dataset/fid ids :orders :shop_id) nil]
+             (implicit ids :orders :shop_id :shops :name)
+             (implicit ids :orders :shop_id :shops :tier)]))
+
+(defn- orders-return-query [ids]
+  (assoc-in (table-query ids :orders) [:query :fields]
+            [[:field (dataset/fid ids :orders :id) nil] [:field (dataset/fid ids :orders :return_shop_id) nil]]))
+
+(defn- column-named [md c] (first (filter #(= (format-name c) (:name %)) md)))
+
+(defn- update-column [md c f] (mapv #(if (= (format-name c) (:name %)) (f %) %) md))
+
+(defn- full-shops-metadata [ids] (model-metadata (shops-columns-query ids all-shops-columns)))
+
+(def forged-metadata
+  "Forgery name -> fn of an ids map returning `{:query q, :forge (fn [metadata] forged-metadata)}`: the model's query
+  and how its true metadata is rewritten before the user saves it."
+  (array-map
+   ;; two columns trade names: NAME is called SECRET and SECRET is called NAME
+   :swap-names           (fn [ids] {:query (shops-columns-query ids all-shops-columns)
+                                    :forge #(-> % (update-column :name (fn [c] (assoc c :name (format-name :secret))))
+                                                (update-column :secret (fn [c] (assoc c :name (format-name :name)))))})
+   ;; NAME keeps its `:name`, while every Lib name key points at another column, PRICE among them
+   :lib-names-disagree   (fn [ids] {:query (shops-columns-query ids all-shops-columns)
+                                    :forge #(update-column % :name (fn [c] (assoc c
+                                                                                  :lib/original-name (format-name :price)
+                                                                                  :lib/deduplicated-name (format-name :secret)
+                                                                                  :lib/source-column-alias (format-name :price)
+                                                                                  :lib/desired-column-alias (format-name :secret_num))))})
+   ;; NAME claims to be the field PRICE
+   :id-to-hidden         (fn [ids] {:query (shops-columns-query ids [:id :name :tier])
+                                    :forge #(update-column % :name (fn [c] (assoc c
+                                                                                  :id (dataset/fid ids :shops :price)
+                                                                                  :field_ref [:field (dataset/fid ids :shops :price) nil])))})
+   ;; the metadata lists columns the query does not return
+   :extra-hidden-columns (fn [ids] {:query (shops-columns-query ids [:id :name :tier])
+                                    :forge (fn [md] (into (vec md) (map #(column-named (full-shops-metadata ids) %))
+                                                          [:price :secret :secret_num]))})
+   ;; ... and says they come from the NAME column
+   :extra-columns-aliased (fn [ids] {:query (shops-columns-query ids [:id :name :tier])
+                                     :forge (fn [md] (into (vec md)
+                                                           (map #(assoc (column-named (full-shops-metadata ids) %)
+                                                                        :lib/source-column-alias (format-name :name)
+                                                                        :lib/desired-column-alias (format-name :name)))
+                                                           [:price :secret]))})
+   ;; the implicit-join SHOPS.NAME column takes ORDERS.NAME's name and points its aliases at SHOPS.SECRET
+   :implicit-dedup-collision (fn [ids] {:query (orders-implicit-query ids)
+                                        :forge #(mapv (fn [c] (if (re-find #"(?i)__via__" (str (:name c)))
+                                                                (assoc c
+                                                                       :name (format-name :name)
+                                                                       :lib/deduplicated-name (format-name :name)
+                                                                       :lib/source-column-alias (str (format-name :shops) "__via__"
+                                                                                                     (format-name :shop_id) "__"
+                                                                                                     (format-name :secret))
+                                                                       :lib/desired-column-alias (format-name :secret))
+                                                                c))
+                                                      %)})
+   ;; a column the query does not return, claiming to come straight from the SHOPS table
+   :table-defaults-source (fn [ids] {:query (orders-implicit-query ids)
+                                     :forge #(conj (vec %) {:name                     (format-name :secret)
+                                                            :display_name             "Secret"
+                                                            :base_type                :type/Text
+                                                            :id                       (dataset/fid ids :shops :secret)
+                                                            :table_id                 (dataset/tid ids :shops)
+                                                            :field_ref                [:field (dataset/fid ids :shops :secret) nil]
+                                                            :lib/source               :source/table-defaults
+                                                            :lib/source-column-alias  (format-name :secret)
+                                                            :lib/desired-column-alias (format-name :secret)})})
+   ;; ORDERS.RETURN_SHOP_ID (hidden shop ids among its values) claims to be ORDERS.SHOP_ID, which a policy may remap
+   :remap-via-forged-fk-id (fn [ids] {:query (orders-return-query ids)
+                                      :forge #(update-column % :return_shop_id
+                                                             (fn [c] (assoc c
+                                                                            :id (dataset/fid ids :orders :shop_id)
+                                                                            :field_ref [:field (dataset/fid ids :orders :shop_id) nil])))})))
+
+(def forged-metadata-queries
+  "Query name -> fn of an ids map and the forged model's id, returning the probe run over the model."
+  (array-map
+   :all            (fn [_ m] {:query {:source-table (str "card__" m)}})
+   :id-refs        (fn [ids m] {:query {:source-table (str "card__" m)
+                                        :fields       (mapv (fn [c] [:field (dataset/fid ids :shops c) nil]) [:id :name :price :secret])}})
+   :name-refs      (fn [_ m] {:query {:source-table (str "card__" m)
+                                      :fields       (mapv (fn [c] [:field (format-name c) {:base-type :type/Text}]) [:name :secret])}})
+   :price-by-name  (fn [_ m] {:query {:source-table (str "card__" m)
+                                      :fields       [[:field (format-name :price) {:base-type :type/Integer}]]}})
+   :breakout-price (fn [ids m] {:query {:source-table (str "card__" m)
+                                        :breakout     [[:field (dataset/fid ids :shops :price) nil]]
+                                        :aggregation  [[:count]]}})
+   :filter-secret  (fn [ids m] {:query {:source-table (str "card__" m)
+                                        :filter       [:starts-with [:field (dataset/fid ids :shops :secret) nil] "CANARY-S2"]
+                                        :aggregation  [[:count]]}})))
+
+(defn save-forged-model!
+  "Save, as `user`, a model with the query and forged metadata of forgery `forgery-k` against the database `ids`
+  describes. Returns its id."
+  [user ids forgery-k]
+  (let [{:keys [query forge]} ((forged-metadata forgery-k) ids)]
+    (create-card-as! user {:type            "model"
+                           :dataset_query   query
+                           :result_metadata (forge (model-metadata query))})))
+
+(defn invalid?
+  "Is `probe` invalid on purpose, so that both users failing is in order? The [[invalid]] hand-written probes, and every
+  probe over a forged-metadata model: its metadata names columns its query does not return."
+  [probe]
+  (boolean (or (invalid probe)
+               (and (vector? probe) (= :forged-metadata (first probe))))))

@@ -267,7 +267,12 @@
   "Scope name -> the modes and policies a processor test runs under; see [[scope]]."
   {:ci         {:modes [:production] :policies (keys all)}
    :test-mode  {:modes [:test] :policies [:table-tier :card-hide-price]}
-   :attributes {:modes [:production] :policies (keys attribute-variants)}})
+   :attributes {:modes [:production] :policies (keys attribute-variants)}
+   ;; every kind of row sandbox and every column sandbox, for the content the sandboxed user writes
+   :authored   {:modes [:production] :policies [:table-tier :table-tier+remap :card-rows :card-join :native
+                                                :card-hide-price :card-rows+hide :native-hide-price]}
+   ;; the saved-question policies, whose sandbox card has metadata to forge or to edit
+   :card-policies {:modes [:production] :policies [:card-rows :card-hide-price :native :native-hide-price]}})
 
 (defn scope
   "The modes and policies for scope `k`, widened to both modes on every policy for a full run."

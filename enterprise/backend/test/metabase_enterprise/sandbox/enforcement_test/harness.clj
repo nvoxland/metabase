@@ -483,6 +483,70 @@
                     (hand-written/delete-authored! created)
                     (hand-written/delete-authored! expected-created)))))))))
 
+(defn run-forged-metadata!
+  "Run the forged-metadata probes under `policy-k`: for each forgery the sandboxed user saves the model in the
+  sandboxed database and an admin saves the same forgery in the restricted copy, then every query of
+  [[hand-written/forged-metadata-queries]] runs over it. Probe names are `[:forged-metadata forgery query]`. Returns
+  result maps."
+  ([policy-k]
+   (run-forged-metadata! policy-k [:http :dataset]))
+  ([policy-k transport]
+   (do-with-policy!
+    policy-k
+    (fn [{:keys [ids restricted-ids] :as ctx}]
+      (doall
+       (for [forgery-k (keys hand-written/forged-metadata)
+             :let      [model          (hand-written/save-forged-model! :rasta ids forgery-k)
+                        expected-model (hand-written/save-forged-model! :crowberto restricted-ids forgery-k)]
+             result    (try
+                         (doall (for [[query-k query-fn] hand-written/forged-metadata-queries]
+                                  ;; the models' ids change every run, so their expected results cannot be cached
+                                  (run-probe (assoc ctx :transport transport :cacheable? false)
+                                             [:forged-metadata forgery-k query-k]
+                                             #(query-fn % (if (= % ids) model expected-model)))))
+                         (finally
+                           (t2/delete! :model/Card :id [:in [model expected-model]])))]
+         result))))))
+
+(defn- sandbox-card-id
+  "The card the current database's SHOPS sandbox is built out of."
+  []
+  (t2/select-one-fn :card_id :model/Sandbox :table_id (mt/id :shops)))
+
+(def sandbox-card-forgeries
+  "Forgery name -> fn of an ids map and the sandbox card's stored metadata, returning forged metadata. These rewrite
+  the policy itself, as if the guard on non-admin edits had been bypassed."
+  (let [shops-col (fn [ids c] (first (filter #(= (mt/format-name (name c)) (:name %))
+                                             (hand-written/model-metadata (hand-written/table-query ids :shops)))))
+        on-name   (fn [md f] (mapv #(if (= (mt/format-name "name") (:name %)) (f %) %) md))]
+    (array-map
+     :add-hidden-columns (fn [ids md] (into (vec md) (map #(shops-col ids %)) [:price :secret :secret_num]))
+     :lib-names-hidden   (fn [_ md] (on-name md #(assoc %
+                                                        :lib/original-name (mt/format-name "price")
+                                                        :lib/deduplicated-name (mt/format-name "price")
+                                                        :lib/source-column-alias (mt/format-name "price")
+                                                        :lib/desired-column-alias (mt/format-name "price"))))
+     :id-to-hidden       (fn [ids md] (on-name md #(assoc %
+                                                          :id (dataset/fid ids :shops :price)
+                                                          :field_ref [:field (dataset/fid ids :shops :price) nil]))))))
+
+(defn run-with-forged-sandbox-card!
+  "Run the hand-written probes under `policy-k` after rewriting its sandbox card's stored result metadata with
+  `forgery-k` of [[sandbox-card-forgeries]], as a server-side write the guard does not see. A native sandbox card
+  gets its metadata on its first sandboxed run, so one probe runs first. Returns result maps."
+  [policy-k forgery-k]
+  (do-with-policy!
+   policy-k
+   (fn [{:keys [ids] :as ctx}]
+     (let [ctx     (assoc ctx :transport :in-process)
+           card-id (sandbox-card-id)]
+       (run-probe (assoc ctx :cacheable? false) :warm-up (hand-written/all :shops-count))
+       (let [stored (t2/select-one-fn :result_metadata :model/Card :id card-id)]
+         (binding [api/*current-user-id* nil]
+           (t2/update! :model/Card card-id {:result_metadata ((sandbox-card-forgeries forgery-k) ids stored)})))
+       (doall (for [[probe-name probe-fn] hand-written/all]
+                (assoc (run-probe ctx probe-name probe-fn) :forgery forgery-k)))))))
+
 (defn run-grid!
   "Run the grid probes named by `probe-names` (default: all) under `policy-k`, or under every policy."
   ([] (mapcat #(run-grid! % (grid/probe-names)) (keys policies/all)))

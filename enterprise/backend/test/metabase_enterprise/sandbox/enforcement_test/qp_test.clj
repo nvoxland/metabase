@@ -13,6 +13,8 @@
   | parameters                  | every policy                  | production   | legacy  | + dataset, + dashcard | yes   |
   | hand-written (all)          | every attribute variant       | production   | legacy  | in-process + dataset  | yes   |
   | authored                    | every policy                  | production   | legacy  | in-process            | yes   |
+  | forged model metadata       | row and column sandboxes      | production   | legacy  | in-process + dataset  | yes   |
+  | hand-written, forged card   | the four saved-question ones  | production   | legacy  | in-process            | yes   |
   | grid, CI slice              | table-tier, card-hide-price   | production   | legacy  | in-process + dataset  | yes   |
   | generated, 40 per policy    | table-tier, card-hide-price, two-tables | production | any | in-process + dataset | yes |
   | hand-written + grid slice   | table-tier, card-hide-price   | production   | all 3   | in-process            | yes   |
@@ -113,6 +115,28 @@
               :when (mt/dataset dataset/shops (policies/supported? policy-k))
               result (harness/in-mode mode #(harness/run-authored! policy-k))]
         (holds? [mode result])))))
+
+(deftest ^:synchronized forged-model-metadata-holds-test
+  (testing "Models whose result metadata the sandboxed user forged, with name keys that disagree with each other and with the query, reach nothing the sandbox hides"
+    (mt/test-drivers (harness/drivers)
+      (doseq [mode     (:modes (policies/scope :authored))
+              policy-k (:policies (policies/scope :authored))
+              :when    (mt/dataset dataset/shops (policies/supported? policy-k))
+              result   (harness/in-mode mode #(harness/run-forged-metadata! policy-k))]
+        (holds? [mode result])))))
+
+(deftest ^:synchronized sandbox-card-metadata-is-not-trusted-test
+  (testing "Rewriting a sandbox card's stored metadata, as if the guard on non-admin edits were bypassed, never widens the sandbox"
+    (mt/test-drivers (harness/drivers)
+      (doseq [mode      (:modes (policies/scope :card-policies))
+              policy-k  (:policies (policies/scope :card-policies))
+              forgery-k (keys harness/sandbox-card-forgeries)
+              :when     (mt/dataset dataset/shops (policies/supported? policy-k))
+              {:keys [probe outcome] :as result} (harness/in-mode mode #(harness/run-with-forged-sandbox-card! policy-k forgery-k))]
+        (testing (format "%s under %s with its card's metadata forged by %s, %s mode" (pr-str probe) policy-k forgery-k mode)
+          ;; a broken policy may fail the query; it must not leak
+          (is (not (invariants/leak-outcomes outcome))
+              (pr-str (select-keys result [:outcome :differential :canary :structural :sql :user :expected :compiled]))))))))
 
 (deftest ^:synchronized grid-slice-holds-test
   (testing "Every ref shape in the positions that take different code paths cannot escape the sandbox"

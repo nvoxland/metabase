@@ -323,10 +323,16 @@
     :else                                       differential))
 
 (defn unexpected-outcome?
-  "A failing outcome, or a hand-written probe that both users fail without being written to."
+  "A failing outcome, or a probe that both users fail without being invalid on purpose ([[hand-written/invalid?]])."
   [probe outcome]
   (boolean (or (failing-outcomes outcome)
-               (and (= :rejected outcome) (not (hand-written/invalid probe))))))
+               (and (= :rejected outcome) (not (hand-written/invalid? probe))))))
+
+(def leak-outcomes
+  "The failing outcomes that put data the sandbox hides, or a read of the raw table, in front of the user. A test that
+  changes the policy itself out of band (a forged sandbox card) asserts only these: refusing or failing the query is
+  the right answer to a broken policy."
+  #{:canary-leak :raw-ref :raw-table-in-sql :binning-bounds-leak :extra-rows :extra-columns :hidden-column-values})
 
 (def ^:private masked-response-keys
   "Response keys whose values differ between two databases with the same data, or between two runs: ids, uuids,
