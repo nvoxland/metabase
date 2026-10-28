@@ -270,3 +270,16 @@
   [k]
   (cond-> (scopes k)
     (full-run?) (assoc :modes [:production :test])))
+
+;;; ------------------------------------------------ Several users -------------------------------------------------
+
+(def second-users
+  "Policy -> the second sandboxed user who runs alongside `:rasta` under the same policy: a test user, their login
+  attributes, and the restricted variant that is their specification. Both users' sandboxes are installed on the same
+  copy of the database, in separate groups, so state either one leaves behind (caches, recorded metadata, persisted
+  models, field values) can reach the other."
+  {:table-tier           {:user :lucky :attributes {"tier" "2"} :restricted #'dataset/shops-tier2}
+   :card-rows            {:user :lucky :attributes {"tier" "2"} :restricted #'dataset/shops-tier2}
+   :native               {:user :lucky :attributes {"tier" "2"} :restricted #'dataset/shops-tier2}
+   :card-rows+hide       {:user :lucky :attributes {"tier" "2"} :restricted #'dataset/shops-tier2-hide-price}
+   :table-tier+persisted {:user :lucky :attributes {"tier" "2"} :restricted #'dataset/shops-tier2}})

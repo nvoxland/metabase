@@ -334,6 +334,17 @@
                                      (keep-rows "shops" #(= 1 (:tier %)))
                                      (null-columns "shops" hidden-columns)))
 
+(def shops-tier2
+  "SHOPS restricted to tier 2 rows: what a second sandboxed user, with the tier attribute 2, sees."
+  (tx/transformed-dataset-definition "shops-tier2" shops
+                                     (keep-rows "shops" #(= 2 (:tier %)))))
+
+(def shops-tier2-hide-price
+  "Tier 2 SHOPS rows with PRICE and the canary columns hidden."
+  (tx/transformed-dataset-definition "shops-tier2-hide-price" shops
+                                     (keep-rows "shops" #(= 2 (:tier %)))
+                                     (null-columns "shops" hidden-columns)))
+
 (def variant-contents
   "Dataset variant -> the SHOPS and REGIONS rows whose canaries an admin sees in it, and the SHOPS row count."
   {#'shops                  {:shops #{1 2 3 4 5 6 7 8} :regions #{1 2 3 4} :shop-rows 8}
@@ -342,4 +353,6 @@
    #'shops-in-tier1-regions     {:shops #{1 2 5 6}         :regions #{1 2 3 4} :shop-rows 4}
    #'shops-hide-price       {:shops #{}                :regions #{1 2 3 4} :shop-rows 8}
    #'shops-tier1-hide-price {:shops #{}                :regions #{1 2 3 4} :shop-rows 4}
-   #'shops-empty         {:shops #{}                :regions #{1 2 3 4} :shop-rows 0}})
+   #'shops-empty         {:shops #{}                :regions #{1 2 3 4} :shop-rows 0}
+   #'shops-tier2            {:shops #{2 4 6 8}         :regions #{1 2 3 4} :shop-rows 4}
+   #'shops-tier2-hide-price {:shops #{}                :regions #{1 2 3 4} :shop-rows 4}})

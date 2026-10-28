@@ -226,6 +226,48 @@
               [(mt/id table column) (if (map? target-table) target-table (mt/id target-table target-column))]))
    thunk))
 
+(defn- policy-ctx
+  "The ctx `f` gets for `policy-k`, against the base copy's `cards` and the restricted variant `restricted`."
+  [policy-k restricted cards restricted-ids allowed]
+  (let [{:keys [expect hidden-cols accepted-rejections remaps persist?] :or {expect :restricted}} (policies/policy policy-k)]
+    {:policy              policy-k
+     :user                :rasta
+     :expect              expect
+     ;; as the driver names the columns in a result
+     :hidden-cols         (into #{} (map (comp mt/format-name name)) hidden-cols)
+     ;; in both databases, so a result from either can be judged by field id
+     :hidden-field-ids    (into #{} (for [i [(dataset/ids-map cards) restricted-ids]
+                                          c hidden-cols]
+                                      (dataset/fid i :shops c)))
+     :accepted-rejections (or accepted-rejections [])
+     :sandboxed           (policies/sandboxed-tables policy-k)
+     :ids                 (dataset/ids-map cards)
+     :restricted-ids      restricted-ids
+     :restricted-dataset  restricted
+     :remaps              remaps
+     :persist?            (boolean persist?)
+     :allowed             allowed}))
+
+(defn- do-with-restricted!
+  "Load the restricted variant `restricted`, with the policy's `remaps` and the source cards, and call
+  `(f restricted-ids allowed-canaries)` inside it."
+  [restricted remaps f]
+  (mt/dataset (var-get restricted)
+    (dataset/ensure-fk-metadata!)
+    (fully-synced!)
+    (do-with-remaps! remaps
+                     (fn []
+                       (do-with-cards!
+                        (fn [restricted-cards]
+                          (f (dataset/ids-map restricted-cards) (allowed-canary-ids))))))))
+
+(defn- grant-query-access!
+  "Let the sandbox `group` query every table of the dataset and download results."
+  [group]
+  (doseq [table dataset/tables]
+    (data-perms/set-table-permission! group (mt/id table) :perms/create-queries :query-builder))
+  (data-perms/set-database-permission! group (mt/id) :perms/download-results :one-million-rows))
+
 (defn do-with-policy!
   "Load the base dataset and the policy's restricted variant, create the cards in both, set up the sandbox on a temp
   copy of the base database as `:rasta`, and call `(f ctx)` inside it; see the namespace docstring for `ctx`.
@@ -233,50 +275,59 @@
   ([policy-k f]
    (do-with-policy! policy-k #'dataset/shops f))
   ([policy-k base-dataset f]
-   (let [{:keys [gtaps attributes restricted setup expect hidden-cols accepted-rejections remaps persist? premium-features]
-          :or   {expect :restricted}} (policies/policy policy-k)
-         in-sandbox-copy (fn [base restricted-ids allowed]
-                           (mt/with-db base
-                             (met/with-gtaps! {:gtaps (gtaps) :attributes attributes}
-                               (doseq [table dataset/tables]
-                                 (data-perms/set-table-permission! &group (mt/id table) :perms/create-queries :query-builder))
-                               (data-perms/set-database-permission! &group (mt/id) :perms/download-results :one-million-rows)
-                               (when setup (setup))
-                               (mt/with-additional-premium-features (or premium-features #{})
-                                 (do-with-remaps!
-                                  remaps
-                                  (fn []
-                                    (do-with-maybe-persisted-cards!
-                                     persist?
-                                     (fn [cards]
-                                       (f {:policy              policy-k
-                                           :expect              expect
-                                           ;; as the driver names the columns in a result
-                                           :hidden-cols         (into #{} (map (comp mt/format-name name)) hidden-cols)
-                                           ;; in both databases, so a result from either can be judged by field id
-                                           :hidden-field-ids    (into #{} (for [i [(dataset/ids-map cards) restricted-ids]
-                                                                                c hidden-cols]
-                                                                            (dataset/fid i :shops c)))
-                                           :accepted-rejections (or accepted-rejections [])
-                                           :sandboxed           (policies/sandboxed-tables policy-k)
-                                           :ids                 (dataset/ids-map cards)
-                                           :restricted-ids      restricted-ids
-                                           :restricted-dataset  restricted
-                                           :remaps              remaps
-                                           :persist?            (boolean persist?)
-                                           :allowed             allowed})))))))))]
+   (let [{:keys [gtaps attributes restricted setup remaps persist? premium-features]} (policies/policy policy-k)]
      (mt/dataset (var-get base-dataset)
        (dataset/ensure-fk-metadata!)
        (fully-synced!)
        (let [base (mt/db)]
-         (mt/dataset (var-get restricted)
-           (dataset/ensure-fk-metadata!)
-           (fully-synced!)
-           (do-with-remaps! remaps
-                            (fn []
-                              (do-with-cards!
-                               (fn [restricted-cards]
-                                 (in-sandbox-copy base (dataset/ids-map restricted-cards) (allowed-canary-ids))))))))))))
+         (do-with-restricted!
+          restricted remaps
+          (fn [restricted-ids allowed]
+            (mt/with-db base
+              (met/with-gtaps! {:gtaps (gtaps) :attributes attributes}
+                (grant-query-access! &group)
+                (when setup (setup))
+                (mt/with-additional-premium-features (or premium-features #{})
+                  (do-with-remaps!
+                   remaps
+                   (fn []
+                     (do-with-maybe-persisted-cards!
+                      persist?
+                      (fn [cards]
+                        (f (policy-ctx policy-k restricted cards restricted-ids allowed))))))))))))))))
+
+(defn do-with-two-users!
+  "Like [[do-with-policy!]], but with two sandboxed users under `policy-k` on the same copy of the database: `:rasta`
+  with the policy's attributes, and the second user of [[policies/second-users]] with theirs, each in their own group
+  and judged against their own restricted variant. Calls `(f [rasta-ctx second-ctx])`; each ctx carries `:user`."
+  [policy-k f]
+  (let [{:keys [gtaps attributes restricted remaps persist?]} (policies/policy policy-k)
+        {second-user :user second-attributes :attributes second-restricted :restricted} (policies/second-users policy-k)]
+    (mt/dataset dataset/shops
+      (dataset/ensure-fk-metadata!)
+      (fully-synced!)
+      (let [base (mt/db)]
+        (do-with-restricted!
+         restricted remaps
+         (fn [restricted-ids allowed]
+           (do-with-restricted!
+            second-restricted remaps
+            (fn [second-restricted-ids second-allowed]
+              (mt/with-db base
+                (met/with-gtaps-for-user! :rasta {:gtaps (gtaps) :attributes attributes}
+                  (grant-query-access! &group)
+                  ;; a second sandbox on the same tables, in a second group, on the same copy of the database
+                  (met/with-gtaps-for-user! second-user {:gtaps (gtaps) :attributes second-attributes}
+                    (grant-query-access! &group)
+                    (do-with-remaps!
+                     remaps
+                     (fn []
+                       (do-with-maybe-persisted-cards!
+                        persist?
+                        (fn [cards]
+                          (f [(policy-ctx policy-k restricted cards restricted-ids allowed)
+                              (assoc (policy-ctx policy-k second-restricted cards second-restricted-ids second-allowed)
+                                     :user second-user)]))))))))))))))))
 
 ;;; ------------------------------------------------ Schema checks -------------------------------------------------
 
@@ -339,12 +390,16 @@
                                               parameters)}))))))
 
 (defn- run-http
-  "The sandboxed user's result through the HTTP entry point `via`, or nil when the transport is in-process only."
-  [{:keys [ids transport]} probe]
+  "The sandboxed user's result through the HTTP entry point `via`, or nil when the transport is in-process only.
+  `[:http :shared-card]` runs the card `(:shared-card-id ctx)`, which several users share, with the cache allowed."
+  [{:keys [ids transport user shared-card-id] :or {user :rasta}} probe]
   (when-let [[_ via] (when (vector? transport) transport)]
-    (if (= via :dataset)
-      (run-as :rasta ids probe)
-      (run-saved-as :rasta via ids probe))))
+    (case via
+      :dataset     (run-as user ids probe)
+      :shared-card (query-response->result
+                    (mt/user-http-request-full-response user :post (format "card/%d/query" shared-card-id)
+                                                        {:ignore_cache false :parameters []}))
+      (run-saved-as user via ids probe))))
 
 ;;; ------------------------------------------------ Expected results ----------------------------------------------
 
@@ -410,7 +465,7 @@
   "[[run-probe]] with the rendered `probe`."
   [{:keys [ids expect transport cacheable?] :or {transport :in-process cacheable? true} :as ctx} probe-name probe-fn probe]
   (let [outer        (or (:outer probe) (formats/legacy-outer ids probe))
-        observations (observe :rasta outer)
+        observations (observe (:user ctx :rasta) outer)
         http         (run-http ctx probe)
         {:keys [restricted base]} (expected-results ctx probe-fn probe cacheable?)
         expected     (if (= expect :unrestricted) base restricted)
@@ -427,6 +482,7 @@
             :user      (trim (:executed observations))
             :expected  (trim expected)
             :http      (some-> http trim)
+            :cached?   (boolean (get-in http [:body :cached]))
             :compiled  (or sql (get-in observations [:compiled :error :message]))
             :format    (:format ctx :legacy)
             :transport transport
