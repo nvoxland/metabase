@@ -41,3 +41,45 @@
   (testing "a CTE body and a derived table that opens with a CTE are subqueries"
     (is (= {:inside 1 :raw []}
            (sql/placement "SELECT * FROM (WITH \"__mb_source\" (\"ID\") AS (SELECT \"ID\" FROM \"SHOPS\" WHERE 1=1) SELECT \"ID\" FROM \"__mb_source\") AS \"__mb_source\"" "SHOPS")))))
+
+(deftest ^:parallel hidden-column-reads-test
+  (let [hidden #{"PRICE" "SECRET" "SECRET_NUM"}]
+    (testing "a hidden column read through a sandbox subquery that does not return it"
+      (is (= [{:alias "__mb_source" :column "PRICE"}]
+             (sql/hidden-column-reads "SELECT \"__mb_source\".\"ID\" AS \"ID\", \"__mb_source\".\"PRICE\" AS \"PRICE\" FROM (SELECT \"PUBLIC\".\"SHOPS\".\"ID\" AS \"ID\" FROM \"PUBLIC\".\"SHOPS\") AS \"__mb_source\"" hidden))))
+    (testing "through an implicit-join alias, and with a join-alias prefix"
+      (is (= [{:alias "SHOPS__via__SHOP_ID" :column "PRICE"}]
+             (sql/hidden-column-reads "SELECT \"SHOPS__via__SHOP_ID\".\"PRICE\" AS \"P\" FROM \"PUBLIC\".\"ORDERS\" LEFT JOIN (SELECT \"PUBLIC\".\"SHOPS\".\"ID\" AS \"ID\" FROM \"PUBLIC\".\"SHOPS\") AS \"SHOPS__via__SHOP_ID\" ON 1=1" hidden)))
+      (is (= [{:alias "__mb_source" :column "S__SECRET"}]
+             (sql/hidden-column-reads "SELECT \"__mb_source\".\"S__SECRET\" FROM (SELECT \"ID\" AS \"ID\" FROM \"SHOPS\") AS \"__mb_source\"" hidden))))
+    (testing "a hidden name the alias does return is fine: REGIONS has SECRET too"
+      (is (= [] (sql/hidden-column-reads "SELECT \"R\".\"SECRET\" AS \"SECRET\" FROM (SELECT \"PUBLIC\".\"REGIONS\".\"SECRET\" AS \"SECRET\" FROM \"PUBLIC\".\"REGIONS\") AS \"R\"" hidden))))
+    (testing "a CTE's column list is what it returns"
+      (is (= [] (sql/hidden-column-reads "WITH \"__mb_source\" (\"ID\", \"PRICE\") AS (SELECT 1, 2) SELECT \"__mb_source\".\"PRICE\" FROM \"__mb_source\"" hidden)))
+      (is (= [{:alias "__mb_source" :column "PRICE"}]
+             (sql/hidden-column-reads "WITH \"__mb_source\" (\"ID\") AS (SELECT 1) SELECT \"__mb_source\".\"PRICE\" FROM \"__mb_source\"" hidden))))
+    (testing "MariaDB quoting"
+      (is (= [{:alias "__mb_source" :column "price"}]
+             (sql/hidden-column-reads "SELECT `__mb_source`.`price` FROM (SELECT `shops`.`id` AS `id` FROM `shops`) AS `__mb_source`" #{"price"}))))
+    (testing "a column the subquery's nested group returns is not returned by the outer subquery"
+      (is (= [{:alias "__mb_source" :column "PRICE"}]
+             (sql/hidden-column-reads "SELECT \"__mb_source\".\"PRICE\" FROM (SELECT \"ID\" AS \"ID\" FROM (SELECT \"PRICE\" AS \"PRICE\" FROM \"SHOPS\") AS \"X\") AS \"__mb_source\"" hidden))))))
+
+(deftest ^:parallel dangling-reads-test
+  (testing "a native subquery's unaliased select list is what it returns"
+    (is (= [] (sql/dangling-reads "SELECT \"__mb_source\".\"NAME\" FROM (SELECT id, name, tier FROM shops WHERE tier = 1) AS \"__mb_source\"" #{"PRICE"})))
+    (is (= [{:alias "__mb_source" :column "PRICE" :hidden? true}]
+           (sql/dangling-reads "SELECT \"__mb_source\".\"PRICE\" FROM (SELECT id, name, tier FROM shops WHERE tier = 1) AS \"__mb_source\"" #{"PRICE"}))))
+  (testing "a `*` makes the subquery's columns unknown, so nothing through it is flagged"
+    (is (= [] (sql/dangling-reads "SELECT \"__mb_source\".\"PRICE\" FROM (SELECT * FROM shops) AS \"__mb_source\"" #{"PRICE"}))))
+  (testing "a read of a column no subquery returns, hidden or not"
+    (is (= [{:alias "S" :column "RATING" :hidden? false}]
+           (sql/dangling-reads "SELECT \"S\".\"RATING\" FROM (SELECT \"ID\" AS \"ID\" FROM \"SHOPS\") AS \"S\"" #{"PRICE"})))))
+
+(deftest ^:parallel dangling-reads-through-an-aliased-cte-test
+  (testing "Postgres compiles stages as CTEs and aliases them in FROM"
+    (is (= [{:alias "__mb_source" :column "price" :hidden? true}]
+           (sql/dangling-reads (str "WITH \"__mb_stage_0\" AS (SELECT \"public\".\"shops\".\"id\" AS \"id\" FROM \"public\".\"shops\") "
+                                    "SELECT \"__mb_source\".\"id\" AS \"id\", \"__mb_source\".\"price\" AS \"price\" "
+                                    "FROM \"__mb_stage_0\" AS \"__mb_source\"")
+                               #{"price"})))))

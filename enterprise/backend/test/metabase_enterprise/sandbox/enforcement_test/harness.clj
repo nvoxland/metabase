@@ -26,6 +26,7 @@
    [clojure.test.check :as tc]
    [clojure.test.check.properties :as prop]
    [mb.hawk.parallel]
+   [medley.core :as m]
    [metabase-enterprise.sandbox.enforcement-test.dataset :as dataset]
    [metabase-enterprise.sandbox.enforcement-test.invariants :as invariants]
    [metabase-enterprise.sandbox.enforcement-test.policies :as policies]
@@ -101,12 +102,14 @@
         (assoc :info info))))
 
 (defn- query-response->result
-  "`:rows`, `:cols` (names) and `:body` of a query response, or `:error`, `:status` and `:body`."
+  "`:rows`, `:cols` (names), `:col-ids` (each column's field id, or nil) and `:body` of a query response, or `:error`,
+  `:status` and `:body`."
   [{:keys [status body]}]
   (if (and (= 202 status) (= "completed" (:status body)))
-    {:rows (get-in body [:data :rows])
-     :cols (mapv :name (get-in body [:data :cols]))
-     :body body}
+    {:rows    (get-in body [:data :rows])
+     :cols    (mapv :name (get-in body [:data :cols]))
+     :col-ids (mapv :id (get-in body [:data :cols]))
+     :body    body}
     {:error  (u/truncate (str status " " (or (:error body) (:message body) body)) 300)
      :status status
      :body   body}))
@@ -250,6 +253,10 @@
                                            :expect              expect
                                            ;; as the driver names the columns in a result
                                            :hidden-cols         (into #{} (map (comp mt/format-name name)) hidden-cols)
+                                           ;; in both databases, so a result from either can be judged by field id
+                                           :hidden-field-ids    (into #{} (for [i [(dataset/ids-map cards) restricted-ids]
+                                                                                c hidden-cols]
+                                                                            (dataset/fid i :shops c)))
                                            :accepted-rejections (or accepted-rejections [])
                                            :sandboxed           (policies/sandboxed-tables policy-k)
                                            :ids                 (dataset/ids-map cards)
@@ -356,18 +363,34 @@
   [ids outer]
   (generated/translate-query outer ids generated/fake-ids))
 
+(defn- symbolic-col-ids
+  "`result` with its `:col-ids` as `[table column]` keys of `ids` instead of ids, so the result can be reused on another
+  copy of the same dataset; ids that name no dataset field are kept."
+  [ids result]
+  (let [id->col (into {} (map (fn [[tc id]] [id tc])) (:fields ids))]
+    (m/update-existing result :col-ids (partial mapv #(get id->col % %)))))
+
+(defn- concrete-col-ids
+  "The inverse of [[symbolic-col-ids]] for the database `ids` describes."
+  [ids result]
+  (m/update-existing result :col-ids (partial mapv #(if (vector? %) (get-in ids [:fields %]) %))))
+
 (defn- cached-admin-run
   "An admin's result for `outer` against the database `ids` describes, cached per driver, dataset, remaps,
   persistence, schema-check mode and symbolic query. Datasets are immutable per JVM and the key holds no id, so the
-  cache never needs invalidating. `cacheable?` false runs it every time."
+  cache never needs invalidating. Each policy runs on a fresh copy of the base dataset with new field ids, so the
+  cached result's column ids are stored symbolically and mapped back to the current copy's. `cacheable?` false runs
+  it every time."
   [{:keys [remaps persist?]} dataset-var ids outer cacheable?]
   (let [key [driver/*driver* (:name (meta dataset-var)) remaps persist? mu.fn/*enforce* (symbolic ids outer)]]
     (if-not cacheable?
       (execute-as :crowberto outer)
-      (or (get @expected-cache key)
-          (let [r (execute-as :crowberto outer)]
-            (swap! expected-cache assoc key r)
-            r)))))
+      (concrete-col-ids
+       ids
+       (or (get @expected-cache key)
+           (let [r (symbolic-col-ids ids (execute-as :crowberto outer))]
+             (swap! expected-cache assoc key r)
+             r))))))
 
 (defn expected-results
   "The admin's results a probe is judged against: `:restricted`, on the policy's restricted variant, and `:base`, on
@@ -389,23 +412,19 @@
   (let [outer        (or (:outer probe) (formats/legacy-outer ids probe))
         observations (observe :rasta outer)
         http         (run-http ctx probe)
-        user         (:executed observations)
         {:keys [restricted base]} (expected-results ctx probe-fn probe cacheable?)
         expected     (if (= expect :unrestricted) base restricted)
-        sql          (get-in observations [:compiled :value :query])
-        verdicts     {:differential     (invariants/differential ctx user expected base)
-                      :canary           (invariants/canary ctx user expected)
-                      :structural       (invariants/structural ctx (:preprocessed observations))
-                      :sql              (invariants/sql ctx (:preprocessed observations) sql)
-                      ;; the API's response when there is one; the processor's result is a weaker stand-in
-                      :hygiene          (invariants/hygiene ctx (or http user))
-                      :metadata-diff    (invariants/metadata user expected)
-                      :http-equivalence (invariants/http-equivalence http user)}]
+        verdicts     (invariants/judge {:ctx          ctx
+                                        :observations observations
+                                        :user         (:executed observations)
+                                        :expected     expected
+                                        :base         base
+                                        :http         http})
+        sql          (get-in observations [:compiled :value :query])]
     (merge verdicts
            {:policy    (:policy ctx)
             :probe     probe-name
-            :outcome   (invariants/outcome verdicts)
-            :user      (trim user)
+            :user      (trim (:executed observations))
             :expected  (trim expected)
             :http      (some-> http trim)
             :compiled  (or sql (get-in observations [:compiled :error :message]))

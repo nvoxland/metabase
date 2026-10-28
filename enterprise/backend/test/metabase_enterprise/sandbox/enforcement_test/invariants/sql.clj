@@ -140,3 +140,142 @@
         (seq raw)      {:verdict :raw-table-in-sql :raw (vec raw)}
         (seq mismatch) {:verdict :sandbox-count-mismatch :tables (vec mismatch)}
         :else          {:verdict :clean}))))
+
+;;; ------------------------------------------- Dangling reads in SQL ----------------------------------------------
+;;;
+;;; Ground truth for "is the rewrite in sync with what reads it": the compiled SQL. A qualified read `"alias"."COL"`
+;;; through a derived table or CTE that does not return COL is a read the compiler emitted for a column its source no
+;;; longer has; only the warehouse can refuse it.
+
+(defn- matching-close
+  "Offset of the `)` that closes the `(` at `open` in `sql`, skipping single-quoted literals."
+  [^String sql open]
+  (loop [i (inc open), depth 1, in-string? false]
+    (when (< i (count sql))
+      (let [c (.charAt sql i)]
+        (cond
+          in-string?                 (recur (inc i) depth (not= c \'))
+          (= c \')                   (recur (inc i) depth true)
+          (= c \()                   (recur (inc i) (inc depth) false)
+          (and (= c \)) (= 1 depth)) i
+          (= c \))                   (recur (inc i) (dec depth) false)
+          :else                      (recur (inc i) depth false))))))
+
+(defn- top-level-depths
+  "Paren depth at each offset of `s`, single-quoted literals ignored."
+  [^String s]
+  (loop [i 0, depth 0, in-string? false, acc (transient [])]
+    (if (>= i (count s))
+      (persistent! acc)
+      (let [c (.charAt s i)]
+        (cond
+          in-string? (recur (inc i) depth (not= c \') (conj! acc depth))
+          (= c \')   (recur (inc i) depth true (conj! acc depth))
+          (= c \()   (recur (inc i) (inc depth) false (conj! acc depth))
+          (= c \))   (recur (inc i) (dec depth) false (conj! acc (dec depth)))
+          :else      (recur (inc i) depth false (conj! acc depth)))))))
+
+(defn- top-level-matches
+  "Start offsets of `re` matches in `s` at paren depth zero."
+  [re ^String s]
+  (let [depths (top-level-depths s)
+        m      (re-matcher re s)]
+    (loop [acc []]
+      (if (.find m)
+        (recur (if (zero? (nth depths (.start m))) (conj acc (.start m)) acc))
+        acc))))
+
+(defn- item-name
+  "The column name a select-list item produces: its alias, else its last identifier; nil for `*` (unknown)."
+  [item]
+  (let [item (str/trim item)]
+    (cond
+      (re-find #"\*\s*$" item) nil
+      :else (let [[_ q u] (or (re-find #"(?i)\bAS\s+(?:[\"`]([^\"`]+)[\"`]|(\w+))\s*$" item)
+                              (re-find #"(?:[\"`]([^\"`]+)[\"`]|(\w+))\s*$" item))]
+              (or q u)))))
+
+(defn- select-list-names
+  "The upper-cased names the final top-level SELECT of `body` returns, or `:unknown` when its list has a `*`."
+  [^String body]
+  (let [select (last (top-level-matches #"(?i)\bSELECT\b" body))
+        from   (when select (first (filter #(> % select) (top-level-matches #"(?i)\bFROM\b" body))))]
+    (if-not select
+      :unknown
+      (let [list-text (subs body (+ select 6) (or from (count body)))
+            commas    (top-level-matches #"," list-text)
+            items     (map (fn [start end] (subs list-text start end))
+                           (cons 0 (map inc commas))
+                           (concat commas [(count list-text)]))
+            names     (map item-name items)]
+        (if (some nil? names)
+          :unknown
+          (into #{} (map u/upper-case-en) names))))))
+
+(defn- re-seq-pos
+  "Matches of `re` in `s` as maps with `:start`, `:end`, `:group` (group 1) and `:group3` (group 3, if any)."
+  [re s]
+  (let [m (re-matcher re s)]
+    (loop [acc []]
+      (if (.find m)
+        (recur (conj acc {:start  (.start m)
+                          :end    (.end m)
+                          :group  (.group m 1)
+                          :group3 (when (>= (.groupCount m) 3) (.group m 3))}))
+        acc))))
+
+(defn- alias-projections
+  "Alias -> upper-cased set of column names it returns, or `:unknown`, for every derived table `(...) AS \"alias\"`
+  and every CTE `\"alias\" (\"A\", \"B\") AS (...)` or `\"alias\" AS (...)` in `sql`. An alias defined more than once
+  (nested `__mb_source`s) gets the union, or `:unknown` if any definition is; that can only hide a read, never invent
+  one."
+  [^String sql]
+  (let [derived (for [m (re-seq-pos #"\)\s+AS\s+[\"`]([^\"`]+)[\"`]" sql)
+                      :let [close (:start m)
+                            open  (loop [i (dec close), depth 0]
+                                    (when (>= i 0)
+                                      (let [c (.charAt sql i)]
+                                        (cond (= c \)) (recur (dec i) (inc depth))
+                                              (= c \() (if (zero? depth) i (recur (dec i) (dec depth)))
+                                              :else    (recur (dec i) depth)))))]
+                      :when open]
+                  [(:group m) (select-list-names (subs sql (inc open) close))])
+        ctes    (for [m (re-seq-pos #"(?i)[\"`]([^\"`]+)[\"`]\s*(\(([^()]*)\))?\s+AS\s+\(" sql)
+                      :let [open  (dec (:end m))
+                            close (matching-close sql open)]
+                      :when close]
+                  [(:group m) (if-let [cols (:group3 m)]
+                                (into #{} (map (comp u/upper-case-en second)) (re-seq #"[\"`]([^\"`]+)[\"`]" cols))
+                                (select-list-names (subs sql (inc open) close)))])
+        merge-def (fn [acc [a cols]]
+                    (assoc acc a (if (or (= :unknown cols) (= :unknown (get acc a)))
+                                   :unknown
+                                   (into (get acc a #{}) cols))))
+        defined   (reduce merge-def {} (concat derived ctes))
+        ;; `FROM "__mb_stage_1" AS "__mb_source"`: an alias of a CTE returns what the CTE returns (Postgres)
+        renamed   (for [[_ table alias] (re-seq #"(?i)\b(?:FROM|JOIN)\s+[\"`]([^\"`]+)[\"`]\s+AS\s+[\"`]([^\"`]+)[\"`]" sql)
+                        :when (contains? defined table)]
+                    [alias (get defined table)])]
+    (reduce merge-def defined renamed)))
+
+(defn dangling-reads
+  "Qualified reads `\"alias\".\"COL\"` in `sql` through a derived table or CTE `alias` that does not return `COL`, each
+  `{:alias :column :hidden?}`, `:hidden?` when `COL`, or its suffix after a `__` join-alias prefix, is one of
+  `hidden-names`. Aliases whose column list cannot be read (a `*`) are skipped; reads through the raw table are
+  [[placement]]'s business."
+  [sql hidden-names]
+  (let [sql         (strip-comments sql)
+        projections (alias-projections sql)
+        hidden      (into #{} (map u/upper-case-en) hidden-names)
+        hidden?     (fn [col] (let [c (u/upper-case-en col)]
+                                (boolean (or (contains? hidden c) (some #(str/ends-with? c (str "__" %)) hidden)))))]
+    (vec (distinct
+          (for [[_ alias col] (re-seq #"[\"`]([^\"`]+)[\"`]\.[\"`]([^\"`]+)[\"`]" sql)
+                :let  [returned (get projections alias)]
+                :when (and (set? returned) (not (contains? returned (u/upper-case-en col))))]
+            {:alias alias :column col :hidden? (hidden? col)})))))
+
+(defn hidden-column-reads
+  "The [[dangling-reads]] of hidden columns, as `{:alias :column}`."
+  [sql hidden-names]
+  (into [] (comp (filter :hidden?) (map #(dissoc % :hidden?))) (dangling-reads sql hidden-names)))

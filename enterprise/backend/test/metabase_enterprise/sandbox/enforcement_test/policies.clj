@@ -94,16 +94,6 @@
   (native-shops-gtap "SELECT %s, %s, %s, %s, %s, %s, %s FROM %s WHERE %s = {{tier}}"
                      "id" "name" "tier" "region_id" "parent_shop_id" "rating" "opened_on" "shops" "tier"))
 
-(def ^:private column-sandbox-rejections
-  "How a column sandbox fails closed today, which the differential oracle accepts only when declared: a ref to a column
-  the sandbox card leaves out reaches the database, which rejects it, or an implicit join through the card gets no
-  alias and the query processor rejects it. Any other failure of the sandboxed user's query alone is a finding."
-  [#"missing join alias"
-   #"(?i)column .*(not found|does not exist)"
-   #"(?i)unknown column"
-   ;; Postgres, for a name ref the sandbox stage cannot provide
-   #"missing FROM-clause entry for table \"__mb_source\""])
-
 (def ^:private schema-check-rejections
   "A `mu/defn` check that only runs with schema checks on; in production the same queries succeed."
   [#"^500 Invalid (input|output): \["])
@@ -132,7 +122,8 @@
   * `:restricted`  the dataset variant that equals the sandbox applied by hand
   * `:expect`      `:restricted` (user == admin on restricted), `:unrestricted` (user == admin on base) or `:error`
   * `:hidden-cols` SHOPS columns the sandbox card leaves out
-  * `:accepted-rejections` patterns of the errors that are a known way for the sandbox to fail closed; any other
+  * `:accepted-rejections` patterns of the errors that are a known way for the sandbox to fail closed (a policy
+    with `:hidden-cols` must instead refuse on purpose: see `invariants/differential`); any other
     failure of the user's query alone is a finding
   * `:sandboxed`   tables with an enforced sandbox, for the structural detector
   * `:setup`       fn run inside `with-gtaps!` for extra arrangements (second groups)
@@ -151,9 +142,9 @@
                                  :setup persist-sandbox-card! :persist? true :feature :persist-models}
    :card-extra-column {:gtaps shops-card-extra-column-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1}
    :card-hide-price {:gtaps shops-hide-price-gtap      :attributes {}           :restricted #'dataset/shops-hide-price
-                     :hidden-cols #{:price :secret :secret_num} :accepted-rejections column-sandbox-rejections}
+                     :hidden-cols #{:price :secret :secret_num}}
    :card-rows+hide  {:gtaps shops-rows+hide-price-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1-hide-price
-                     :hidden-cols #{:price :secret :secret_num} :accepted-rejections column-sandbox-rejections}
+                     :hidden-cols #{:price :secret :secret_num}}
    :native          {:gtaps shops-native-gtap          :attributes {"tier" "1"} :restricted #'dataset/shops-tier1
                      :feature :native-parameters}
    :native-extra-column {:gtaps shops-native-extra-column-gtap :attributes {"tier" "1"}
@@ -161,7 +152,7 @@
                          :accepted-rejections schema-check-rejections}
    :native-hide-price {:gtaps shops-native-hide-price-gtap :attributes {"tier" "1"}
                        :restricted #'dataset/shops-tier1-hide-price :feature :native-parameters
-                       :hidden-cols #{:price :secret :secret_num} :accepted-rejections column-sandbox-rejections}
+                       :hidden-cols #{:price :secret :secret_num}}
    :two-tables      {:gtaps (fn [] (merge (shops-table-gtap) {:regions {:remappings (tier-remapping :regions)}}))
                      :attributes {"tier" "1"} :restricted #'dataset/shops-tier1-regions-tier1 :sandboxed #{:shops :regions}}
    ;; ORDERS.SHOP_ID displays SHOPS.NAME: remaps add implicit joins to the sandboxed table in the outer query
@@ -171,7 +162,7 @@
    :table-tier+persisted {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1
                           :persist? true :feature :persist-models}
    :card-hide-price+persisted {:gtaps shops-hide-price-gtap :attributes {} :restricted #'dataset/shops-hide-price
-                               :hidden-cols #{:price :secret :secret_num} :accepted-rejections column-sandbox-rejections
+                               :hidden-cols #{:price :secret :secret_num}
                                :persist? true :feature :persist-models}
    ;; SHOPS.SECRET_NUM displays admin-entered labels, one per row, from FieldValues of the whole table
    :table-tier+value-remap {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1

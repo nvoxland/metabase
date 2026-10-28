@@ -12,6 +12,11 @@
   * [[hygiene]] -- the response carries no fingerprint, native or preprocessed form, internal stage, or SQL text.
   * [[metadata]] -- the result columns' types and binning equal the admin's.
   * [[http-equivalence]] -- an HTTP entry point returns the rows and columns the processor returns in-process.
+  * [[sql-dangling-reads]] -- in the compiled SQL, every column read through a subquery is one it returns.
+  * [[sql-hidden-columns]] -- the compiled SQL reads no hidden column through a sandbox subquery.
+  * [[failure-layer]] -- where a refused query failed; the differential requires a column sandbox to refuse on purpose.
+
+  [[registry]] lists them; [[judge]] applies them all to one state.
 
   Each docstring says what the invariant looks at, and so where a failure lies: `differential`, `canary` and
   `metadata` read the executed result, so a failure is anywhere in the stack; `structural` reads the preprocessed
@@ -29,6 +34,7 @@
    [metabase-enterprise.sandbox.enforcement-test.invariants.sql :as invariants.sql]
    [metabase-enterprise.sandbox.enforcement-test.queries.hand-written :as hand-written]
    [metabase.lib.walk :as lib.walk]
+   [metabase.query-processor.error-type :as qp.error-type]
    [metabase.query-processor.util.add-alias-info :as add]
    [metabase.test :as mt]
    [metabase.util :as u]
@@ -38,37 +44,75 @@
 
 ;;; -------------------------------------------------- Detectors ---------------------------------------------------
 
+(defn- hidden-indexes
+  "Indexes of `result`'s columns that a sandbox hides. A column is identified by its field id when it has one, so a
+  REGIONS.SECRET is visible while SHOPS.SECRET is hidden; a column without an id (an aggregation, a native column) by
+  its name in `:hidden-cols`."
+  [{:keys [hidden-cols hidden-field-ids]} {:keys [cols col-ids]}]
+  (into #{}
+        (keep-indexed (fn [i col-name]
+                        (when (if-let [id (get col-ids i)]
+                                (contains? (or hidden-field-ids #{}) id)
+                                (contains? (or hidden-cols #{}) col-name))
+                          i)))
+        cols))
+
+(defn- visible-names
+  "`result`'s column names, hidden ones left out, in order."
+  [hidden result]
+  (vec (keep-indexed (fn [i c] (when-not (hidden i) c)) (:cols result))))
+
 (defn- project
-  "The rows of `result` restricted to `col-names`, as a multiset."
-  [{:keys [rows cols]} col-names]
-  (let [idxs (keep #(let [i (.indexOf ^java.util.List cols %)] (when (nat-int? i) i)) col-names)]
+  "The rows of `result` restricted to the visible columns named `col-names`, as a multiset."
+  [hidden {:keys [rows cols]} col-names]
+  (let [index-of (reduce (fn [m [i c]] (if (or (hidden i) (contains? m c)) m (assoc m c i)))
+                         {}
+                         (map-indexed vector cols))
+        idxs     (keep index-of col-names)]
     (frequencies (map (fn [row] (mapv #(nth row %) idxs)) rows))))
 
 (defn- column-verdict
   "The columns the user got against the expected ones, as multisets of names with the hidden columns left out:
   `:extra-columns` when the user has a column (or a copy of one) the expected result lacks, `:missing-columns` when
   an expected column is gone, nil when they agree. The row comparison only means something once they agree."
-  [hidden-names user expected]
-  (let [visible    #(frequencies (remove hidden-names (:cols %)))
-        user-m     (visible user)
-        expected-m (visible expected)]
+  [user-names expected-names]
+  (let [user-m     (frequencies user-names)
+        expected-m (frequencies expected-names)]
     (cond
       (some (fn [[col n]] (> n (get expected-m col 0))) user-m) :extra-columns
       (not= user-m expected-m)                                 :missing-columns)))
 
 (defn- hidden-column-values?
   "Does `result` carry a value in a column the sandbox hides?"
-  [hidden-names {:keys [cols rows]}]
-  (boolean (some (fn [[i col]] (and (hidden-names col) (some #(some? (nth % i)) rows)))
-                 (map-indexed vector cols))))
+  [hidden {:keys [rows]}]
+  (boolean (some (fn [i] (some #(some? (nth % i)) rows)) hidden)))
+
+(defn failure-layer
+  "Where the user's query failed, from the harness's observations: `:deliberate` when something refused it on
+  purpose (a permission error, HTTP 403), `:preprocess` when preprocessing threw anything else, `:compile` when it
+  preprocessed but did not compile, `:warehouse` when it compiled but the database refused it; nil when it ran."
+  [{:keys [preprocessed compiled executed]}]
+  (let [permission? #(some-> % qp.error-type/permission-error?)]
+    (cond
+      (not (:error executed))                                    nil
+      (or (= 403 (:status executed))
+          (permission? (get-in preprocessed [:error :type]))
+          (permission? (some-> executed :body :error_type keyword)))
+      :deliberate
+      (:error preprocessed)                                      :preprocess
+      (:error compiled)                                          :compile
+      :else                                                      :warehouse)))
 
 (defn differential
   "Compare the sandboxed user's result with the expected one (an admin on the restricted variant, or on the base
   database when nothing should be restricted). `admin-base` tells whether the probe could tell restricted data from
   unrestricted data at all. Column names are compared first, so a column that goes missing or appears cannot hide
-  behind a row comparison; `:hidden-cols` holds the names of the columns the sandbox leaves out, which the user may
-  omit or return empty. A failure of the user's query alone is `:user-error`, or `:known-rejection` when the config's
-  `:accepted-rejections` patterns match it; only the latter is an accepted way to fail closed."
+  behind a row comparison; hidden columns (see [[hidden-indexes]]) may be omitted or returned empty.
+
+  A failure of the user's query alone is judged by where it happened (`:failure-layer` on `user`, see
+  [[failure-layer]]): a policy that hides columns must refuse such a query on purpose (`:refused`); failing anywhere
+  else is `:accidental-rejection`, a query nothing guarded. Otherwise it is `:known-rejection` when the policy's
+  `:accepted-rejections` patterns match it, else `:user-error`."
   [{:keys [expect hidden-cols accepted-rejections] :as ctx} user expected admin-base]
   (cond
     ;; a probe that cannot tell the restricted data from the rest may succeed; one that can must fail
@@ -79,16 +123,21 @@
     (and (:error expected) (:error user)) :rejected
     (:error expected)                     :expected-error
     (:error user)                         (cond
-                                            (= expect :unrestricted)                                   :over-restricted
-                                            (some #(re-find % (:error user)) accepted-rejections)      :known-rejection
-                                            :else                                                      :user-error)
+                                            (= expect :unrestricted)                              :over-restricted
+                                            (and (seq hidden-cols) (= :deliberate (:failure-layer user))) :refused
+                                            (some #(re-find % (:error user)) accepted-rejections) :known-rejection
+                                            (seq hidden-cols)                                     :accidental-rejection
+                                            :else                                                 :user-error)
     :else
-    (let [hidden-names (if (= expect :unrestricted) #{} hidden-cols)]
-      (or (column-verdict hidden-names user expected)
-          (when (hidden-column-values? hidden-names user) :hidden-column-values)
-          (let [common     (remove hidden-names (:cols expected))
-                user-m     (project user common)
-                expected-m (project expected common)]
+    (let [ctx           (cond-> ctx (= expect :unrestricted) (assoc :hidden-cols #{} :hidden-field-ids #{}))
+          user-hidden   (hidden-indexes ctx user)
+          exp-hidden    (hidden-indexes ctx expected)
+          base-hidden   (hidden-indexes ctx admin-base)
+          common        (visible-names exp-hidden expected)]
+      (or (column-verdict (visible-names user-hidden user) common)
+          (when (hidden-column-values? user-hidden user) :hidden-column-values)
+          (let [user-m     (project user-hidden user common)
+                expected-m (project exp-hidden expected common)]
             (cond
               (= expect :unrestricted)
               (if (= user-m expected-m) :consistent :over-restricted)
@@ -96,8 +145,8 @@
               (= user-m expected-m)
               ;; the probe told restricted data from the rest when the rows differ from the unrestricted ones, or
               ;; when the unrestricted result showed a hidden column's values
-              (if (and (= (project admin-base common) expected-m)
-                       (not (hidden-column-values? hidden-names admin-base)))
+              (if (and (= (project base-hidden admin-base common) expected-m)
+                       (not (hidden-column-values? base-hidden admin-base)))
                 :vacuous
                 :consistent)
 
@@ -161,6 +210,35 @@
                                   :table-ids (into {} (for [t sandboxed] [t (dataset/tid ids t)]))}
                                  preprocessed
                                  sql))
+
+;;; ------------------------------------------------- Sync checks --------------------------------------------------
+;;;
+;;; The sandbox rewrite swaps a stage's source table for the sandbox subquery. Whatever else in the query still points
+;;; at what that source used to return has to be reconciled with what the sandbox returns now; a ref that is not
+;;; is caught, if at all, by alias resolution or the warehouse, by accident. These invariants measure that on the
+;;; compiled SQL, the ground truth: Lib's view of what a stage returns differs from the compiler's for remapped joins
+;;; and stages added on top, so a check on the preprocessed query reports reads that run fine.
+
+(defn sql-dangling-reads
+  "Looks at the compiled SQL: every column read through a subquery's alias must be one that subquery returns. The
+  compiler emitting such a read means a ref the rewrite should have reconciled reached it; only the warehouse can
+  refuse it. Reads of hidden columns are [[sql-hidden-columns]]'s. See [[invariants.sql/dangling-reads]]."
+  [{:keys [hidden-cols]} sql]
+  (if-not (string? sql)
+    {:verdict :skipped}
+    (let [reads (remove :hidden? (invariants.sql/dangling-reads sql (or hidden-cols #{})))]
+      (if (seq reads) {:verdict :dangling :reads (vec (take 6 reads))} {:verdict :clean}))))
+
+(defn sql-hidden-columns
+  "Looks at the compiled SQL: no hidden column may be read through a sandbox subquery's alias that does not return it.
+  The compiler emitting such a read means a ref to a hidden column reached it. See
+  [[invariants.sql/hidden-column-reads]]."
+  [{:keys [hidden-cols]} sql]
+  (cond
+    (empty? hidden-cols) {:verdict :n/a}
+    (not (string? sql))  {:verdict :skipped}
+    :else (let [reads (invariants.sql/hidden-column-reads sql hidden-cols)]
+            (if (seq reads) {:verdict :hidden-column-read :reads (vec (take 6 reads))} {:verdict :clean}))))
 
 ;;; ------------------------------------------- Detector cross-checks ----------------------------------------------
 
@@ -282,6 +360,8 @@
    :canary-leak            {:fails? true  :doc "a canary of a hidden row is somewhere in the user's response"}
    :raw-ref                {:fails? true  :doc "the preprocessed query reads the sandboxed table outside a sandbox stage"}
    :raw-table-in-sql       {:fails? true  :doc "the compiled SQL reads the sandboxed table outside the sandbox subquery"}
+   :hidden-column-in-sql   {:fails? true  :doc "the compiled SQL reads a hidden column through a sandbox subquery that does not return it"}
+   :dangling-ref           {:fails? true  :doc "the compiled SQL reads a column its subquery does not return: the rewrite left a ref unreconciled"}
    :binning-bounds-leak    {:fails? true  :doc "binning bounds come from the whole table's fingerprint, not the sandboxed rows"}
    :http-differs           {:fails? true  :doc "an HTTP entry point returned other rows or columns than the processor in-process"}
    :extra-rows             {:fails? true  :doc "the user got rows the admin on the restricted variant did not"}
@@ -291,7 +371,9 @@
    :hidden-column-values   {:fails? true  :doc "a column the sandbox hides carries a value"}
    :missing-error          {:fails? true  :doc "a policy that must fail the query let it succeed with restricted data"}
    :over-restricted        {:fails? true  :doc "nothing should be restricted, yet the user got less than the admin"}
+   :accidental-rejection   {:fails? true  :doc "a policy that hides columns failed the user's query, but not on purpose: nothing guarded it"}
    :user-error             {:fails? true  :doc "only the user's query failed, in a way no policy declares acceptable"}
+   :refused                {:fails? false :doc "a policy that hides columns refused the user's query on purpose"}
    :known-rejection        {:fails? false :doc "only the user's query failed, in a way the policy declares as failing closed"}
    :failed-as-expected     {:fails? false :doc "a policy that must fail the query did"}
    :rejected               {:fails? false :doc "both the user's and the admin's query failed: the probe is invalid"}
@@ -308,19 +390,63 @@
 
 (defn outcome
   "One keyword for a result, worst first, from its separate verdicts; see [[outcomes]]."
-  [{:keys [differential canary structural sql metadata-diff http-equivalence]}]
+  [{:keys [differential canary structural sql sql-hidden-columns dangling-reads metadata-diff http-equivalence]}]
   (cond
-    (= :leak (:verdict canary))                 :canary-leak
-    (= :raw-ref (:verdict structural))          :raw-ref
-    (= :raw-table-in-sql (:verdict sql))        :raw-table-in-sql
+    (= :leak (:verdict canary))                            :canary-leak
+    (= :raw-ref (:verdict structural))                     :raw-ref
+    (= :raw-table-in-sql (:verdict sql))                   :raw-table-in-sql
+    ;; a probe the admin cannot run either is invalid (a forged model naming columns its query lacks), and its reads
+    ;; are its own, not the rewrite's
+    (and (= :hidden-column-read (:verdict sql-hidden-columns))
+         (not (#{:rejected :expected-error} differential)))    :hidden-column-in-sql
+    ;; a probe the admin cannot run either is invalid, and its dangling reads are its own, not the rewrite's
+    (and (= :dangling (:verdict dangling-reads))
+         (not (#{:rejected :expected-error} differential)))  :dangling-ref
     ;; bin bounds come from fingerprints; bounds that differ from the restricted data's reveal the hidden range
     (some (fn [{u :user e :expected}]
             (let [bounds #(select-keys (:binning_info %) [:min_value :max_value])]
               (and (seq (bounds u)) (seq (bounds e)) (not= (bounds u) (bounds e)))))
           (:diffs metadata-diff))
     :binning-bounds-leak
-    (= :differs (:verdict http-equivalence))    :http-differs
-    :else                                       differential))
+    (= :differs (:verdict http-equivalence))               :http-differs
+    :else                                                  differential))
+
+;;; ---------------------------------------------------- Judging ---------------------------------------------------
+
+(def registry
+  "Invariant name -> fn of a judgement map, returning its verdict. The judgement map is everything known about one
+  state:
+
+    {:ctx          the policy context (see the harness namespace)
+     :observations {:preprocessed {:value|:error} :compiled {:value|:error} :executed result}
+     :user         the user's executed result, with :failure-layer
+     :expected     the admin's result on the restricted variant (or the base, for an :unrestricted policy)
+     :base         the admin's result on the base dataset
+     :http         an HTTP entry point's result, or nil}
+
+  To add an invariant: write it as a fn of what it looks at, register it here, give its failing verdict an outcome in
+  [[outcomes]], and place that outcome in [[outcome]]'s precedence."
+  (array-map
+   :differential       (fn [{:keys [ctx user expected base]}] (differential ctx user expected base))
+   :canary             (fn [{:keys [ctx user expected]}] (canary ctx user expected))
+   :structural         (fn [{:keys [ctx observations]}] (structural ctx (:preprocessed observations)))
+   :dangling-reads     (fn [{:keys [ctx observations]}]
+                         (sql-dangling-reads ctx (get-in observations [:compiled :value :query])))
+   :sql                (fn [{:keys [ctx observations]}]
+                         (sql ctx (:preprocessed observations) (get-in observations [:compiled :value :query])))
+   :sql-hidden-columns (fn [{:keys [ctx observations]}]
+                         (sql-hidden-columns ctx (get-in observations [:compiled :value :query])))
+   ;; the API's response when there is one; the processor's result is a weaker stand-in
+   :hygiene            (fn [{:keys [ctx user http]}] (hygiene ctx (or http user)))
+   :metadata-diff      (fn [{:keys [user expected]}] (metadata user expected))
+   :http-equivalence   (fn [{:keys [user http]}] (http-equivalence http user))))
+
+(defn judge
+  "Every registered invariant's verdict on `judgement`, plus the `:outcome` they fold into."
+  [{:keys [observations] :as judgement}]
+  (let [judgement (assoc-in judgement [:user :failure-layer] (failure-layer observations))
+        verdicts  (into {} (for [[k f] registry] [k (f judgement)]))]
+    (assoc verdicts :outcome (outcome verdicts) :failure-layer (get-in judgement [:user :failure-layer]))))
 
 (defn unexpected-outcome?
   "A failing outcome, or a probe that both users fail without being invalid on purpose ([[hand-written/invalid?]])."

@@ -39,14 +39,33 @@
       (is (= :extra-rows (verdict {:cols ["ID" "NAME"] :rows [[1 "Alpha"] [2 "Beta"]]})))
       (is (= :missing-rows (verdict {:cols ["ID" "NAME"] :rows []}))))
     (testing "a failure of the user's query alone is never a pass by itself"
-      (is (= :user-error (verdict {:error "500 boom" :status 500})))
-      (is (= :user-error (verdict {:error "400 nope" :status 400})))
-      (testing "unless the config declares that rejection"
-        (is (= :known-rejection (invariants/differential (assoc ctx :accepted-rejections [#"missing join alias"])
-                                                         {:error "500 Column with source :source/implicitly-joinable is missing join alias" :status 500}
+      (testing "under a policy that hides columns, it must be a deliberate refusal"
+        (is (= :accidental-rejection (verdict {:error "500 boom" :status 500 :failure-layer :preprocess})))
+        (is (= :accidental-rejection (verdict {:error "500 Column not found" :status 500 :failure-layer :warehouse})))
+        (is (= :refused (verdict {:error "403 no" :status 403 :failure-layer :deliberate}))))
+      (testing "under a policy that hides nothing, it is a user error"
+        (is (= :user-error (invariants/differential (assoc ctx :hidden-cols #{}) {:error "400 nope" :status 400 :failure-layer :preprocess}
+                                                    expected base)))
+        (is (= :user-error (invariants/differential (assoc ctx :hidden-cols #{}) {:error "403 no" :status 403 :failure-layer :deliberate}
+                                                    expected base))))
+      (testing "unless the policy declares that rejection"
+        (is (= :known-rejection (invariants/differential (assoc ctx :accepted-rejections [#"Invalid output"])
+                                                         {:error "500 Invalid output: [x]" :status 500 :failure-layer :preprocess}
                                                          expected base)))
-        (is (= :user-error (invariants/differential (assoc ctx :accepted-rejections [#"missing join alias"])
-                                                    {:error "500 boom" :status 500} expected base)))))
+        (is (= :accidental-rejection (invariants/differential (assoc ctx :accepted-rejections [#"Invalid output"])
+                                                              {:error "500 boom" :status 500} expected base)))))
+    (testing "hidden columns are identified by field id when a column has one"
+      (let [ctx      (assoc ctx :hidden-field-ids #{30} :hidden-cols #{"SECRET"})
+            expected {:cols ["ID" "SECRET"] :col-ids [10 41] :rows [[1 "region secret"]]}]
+        (testing "a same-named column of another table is visible, so losing it is missing a column"
+          (is (= :missing-columns (invariants/differential ctx {:cols ["ID"] :col-ids [10] :rows [[1]]} expected expected))))
+        (testing "the hidden column itself may be left out"
+          (is (= :vacuous (invariants/differential ctx {:cols ["ID" "SECRET"] :col-ids [10 41] :rows [[1 "region secret"]]}
+                                                   (update expected :cols conj "SECRET") expected))
+              "sanity: identical results")
+          (is (not= :missing-columns (invariants/differential ctx {:cols ["ID" "SECRET"] :col-ids [10 41] :rows [[1 "region secret"]]}
+                                                              {:cols ["ID" "SECRET" "SECRET"] :col-ids [10 41 30] :rows [[1 "region secret" nil]]}
+                                                              expected))))))
     (testing "the probe itself is invalid when the admin's run fails too"
       (is (= :rejected (invariants/differential ctx {:error "500 x" :status 500} {:error "500 x" :status 500} base)))
       (is (= :expected-error (invariants/differential ctx {:cols [] :rows []} {:error "500 x" :status 500} base))))
@@ -97,6 +116,19 @@
       (is (= :differs (:verdict (invariants/http-equivalence {:rows [[1 "Alpha" 1]] :body (:body executed)} executed))))
       (is (= :differs (:verdict (invariants/http-equivalence {:error "500 x" :status 500} executed))))
       (is (= :same (:verdict (invariants/http-equivalence {:error "500 x" :status 500} {:error "400 y" :status 400})))))))
+
+(deftest ^:parallel failure-layer-test
+  (testing "where a refused query failed, from the observations"
+    (is (nil? (invariants/failure-layer {:executed {:rows []}})))
+    (is (= :deliberate (invariants/failure-layer {:executed {:error "403 x" :status 403}})))
+    (is (= :deliberate (invariants/failure-layer {:preprocessed {:error {:type :missing-required-permissions}}
+                                                  :executed     {:error "500 x" :status 500}})))
+    (is (= :preprocess (invariants/failure-layer {:preprocessed {:error {:type :driver}}
+                                                  :executed     {:error "500 x" :status 500}})))
+    (is (= :compile (invariants/failure-layer {:preprocessed {:value {}} :compiled {:error {}}
+                                               :executed     {:error "500 x" :status 500}})))
+    (is (= :warehouse (invariants/failure-layer {:preprocessed {:value {}} :compiled {:value {:query "SELECT"}}
+                                                 :executed     {:error "500 x" :status 500}})))))
 
 (deftest ^:parallel meaningful-run-test
   (testing "a run that never compared rows that could differ proves nothing"
@@ -149,13 +181,16 @@
 
 (def ^:private mutant-policies [:table-tier :card-hide-price :card-join])
 
-(defn- invariants-fired [{:keys [differential canary structural sql hygiene]}]
+(defn- invariants-fired [{:keys [differential canary structural sql sql-hidden-columns dangling-reads hygiene]}]
   (cond-> #{}
-    (#{:extra-rows :missing-rows :extra-columns :missing-columns :hidden-column-values :over-restricted :user-error} differential)
+    (#{:extra-rows :missing-rows :extra-columns :missing-columns :hidden-column-values :over-restricted :user-error
+       :accidental-rejection} differential)
     (conj :differential)
     (= :leak (:verdict canary))                                  (conj :canary)
     (= :raw-ref (:verdict structural))                           (conj :structural)
     (= :raw-table-in-sql (:verdict sql))                         (conj :sql)
+    (= :hidden-column-read (:verdict sql-hidden-columns))        (conj :sql-hidden-columns)
+    (= :dangling (:verdict dangling-reads))                      (conj :dangling-reads)
     (= :dirty (:verdict hygiene))                                (conj :hygiene)))
 
 (defn mutation-score!
