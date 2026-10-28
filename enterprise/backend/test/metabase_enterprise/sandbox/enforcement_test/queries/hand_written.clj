@@ -187,10 +187,28 @@
    :card-bogus-join-alias   (fn [ids] {:query {:source-table (dataset/card-source ids :card/shops)
                                                :fields       [[:field (dataset/fid ids :shops :name) {:join-alias "Nope"}]]}})))
 
+(def regions-columns
+  "REGIONS columns that only REGIONS names (BUDGET, CODE), which a REGIONS sandbox may hide: REGIONS as the source, an
+  aggregation over a hidden column, and the same columns reached from SHOPS through the implicit join, as a field, a
+  breakout and a filter."
+  (array-map
+   :regions-source            (fn [ids] {:query {:source-table (dataset/tid ids :regions)}})
+   :regions-sum-budget        (fn [ids] {:query {:source-table (dataset/tid ids :regions)
+                                                 :aggregation  [[:sum [:field (dataset/fid ids :regions :budget) nil]]]}})
+   :shops-region-budget       (fn [ids] {:query {:source-table (dataset/tid ids :shops)
+                                                 :fields       [[:field (dataset/fid ids :shops :id) nil]
+                                                                (implicit ids :shops :region_id :regions :budget)]}})
+   :shops-breakout-region-code (fn [ids] {:query {:source-table (dataset/tid ids :shops)
+                                                  :aggregation  [[:count]]
+                                                  :breakout     [(implicit ids :shops :region_id :regions :code)]}})
+   :shops-filter-region-budget (fn [ids] {:query {:source-table (dataset/tid ids :shops)
+                                                  :aggregation  [[:count]]
+                                                  :filter       [:> (implicit ids :shops :region_id :regions :budget) 150]}})))
+
 (def all
   "Every hand-written probe the processor tests run under every policy: the union of the groups above, each a fn of
   an ids map returning the inner query."
-  (merge roles sources name-refs join-forgery bogus-join-aliases))
+  (merge roles sources name-refs join-forgery bogus-join-aliases regions-columns))
 
 (def invalid
   "Hand-written probes that are not valid queries on purpose (a join alias that names no join, a forged or colliding

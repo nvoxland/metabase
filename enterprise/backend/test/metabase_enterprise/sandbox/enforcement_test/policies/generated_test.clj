@@ -71,7 +71,7 @@
          problem [(when-not (every? (set (generated/filter-columns filter-table)) (map :column filters)) :filter-column)
                   (when (and (#{:table :native} kind) (not-every? #(= [:attribute :=] ((juxt :via :op) %)) filters)) :attribute-only)
                   (when (and (= kind :table) (seq hidden)) :hidden-on-table)
-                  (when (and (not= table :shops) (seq hidden)) :hidden-off-shops)
+                  (when-not (every? (set (generated/hideable-columns table)) hidden) :not-hideable)
                   (when (contains? hidden :id) :hidden-id)
                   (when (and (= kind :card) (seq (set/intersection hidden attr-columns))) :attribute-column-hidden)
                   (when (not= (count filters) (count (distinct (map :column filters)))) :column-twice)
@@ -85,6 +85,11 @@
     (testing (pr-str spec)
       (is (nil? (well-formed-problems spec)))
       (is (= (generated/spec-name spec) (generated/spec-name (read-string (pr-str spec)))))))
+  (testing "REGIONS columns are hidden too, and only those whose names no other table uses"
+    (let [regions-hidden (into #{} (mapcat #(get-in % [:regions :hidden])) (generated/sample :two-tables 200 7))
+          other-names    (into #{} (mapcat dataset/columns) [:shops :orders :items])]
+      (is (seq regions-hidden))
+      (is (empty? (set/intersection regions-hidden other-names)))))
   (testing "different specs, different names"
     (let [specs (mapcat #(generated/sample % 50 7) generated/kinds)]
       (is (= (count (distinct specs)) (count (distinct (map generated/spec-name specs)))))))

@@ -106,7 +106,7 @@
       (= outcome :raw-ref)                                                "SEC-1336"
       (= forged :lib-names-disagree)                                      (if (= outcome :hidden-column-values) "SEC-1343" "SEC-1338")
       (#{:accidental-rejection :hidden-column-in-sql :dangling-ref} outcome) "SEC-1338"
-      (#{:shops-out-to-regions :regions-into-shops} probe-name)           "SEC-1342"
+      (#{:shops-out-to-regions :regions-into-shops :shops-region-budget} probe-name) "SEC-1342"
       (and (= :generated test-k) (hides-columns? policy))                "SEC-1339"
       (= outcome :not-meaningful)                                         "SEC-1338"
       :else                                                               :unclassified)))

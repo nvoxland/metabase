@@ -497,10 +497,13 @@
                  body))
 
 (defn meaningful?
-  "At least some of the cases compared rows that could have differed and found them right. A run that only ever
-  errors, or only asks what the sandbox cannot change (`:vacuous`), proves nothing about it."
+  "At least some of the cases compared rows that could have differed and found them right: 10 of them, or 30% of a
+  shorter run (a run that stops at its first failure). A run that only ever errors, or only asks what the sandbox
+  cannot change (`:vacuous`), proves nothing about it. The floor is a count rather than a share because how many
+  cases are vacuous moves with every change to the dataset's columns."
   [outcomes]
-  (let [counts (frequencies (map :outcome outcomes))
-        total  (count outcomes)]
+  (let [consistent (count (filter #(= :consistent (:outcome %)) outcomes))
+        total      (count outcomes)]
     (and (pos? total)
-         (>= (get counts :consistent 0) (* 0.3 total)))))
+         (or (>= consistent 10)
+             (>= consistent (* 0.3 total))))))

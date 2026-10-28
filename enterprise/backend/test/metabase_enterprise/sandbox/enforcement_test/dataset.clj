@@ -125,12 +125,15 @@
 (mt/defdataset shops
   "See the namespace docstring. Columns in row order."
   [["regions"
-    [(pk) (text "name") (int-col "tier") (int-col "hq_shop_id") (text "secret") (big "secret_num")]
+    ;; BUDGET and CODE are named like no column of another table, so a sandbox can hide them without a same-named
+    ;; visible column; see `policies.generated`
+    [(pk) (text "name") (int-col "tier") (int-col "hq_shop_id") (int-col "budget") (text "code") (text "secret")
+     (big "secret_num")]
     (with-canaries :regions
-      [[1 "North" 1 1]
-       [2 "South" 2 3]
-       [3 "East"  1 5]
-       [4 "West"  2 nil]])]
+      [[1 "North" 1 1   100 "N-1"]
+       [2 "South" 2 3   250 "S-2"]
+       [3 "East"  1 5   100 "E-1"]
+       [4 "West"  2 nil nil "W-2"]])]
    ["shops"
     [(pk) (text "name") (int-col "tier") (int-col "price") (int-col "region_id") (int-col "parent_shop_id")
      (float-col "rating") (date-col "opened_on") (text "secret") (big "secret_num")]
@@ -191,7 +194,7 @@
 
 (def columns
   "Table -> its columns, in row order."
-  {:regions [:id :name :tier :hq_shop_id :secret :secret_num]
+  {:regions [:id :name :tier :hq_shop_id :budget :code :secret :secret_num]
    :shops   [:id :name :tier :price :region_id :parent_shop_id :rating :opened_on :secret :secret_num]
    :orders  [:id :name :shop_id :return_shop_id :amount]
    :items   [:id :name :order_id :qty]})
@@ -201,7 +204,7 @@
   {:id :type/Integer :name :type/Text :tier :type/Integer :price :type/Integer :amount :type/Integer :qty :type/Integer
    :region_id :type/Integer :parent_shop_id :type/Integer :hq_shop_id :type/Integer :shop_id :type/Integer
    :return_shop_id :type/Integer :order_id :type/Integer :secret :type/Text :secret_num :type/BigInteger
-   :rating :type/Float :opened_on :type/Date})
+   :rating :type/Float :opened_on :type/Date :budget :type/Integer :code :type/Text})
 
 (defn ids-map
   "Every table, field and card id of the current database, by name, plus the physical column names."
@@ -296,7 +299,7 @@
 (def varyable-columns
   "Table -> the columns a varied dataset may change: the data columns, not the ids and keys that tie rows together."
   {:shops   [:name :price :rating :opened_on :secret :secret_num]
-   :regions [:name :secret :secret_num]})
+   :regions [:name :budget :code :secret :secret_num]})
 
 (defn vary
   "The row map with `columns` changed to values that are not canaries and not in the base dataset."
@@ -309,7 +312,9 @@
                                 :opened_on  (java.time.LocalDate/of 2025 6 (int id))
                                 :secret     (str "VARIED-" id)
                                 :secret_num (+ 100000 id)
-                                :tier       (+ 10 (:tier row)))))
+                                :tier       (+ 10 (:tier row))
+                                :budget     (+ 1000 id)
+                                :code       (str "V-" id))))
           row
           columns))
 

@@ -12,13 +12,13 @@
   | kind         | sandbox                                                | filters                          | hidden      |
   |--------------|--------------------------------------------------------|----------------------------------|-------------|
   | `:table`     | the table itself, attributes as `variable` remappings  | 1-2, attribute `=`               | none        |
-  | `:card`      | an MBQL card; literal filters in it, attributes as `dimension` remappings | 0-2, any      | SHOPS only  |
-  | `:card-join` | a SHOPS card joining REGIONS as `R`, filtered on REGIONS columns | 1-2, any, on REGIONS     | SHOPS only  |
-  | `:native`    | a SQL card `WHERE col = {{attr}}`                      | 1-2, attribute `=`               | SHOPS only  |
+  | `:card`      | an MBQL card; literal filters in it, attributes as `dimension` remappings | 0-2, any      | any         |
+  | `:card-join` | a SHOPS card joining REGIONS as `R`, filtered on REGIONS columns | 1-2, any, on REGIONS     | SHOPS       |
+  | `:native`    | a SQL card `WHERE col = {{attr}}`                      | 1-2, attribute `=`               | any         |
 
-  An attribute filter's `:value` is the login attribute string; the sandbox coerces it to the column type as
-  [[coerce]] does. A literal filter's `:value` is typed. Hidden columns are on SHOPS only: the SQL invariants and the
-  name fallback of the differential identify hidden columns by name, and REGIONS shares names with SHOPS.
+  The `:regions` stratum is a REGIONS sandbox alone, `:card` or `:native`, that always hides columns. An attribute
+  filter's `:value` is the login attribute string; the sandbox coerces it to the column type as
+  [[coerce]] does. A literal filter's `:value` is typed. The columns a sandbox may hide are [[hideable-columns]].
 
   [[policy]] turns a spec into a policy config in the shape of `policies/all`; [[restricted]] and [[varied]] derive
   the datasets; [[in-scope]] is the run's sample. `policies.generated-test` checks the derivation against the query
@@ -38,11 +38,14 @@
 (def filter-columns
   "Table -> the columns a sandbox may filter on. Not the canaries, and not OPENED_ON: dates are their own round."
   {:shops   [:id :tier :price :region_id :parent_shop_id :rating :name]
-   :regions [:id :tier :name :hq_shop_id]})
+   :regions [:id :tier :name :hq_shop_id :budget :code]})
 
-(def ^:private hideable-columns
-  "SHOPS columns a sandbox may hide: all but the primary key."
-  [:name :tier :price :region_id :parent_shop_id :rating :opened_on :secret :secret_num])
+(def hideable-columns
+  "Table -> the columns a sandbox may hide. On SHOPS all but the primary key, same-named columns of other tables
+  included. On REGIONS only columns no other table names: the differential identifies a result column without a field
+  id (an aggregation, a native column) by name, so a hidden REGIONS column must not share its name with a visible one."
+  {:shops   [:name :tier :price :region_id :parent_shop_id :rating :opened_on :secret :secret_num]
+   :regions [:hq_shop_id :budget :code]})
 
 (defn- text? [column] (isa? (dataset/base-types column) :type/Text))
 
@@ -291,9 +294,7 @@
                                                             (gen-literal-filter table column)))))))))
 
 (defn- gen-hidden [table]
-  (if (= table :shops)
-    (gen/set (gen/elements hideable-columns) {:max-elements 3})
-    (gen/return #{})))
+  (gen/set (gen/elements (hideable-columns table)) {:max-elements (if (= table :shops) 3 2)}))
 
 (defn- gen-table-spec
   "A table spec of `kind` on `table`."
@@ -303,7 +304,7 @@
    (gen/let [filters (case kind
                        :table     (gen-filters table 1 2 [:attribute])
                        :native    (gen-filters table 1 2 [:attribute])
-                       :card      (gen-filters table (if (= table :shops) 0 1) 2 [:attribute :literal])
+                       :card      (gen-filters table 0 2 [:attribute :literal])
                        :card-join (gen-filters :regions 1 2 [:attribute :literal]))
              hidden  (if (= kind :table) (gen/return #{}) (gen-hidden table))]
      {:kind    kind
@@ -315,11 +316,19 @@
    100))
 
 (def kinds
-  "The strata of generated policies: one per kind of SHOPS sandbox, and two-table sandboxes."
-  [:table :card :card-join :native :two-tables])
+  "The strata of generated policies: one per kind of SHOPS sandbox, a REGIONS sandbox that hides columns (so a hidden
+  REGIONS column is tested apart from hidden SHOPS ones), and two-table sandboxes."
+  [:table :card :card-join :native :regions :two-tables])
 
 (defn- gen-spec [kind]
-  (if (= kind :two-tables)
+  (case kind
+    :regions
+    (gen/fmap (fn [table-spec] {:regions table-spec})
+              (gen/such-that (comp seq :hidden)
+                             (gen/bind (gen/elements [:card :native]) #(gen-table-spec :regions %))
+                             100))
+
+    :two-tables
     (gen/let [shops-kind   (gen/elements [:table :card :native])
               regions-kind (gen/elements [:table :card :native])
               shops        (gen-table-spec :shops shops-kind)
@@ -330,7 +339,10 @@
 (defn spec-kind
   "The stratum `spec` belongs to."
   [spec]
-  (if (= 2 (count spec)) :two-tables (:kind (:shops spec))))
+  (cond
+    (= 2 (count spec)) :two-tables
+    (:regions spec)    :regions
+    :else              (:kind (:shops spec))))
 
 (defn sample
   "`n` distinct specs of `kind`, the same for the same `seed`."

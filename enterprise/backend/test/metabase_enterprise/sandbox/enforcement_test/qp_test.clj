@@ -19,7 +19,7 @@
   | generated, 40 per policy    | table-tier, card-hide-price, two-tables | production | any | in-process + dataset | yes |
   | hand-written + grid slice   | table-tier, card-hide-price   | production   | all 3   | in-process            | yes   |
   | hand-written + parameters   | policies with a varied dataset| production   | legacy  | in-process            | yes   |
-  | roles + sources             | generated, 2 specs per kind   | production   | legacy  | in-process + dataset  | yes   |
+  | roles, sources, regions     | generated, 2 specs per kind   | production   | legacy  | in-process + dataset  | yes   |
   | hand-written + parameters   | generated, on their varied data | production | legacy  | in-process            | local |
 
   Generated policies are specs drawn by `policies.generated` (`MB_SANDBOX_GEN_POLICIES` per kind,
@@ -213,7 +213,7 @@
         (doseq [state (run-states! (assoc (policies/scope :generated-policies)
                                           :probes (if (policies/full-run?)
                                                     hand-written/all
-                                                    (merge hand-written/roles hand-written/sources))))]
+                                                    (merge hand-written/roles hand-written/sources hand-written/regions-columns))))]
           (holds! :generated-policies state))))))
 
 (deftest ^:synchronized generated-policies-do-not-see-hidden-data-test

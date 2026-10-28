@@ -135,7 +135,13 @@
     (is (not (invariants/meaningful? (repeat 40 {:outcome :vacuous}))))
     (is (not (invariants/meaningful? (repeat 40 {:outcome :rejected}))))
     (is (not (invariants/meaningful? [])))
-    (is (invariants/meaningful? (concat (repeat 12 {:outcome :consistent}) (repeat 28 {:outcome :vacuous}))))))
+    (is (invariants/meaningful? (concat (repeat 12 {:outcome :consistent}) (repeat 28 {:outcome :vacuous})))))
+  (testing "enough compared cases count, whatever share of the run they are"
+    (is (invariants/meaningful? (concat (repeat 11 {:outcome :consistent}) (repeat 29 {:outcome :vacuous}))))
+    (is (not (invariants/meaningful? (concat (repeat 3 {:outcome :consistent}) (repeat 37 {:outcome :vacuous}))))))
+  (testing "a short run, such as one stopped at its first failure, needs a share instead"
+    (is (invariants/meaningful? (concat (repeat 4 {:outcome :consistent}) (repeat 6 {:outcome :vacuous}))))
+    (is (not (invariants/meaningful? (concat (repeat 1 {:outcome :consistent}) (repeat 12 {:outcome :vacuous})))))))
 
 (deftest ^:synchronized detectors-agree-with-each-other-test
   (testing "No probe makes two detectors contradict each other; a disagreement is a detector bug"
