@@ -10,6 +10,7 @@
   * [[sql]] -- in the compiled SQL, the sandboxed table is read only inside the sandbox subquery
     (see [[invariants.sql/structural-sql]]).
   * [[hygiene]] -- the response carries no fingerprint, native or preprocessed form, internal stage, or SQL text.
+  * [[error-secrets]] -- an error the user gets carries no value the sandbox hides and names no hidden column.
   * [[metadata]] -- the result columns' types and binning equal the admin's.
   * [[http-equivalence]] -- an HTTP entry point returns the rows and columns the processor returns in-process.
   * [[sql-dangling-reads]] -- in the compiled SQL, every column read through a subquery is one it returns.
@@ -21,7 +22,7 @@
   Each docstring says what the invariant looks at, and so where a failure lies: `differential`, `canary` and
   `metadata` read the executed result, so a failure is anywhere in the stack; `structural` reads the preprocessed
   query, so a failure is in the query processor's middleware; `sql` reads the compiled query, so a failure is in the
-  compiler; `hygiene` reads the response text, so a failure is in error handling or the driver.
+  compiler; `hygiene` and `error-secrets` read the response text, so a failure is in error handling or the driver.
 
   [[outcomes]] lists every outcome with its meaning and whether it fails a test; [[outcome]] folds a result's verdicts
   into one, worst first.
@@ -316,6 +317,54 @@
         problems    (vec (distinct (map #(update % :path (partial take 4)) problems)))]
     (if (seq problems) {:verdict :dirty :problems (vec (take 6 problems))} {:verdict :clean})))
 
+(defn- whole-word
+  "A pattern matching `s` where it is not part of a longer word."
+  [s]
+  (re-pattern (str "(?<![A-Za-z0-9_])" (java.util.regex.Pattern/quote s) "(?![A-Za-z0-9_])")))
+
+(defn- error-text
+  "The failed `result`'s error text: its message and every scalar of its body, but not the user's query it echoes."
+  [result]
+  (when (:error result)
+    (cons (:error result)
+          (map second (scan-paths (let [b (:body result)] (if (map? b) (dissoc b :json_query :dataset_query) b)))))))
+
+(defn error-secrets
+  "Looks at the error the user got, in-process and through HTTP: SQL that a driver echoes, or a value it failed to
+  convert, may carry what the sandbox hides. Finds the text values and canaries the restricted data does not show
+  (`:secrets`, see [[dataset/secrets]]) and the names of hidden columns as identifiers (`:hidden-names`, name -> its
+  field ids), except what the user's own `query` holds: its values, the fields it names, and the columns of the saved
+  questions it reads (`:card-columns`, card id -> names), whose stored metadata the user sees. `:n/a` when neither
+  failed."
+  [{:keys [secrets hidden-names card-columns]} query user http]
+  (let [texts      (concat (error-text user) (error-text http))
+        held       (pr-str query)
+        held-ids   (into #{} (comp (map second) (filter integer?)) (scan-paths query))
+        held-names (into #{}
+                         (mapcat #(get card-columns %))
+                         (concat held-ids (map (comp parse-long second) (re-seq #"card__(\d+)" held))))
+        held-canaries (into #{} (map (juxt :table :id :kind)) (dataset/canary-hits query))
+        found-in   (fn [re] (some #(when (string? %) (re-find re %)) texts))
+        found      (concat
+                    (for [{:keys [table column value why]} (:values secrets)
+                          :when (and (not (str/includes? held value)) (found-in (whole-word value)))]
+                      {:kind why :table table :column column :value value})
+                    (for [{:keys [table id kind]} (dataset/canary-hits texts)
+                          :let  [hit [table id kind]]
+                          :when (not (or ((:visible-canaries secrets) hit) (held-canaries hit)))]
+                      {:kind  :canary :table table :id id
+                       :value (if (= kind :text) (dataset/canary-text table id) (str (dataset/canary-num table id)))})
+                    (for [[col-name field-ids] hidden-names
+                          :when (and (not (some held-ids field-ids))
+                                     (not (held-names col-name))
+                                     (not (str/includes? (u/upper-case-en held) (u/upper-case-en col-name)))
+                                     (found-in (re-pattern (str "[\"`.]" (java.util.regex.Pattern/quote col-name) "(?![A-Za-z0-9_])"))))]
+                      {:kind :hidden-column-name :value col-name}))]
+    (cond
+      (empty? texts) {:verdict :n/a}
+      (seq found)    {:verdict :exposed :found (vec (take 6 (distinct found)))}
+      :else          {:verdict :clean})))
+
 (def ^:private compared-col-keys [:base_type :effective_type :semantic_type :binning_info])
 
 (defn metadata
@@ -358,6 +407,7 @@
   [[unexpected-outcome?]]: a hand-written probe that both users fail is a finding unless it is invalid on purpose."
   (array-map
    :canary-leak            {:fails? true  :doc "a canary of a hidden row is somewhere in the user's response"}
+   :secret-in-error        {:fails? true  :doc "the user's error message carries a value the sandbox hides"}
    :raw-ref                {:fails? true  :doc "the preprocessed query reads the sandboxed table outside a sandbox stage"}
    :raw-table-in-sql       {:fails? true  :doc "the compiled SQL reads the sandboxed table outside the sandbox subquery"}
    :hidden-column-in-sql   {:fails? true  :doc "the compiled SQL reads a hidden column through a sandbox subquery that does not return it"}
@@ -373,6 +423,7 @@
    :over-restricted        {:fails? true  :doc "nothing should be restricted, yet the user got less than the admin"}
    :accidental-rejection   {:fails? true  :doc "a policy that hides columns failed the user's query, but not on purpose: nothing guarded it"}
    :user-error             {:fails? true  :doc "only the user's query failed, in a way no policy declares acceptable"}
+   :hidden-name-in-error   {:fails? true  :doc "the user's error message names a column the sandbox hides, though the state passes otherwise"}
    :refused                {:fails? false :doc "a policy that hides columns refused the user's query on purpose"}
    :known-rejection        {:fails? false :doc "only the user's query failed, in a way the policy declares as failing closed"}
    :failed-as-expected     {:fails? false :doc "a policy that must fail the query did"}
@@ -390,9 +441,10 @@
 
 (defn outcome
   "One keyword for a result, worst first, from its separate verdicts; see [[outcomes]]."
-  [{:keys [differential canary structural sql sql-hidden-columns dangling-reads metadata-diff http-equivalence]}]
+  [{:keys [differential canary error-secrets structural sql sql-hidden-columns dangling-reads metadata-diff http-equivalence]}]
   (cond
     (= :leak (:verdict canary))                            :canary-leak
+    (some #(not= :hidden-column-name (:kind %)) (:found error-secrets)) :secret-in-error
     (= :raw-ref (:verdict structural))                     :raw-ref
     (= :raw-table-in-sql (:verdict sql))                   :raw-table-in-sql
     ;; a probe the admin cannot run either is invalid (a forged model naming columns its query lacks), and its reads
@@ -409,6 +461,9 @@
           (:diffs metadata-diff))
     :binning-bounds-leak
     (= :differs (:verdict http-equivalence))               :http-differs
+    ;; a name, not data: it does not mask how the query failed
+    (and (= :exposed (:verdict error-secrets))
+         (not (failing-outcomes differential)))            :hidden-name-in-error
     :else                                                  differential))
 
 ;;; ---------------------------------------------------- Judging ---------------------------------------------------
@@ -419,6 +474,7 @@
 
     {:ctx          the policy context (see the harness namespace)
      :observations {:preprocessed {:value|:error} :compiled {:value|:error} :executed result}
+     :query        the user's query, as sent
      :user         the user's executed result, with :failure-layer
      :expected     the admin's result on the restricted variant (or the base, for an :unrestricted policy)
      :base         the admin's result on the base dataset
@@ -429,6 +485,7 @@
   (array-map
    :differential       (fn [{:keys [ctx user expected base]}] (differential ctx user expected base))
    :canary             (fn [{:keys [ctx user expected]}] (canary ctx user expected))
+   :error-secrets      (fn [{:keys [ctx query user http]}] (error-secrets ctx query user http))
    :structural         (fn [{:keys [ctx observations]}] (structural ctx (:preprocessed observations)))
    :dangling-reads     (fn [{:keys [ctx observations]}]
                          (sql-dangling-reads ctx (get-in observations [:compiled :value :query])))
@@ -458,7 +515,7 @@
   "The failing outcomes that put data the sandbox hides, or a read of the raw table, in front of the user. A test that
   changes the policy itself out of band (a forged sandbox card) asserts only these: refusing or failing the query is
   the right answer to a broken policy."
-  #{:canary-leak :raw-ref :raw-table-in-sql :binning-bounds-leak :extra-rows :extra-columns :hidden-column-values})
+  #{:canary-leak :secret-in-error :raw-ref :raw-table-in-sql :binning-bounds-leak :extra-rows :extra-columns :hidden-column-values})
 
 (def ^:private masked-response-keys
   "Response keys whose values differ between two databases with the same data, or between two runs: ids, uuids,

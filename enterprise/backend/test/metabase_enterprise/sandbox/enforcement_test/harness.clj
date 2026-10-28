@@ -6,7 +6,8 @@
 
     {:policy k :expect :restricted|:unrestricted|:error :hidden-cols #{\"PRICE\" ...} :accepted-rejections [..]
      :sandboxed #{:shops} :ids {..} :restricted-ids {..} :allowed #{[:shops 1] ..}
-     :restricted-dataset #'dataset/shops-tier1 :remaps [..] :persist? bool}
+     :restricted-dataset #'dataset/shops-tier1 :remaps [..] :persist? bool
+     :hidden-names {\"PRICE\" #{fid ..}} :secrets (dataset/secrets restricted)}
 
   `:policy` is a key of `policies/all` or a generated spec; `:restricted-dataset` a var or a derived definition.
 
@@ -18,7 +19,7 @@
   recorded on the result map:
 
     {:policy :probe :format :transport :query :outcome
-     :differential :canary :structural :sql :hygiene :metadata-diff :http-equivalence
+     :differential :canary :error-secrets :structural :sql :hygiene :metadata-diff :http-equivalence
      :user {:rows :cols | :error :status} :expected {..} :compiled \"sql\" :http {:rows :cols | :error :status}}
 
   The `run-*!` fns run one probe family under one policy; [[summarize]] and [[repro-report]] read results at the
@@ -242,6 +243,13 @@
                                           [table cols] hidden
                                           c            cols]
                                       (dataset/fid i table c)))
+     ;; only names no other table uses: a same-named visible column in an error is not the hidden one
+     :hidden-names        (into {} (for [[table cols] hidden
+                                         c            cols
+                                         :when        (not-any? #(some #{c} (dataset/columns %)) (remove #{table} dataset/tables))]
+                                     [(mt/format-name (name c))
+                                      (into #{} (map #(dataset/fid % table c)) [(dataset/ids-map cards) restricted-ids])]))
+     :secrets             (dataset/secrets restricted)
      :accepted-rejections (or accepted-rejections [])
      :sandboxed           (policies/sandboxed-tables policy-k)
      :ids                 (dataset/ids-map cards)
@@ -464,6 +472,15 @@
 (defn- trim [result]
   (-> result (dissoc :body) (update :rows #(some->> % (take 5)))))
 
+(defn- card-columns
+  "Card id -> the column names in its stored metadata, for each saved question `outer` reads, including one the probe
+  made with forged metadata: the user sees those names."
+  [outer]
+  (let [ids (into #{} (map (fn [[_ a b]] (parse-long (or a b))))
+                  (re-seq #"card__(\d+)|source-card\"? (\d+)" (pr-str outer)))]
+    (into {} (for [id ids]
+               [id (into #{} (map :name) (t2/select-one-fn :result_metadata :model/Card :id id))]))))
+
 (defn- run-probe*
   "[[run-probe]] with the rendered `probe`."
   [{:keys [ids expect transport cacheable?] :or {transport :in-process cacheable? true} :as ctx} probe-name probe-fn probe]
@@ -472,7 +489,8 @@
         http         (run-http ctx probe)
         {:keys [restricted base]} (expected-results ctx probe-fn probe cacheable?)
         expected     (if (= expect :unrestricted) base restricted)
-        verdicts     (invariants/judge {:ctx          ctx
+        verdicts     (invariants/judge {:ctx          (assoc ctx :card-columns (card-columns outer))
+                                        :query        outer
                                         :observations observations
                                         :user         (:executed observations)
                                         :expected     expected
@@ -728,7 +746,7 @@
           exception (some-> (or (:result shrunk) (:result result)) ex-message)]
       (str/join "\n"
                 ["Smallest failing case:" (pr-str smallest)
-                 "Outcome:" (pr-str (select-keys r [:outcome :differential :canary :structural :sql :hygiene :http-equivalence :error]))
+                 "Outcome:" (pr-str (select-keys r [:outcome :differential :canary :error-secrets :structural :sql :hygiene :http-equivalence :error]))
                  "Exception:" (pr-str exception)
                  "Legacy query (base copy ids):" (json/encode (:query r))
                  "Compiled:" (pr-str (:compiled r))

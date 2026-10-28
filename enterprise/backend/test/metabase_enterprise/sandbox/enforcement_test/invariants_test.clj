@@ -105,6 +105,58 @@
       (testing "but a hidden row's text canary is a leak even then"
         (is (= :leak (:verdict (invariants/canary ctx (response [(dataset/canary-text :shops 2)]) (response [(c 2)])))))))))
 
+(deftest ^:parallel error-secrets-test
+  (let [ctx     {:secrets      {:values           [{:table :shops :column :name :value "Beta" :why :hidden-row}]
+                                :visible-canaries #{[:shops 1 :text] [:shops 1 :number]}}
+                 :hidden-names {"PRICE" #{30}}}
+        failed  (fn [msg] {:error (str "500 " msg) :status 500 :body {:error msg :via [{:error msg}] :json_query {:q 1}}})
+        verdict (fn
+                  ([user] (invariants/error-secrets ctx {:query {:source-table 7}} user nil))
+                  ([query user http] (invariants/error-secrets ctx query user http)))
+        found   (fn [& args] (into #{} (map (juxt :kind :value)) (:found (apply verdict args))))]
+    (testing "a result that did not fail is left to the other invariants"
+      (is (= {:verdict :n/a} (verdict {:rows [["Beta"]] :body {:data {:rows [["Beta"]]}}}))))
+    (testing "an error that names nothing hidden"
+      (is (= {:verdict :clean} (verdict (failed "Column \"__mb_source.NAME\" not found")))))
+    (testing "a text value of a row or column the sandbox hides"
+      (is (= #{[:hidden-row "Beta"]} (found (failed "Data conversion error converting \"Beta\"")))))
+    (testing "only as a whole value"
+      (is (= {:verdict :clean} (verdict (failed "Data conversion error converting \"Betamax\"")))))
+    (testing "a canary the restricted data does not show, even of a kept row"
+      (is (= #{[:canary (dataset/canary-text :shops 2)]} (found (failed (dataset/canary-text :shops 2)))))
+      (is (= #{[:canary (str (dataset/canary-num :shops 3))]} (found (failed (str "value " (dataset/canary-num :shops 3)))))))
+    (testing "a canary the restricted data shows"
+      (is (= {:verdict :clean} (verdict (failed (dataset/canary-text :shops 1))))))
+    (testing "a hidden column's name, as an identifier"
+      (is (= #{[:hidden-column-name "PRICE"]} (found (failed "Column \"__mb_source.PRICE\" not found"))))
+      (is (= #{[:hidden-column-name "PRICE"]} (found (failed "column __mb_source.PRICE does not exist"))))
+      (is (= {:verdict :clean} (verdict (failed "PRICELESS")))))
+    (testing "nothing the user's own query already holds"
+      (is (= {:verdict :clean} (verdict {:query {:fields [[:field 30 nil]]}} (failed "Column \"__mb_source.PRICE\" not found") nil)))
+      (is (= {:verdict :clean} (verdict {:query {:filter [:= [:field 1 nil] "Beta"]}} (failed "converting \"Beta\"") nil))))
+    (testing "nor the columns of a saved question it reads, whose stored metadata the user sees"
+      (let [ctx (assoc ctx :card-columns {55 #{"PRICE"}})]
+        (is (= {:verdict :clean} (invariants/error-secrets ctx {:query {:source-table "card__55"}}
+                                                           (failed "Column \"__mb_source.PRICE\" not found") nil)))
+        (is (= :exposed (:verdict (invariants/error-secrets ctx {:query {:source-table "card__56"}}
+                                                            (failed "Column \"__mb_source.PRICE\" not found") nil))))))
+    (testing "the echoed query is the user's own"
+      (is (= {:verdict :clean} (verdict {:error "500 x" :status 500 :body {:json_query {:q "Beta"}}}))))
+    (testing "the HTTP response's error too"
+      (is (= #{[:hidden-row "Beta"]} (found {:query {}} {:error "500 x" :status 500 :body {:error "x"}} (failed "'Beta'")))))))
+
+(deftest ^:parallel error-secrets-outcome-test
+  (let [exposed (fn [& kinds] {:verdict :exposed :found (mapv #(hash-map :kind %) kinds)})]
+    (testing "a hidden value in an error is a leak, worse than how the query failed"
+      (is (= :secret-in-error (invariants/outcome {:differential :accidental-rejection :error-secrets (exposed :hidden-row)})))
+      (is (= :secret-in-error (invariants/outcome {:differential :refused :error-secrets (exposed :hidden-column-name :canary)})))
+      (is (invariants/leak-outcomes :secret-in-error)))
+    (testing "a hidden column's name alone fails a state that would otherwise pass, but is no leak"
+      (is (= :hidden-name-in-error (invariants/outcome {:differential :refused :error-secrets (exposed :hidden-column-name)})))
+      (is (= :accidental-rejection (invariants/outcome {:differential :accidental-rejection :error-secrets (exposed :hidden-column-name)})))
+      (is ((set invariants/failing-outcomes) :hidden-name-in-error))
+      (is (not (invariants/leak-outcomes :hidden-name-in-error))))))
+
 (deftest ^:parallel http-equivalence-test
   (let [executed {:rows [[1 "Alpha" 900000015838]] :body {:data {:cols [{:name "ID" :base_type "type/Integer"} {:name "NAME" :base_type "type/Text"} {:name "SECRET_NUM" :base_type "type/BigInteger"}]}}}]
     (testing "no HTTP transport"
@@ -187,12 +239,13 @@
 
 (def ^:private mutant-policies [:table-tier :card-hide-price :card-join])
 
-(defn- invariants-fired [{:keys [differential canary structural sql sql-hidden-columns dangling-reads hygiene]}]
+(defn- invariants-fired [{:keys [differential canary error-secrets structural sql sql-hidden-columns dangling-reads hygiene]}]
   (cond-> #{}
     (#{:extra-rows :missing-rows :extra-columns :missing-columns :hidden-column-values :over-restricted :user-error
        :accidental-rejection} differential)
     (conj :differential)
     (= :leak (:verdict canary))                                  (conj :canary)
+    (= :exposed (:verdict error-secrets))                        (conj :error-secrets)
     (= :raw-ref (:verdict structural))                           (conj :structural)
     (= :raw-table-in-sql (:verdict sql))                         (conj :sql)
     (= :hidden-column-read (:verdict sql-hidden-columns))        (conj :sql-hidden-columns)

@@ -4,6 +4,7 @@
    [clojure.test :refer :all]
    [metabase-enterprise.sandbox.enforcement-test.dataset :as dataset]
    [metabase-enterprise.sandbox.enforcement-test.harness :as harness]
+   [metabase-enterprise.sandbox.enforcement-test.policies.generated :as generated]
    [metabase.test :as mt]
    [toucan2.core :as t2]))
 
@@ -38,3 +39,25 @@
                                       :limit        2})]
               (is (= "completed" (:status body)) (:error body))
               (is (= 2 (count (first (get-in body [:data :rows]))))))))))))
+
+(deftest ^:parallel secrets-test
+  (testing "What the base dataset holds that a restricted variant does not"
+    (let [values (fn [d] (into #{} (map (juxt :table :column :value :why)) (:values (dataset/secrets d))))]
+      (testing "text values of the rows a variant drops, but not values a kept row shares"
+        (is (contains? (values #'dataset/shops-tier1) [:shops :name "Beta" :hidden-row]))
+        (is (not-any? #(= "Alpha" (nth % 2)) (values #'dataset/shops-tier1))))
+      (testing "text values of a hidden column, in every row"
+        (is (= #{[:regions :code "N-1" :hidden-column] [:regions :code "S-2" :hidden-column]
+                 [:regions :code "E-1" :hidden-column] [:regions :code "W-2" :hidden-column]}
+               (values (generated/restricted {:regions {:kind :card :filters [] :hidden #{:code}}})))))
+      (testing "the canary columns are not values: they are matched as canaries"
+        (is (not-any? #(#{:secret :secret_num} (second %)) (values #'dataset/shops-tier1))))
+      (testing "nothing, when the variant is the base"
+        (is (empty? (values #'dataset/shops)))))
+    (testing "the canaries a variant shows, by table, id and kind"
+      (let [visible (:visible-canaries (dataset/secrets #'dataset/shops-tier1))]
+        (is (contains? visible [:shops 1 :text]))
+        (is (contains? visible [:shops 1 :number]))
+        (is (not (contains? visible [:shops 2 :text])))
+        (is (contains? visible [:regions 2 :text])))
+      (is (not-any? #(= :shops (first %)) (:visible-canaries (dataset/secrets #'dataset/shops-tier1-hide-price)))))))

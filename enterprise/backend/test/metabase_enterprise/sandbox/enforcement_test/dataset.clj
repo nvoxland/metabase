@@ -290,11 +290,48 @@
 
 (def ^:private hidden-columns [:price :secret :secret_num])
 
+(defn- rows
+  "The rows of `table` in the dataset `d`, a var or a definition, as maps."
+  [d table]
+  (let [tabledef (first (filter #(= (name table) (:table-name %))
+                                (:table-definitions (tx/get-dataset-definition (definition d)))))]
+    (mapv (partial row->map tabledef) (:rows tabledef))))
+
 (defn base-rows
   "The rows of `table` in the base dataset, as maps."
   [table]
-  (let [tabledef (first (filter #(= (name table) (:table-name %)) (:table-definitions (tx/get-dataset-definition shops))))]
-    (mapv (partial row->map tabledef) (:rows tabledef))))
+  (rows shops table))
+
+(def ^:private secrets*
+  (memoize
+   (fn [restricted]
+     (let [visible (into #{} (comp (mapcat #(rows restricted %)) (mapcat vals) (filter string?)) tables)
+           kept    (into #{} (for [table tables, row (rows restricted table)] [table (:id row)]))]
+       {:values           (vec (for [table  tables
+                                     row    (base-rows table)
+                                     column (columns table)
+                                     :let   [v (get row column)]
+                                     :when  (and (= :type/Text (base-types column))
+                                                 (not= :secret column)
+                                                 (string? v)
+                                                 (not (visible v)))]
+                                 {:table  table
+                                  :column column
+                                  :value  v
+                                  :why    (if (kept [table (:id row)]) :hidden-column :hidden-row)}))
+        :visible-canaries (into #{} (map (juxt :table :id :kind)) (canary-hits (mapv #(rows restricted %) tables)))}))))
+
+(defn secrets
+  "What the base dataset holds that `restricted`, the variant a sandboxed user may see, does not:
+
+    {:values           [{:table :column :value :why}]  ; text values in no column of the variant
+     :visible-canaries #{[table id kind]}}             ; the canaries the variant does hold
+
+  `:why` is `:hidden-row` when the variant drops the value's row, `:hidden-column` when it keeps the row but not the
+  value. Canary columns are left to `:visible-canaries`, and numbers are left out: small integers are in every error
+  message. Memoized per variant."
+  [restricted]
+  (secrets* restricted))
 
 (def varyable-columns
   "Table -> the columns a varied dataset may change: the data columns, not the ids and keys that tie rows together."
