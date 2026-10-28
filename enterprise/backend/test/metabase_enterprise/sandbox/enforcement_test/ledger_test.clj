@@ -62,3 +62,8 @@
       (is (not (re-find #":probe :a" file)))
       (is (re-find #":probe :c" file))
       (is (re-find #"SEC-1336" file)))))
+
+(deftest ^:parallel classify-test
+  (testing "a hidden column's name in an error is part of the column sandbox's accidental failure"
+    (is (= "SEC-1338" (ledger/classify :hand-written {:policy :card-hide-price :mode :production :probe :nested-shops}
+                                       :hidden-name-in-error)))))
