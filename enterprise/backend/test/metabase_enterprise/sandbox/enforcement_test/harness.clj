@@ -8,6 +8,8 @@
      :sandboxed #{:shops} :ids {..} :restricted-ids {..} :allowed #{[:shops 1] ..}
      :restricted-dataset #'dataset/shops-tier1 :remaps [..] :persist? bool}
 
+  `:policy` is a key of `policies/all` or a generated spec; `:restricted-dataset` a var or a derived definition.
+
   [[run-probe]] runs one probe as the sandboxed user **in-process**, handing the query processor exactly what the
   dataset endpoint would, and observes it at three points ([[observe]]): the preprocessed MBQL after alias
   resolution, the compiled SQL, and the executed result. When `(:transport ctx)` is `[:http via]` it also sends the
@@ -229,16 +231,17 @@
 (defn- policy-ctx
   "The ctx `f` gets for `policy-k`, against the base copy's `cards` and the restricted variant `restricted`."
   [policy-k restricted cards restricted-ids allowed]
-  (let [{:keys [expect hidden-cols accepted-rejections remaps persist?] :or {expect :restricted}} (policies/policy policy-k)]
+  (let [{:keys [expect hidden accepted-rejections remaps persist?] :or {expect :restricted}} (policies/policy policy-k)]
     {:policy              policy-k
      :user                :rasta
      :expect              expect
      ;; as the driver names the columns in a result
-     :hidden-cols         (into #{} (map (comp mt/format-name name)) hidden-cols)
+     :hidden-cols         (into #{} (for [[_table cols] hidden, c cols] (mt/format-name (name c))))
      ;; in both databases, so a result from either can be judged by field id
-     :hidden-field-ids    (into #{} (for [i [(dataset/ids-map cards) restricted-ids]
-                                          c hidden-cols]
-                                      (dataset/fid i :shops c)))
+     :hidden-field-ids    (into #{} (for [i            [(dataset/ids-map cards) restricted-ids]
+                                          [table cols] hidden
+                                          c            cols]
+                                      (dataset/fid i table c)))
      :accepted-rejections (or accepted-rejections [])
      :sandboxed           (policies/sandboxed-tables policy-k)
      :ids                 (dataset/ids-map cards)
@@ -252,7 +255,7 @@
   "Load the restricted variant `restricted`, with the policy's `remaps` and the source cards, and call
   `(f restricted-ids allowed-canaries)` inside it."
   [restricted remaps f]
-  (mt/dataset (var-get restricted)
+  (mt/dataset (dataset/definition restricted)
     (dataset/ensure-fk-metadata!)
     (fully-synced!)
     (do-with-remaps! remaps
@@ -276,7 +279,7 @@
    (do-with-policy! policy-k #'dataset/shops f))
   ([policy-k base-dataset f]
    (let [{:keys [gtaps attributes restricted setup remaps persist? premium-features]} (policies/policy policy-k)]
-     (mt/dataset (var-get base-dataset)
+     (mt/dataset (dataset/definition base-dataset)
        (dataset/ensure-fk-metadata!)
        (fully-synced!)
        (let [base (mt/db)]
@@ -437,7 +440,7 @@
   cached result's column ids are stored symbolically and mapped back to the current copy's. `cacheable?` false runs
   it every time."
   [{:keys [remaps persist?]} dataset-var ids outer cacheable?]
-  (let [key [driver/*driver* (:name (meta dataset-var)) remaps persist? mu.fn/*enforce* (symbolic ids outer)]]
+  (let [key [driver/*driver* (dataset/dataset-name dataset-var) remaps persist? mu.fn/*enforce* (symbolic ids outer)]]
     (if-not cacheable?
       (execute-as :crowberto outer)
       (concrete-col-ids
@@ -702,7 +705,7 @@
   user's masked results on the base and the varied dataset, as `{:policy :varied :probe :base :varied-response}`."
   [policy-k]
   (let [base (sandboxed-responses! policy-k #'dataset/shops)]
-    (doall (for [varied                (policies/varied-datasets (:restricted (policies/policy policy-k)))
+    (doall (for [varied                (policies/varied policy-k)
                  :let                  [responses (sandboxed-responses! policy-k varied)]
                  [probe-name response] base]
              {:policy policy-k :varied varied :probe probe-name

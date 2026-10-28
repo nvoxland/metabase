@@ -79,8 +79,15 @@
   #{:attr-list :attr-map :card-list :rating-list :native-list})
 
 (def ^:private column-policies
-  "Policies that hide columns."
+  "Hand-written policies that hide columns."
   #{:card-hide-price :card-rows+hide :native-hide-price :card-hide-price+persisted})
+
+(defn- hides-columns?
+  "Does `policy`, a hand-written policy key or a generated spec, hide columns?"
+  [policy]
+  (if (map? policy)
+    (boolean (some (comp seq :hidden) (vals policy)))
+    (contains? column-policies policy)))
 
 (defn classify
   "The ticket that tracks a failing `state` of `test-k` with `outcome`, or `:unclassified`. Rules are checked in order;
@@ -100,7 +107,7 @@
       (= forged :lib-names-disagree)                                      (if (= outcome :hidden-column-values) "SEC-1343" "SEC-1338")
       (#{:accidental-rejection :hidden-column-in-sql :dangling-ref} outcome) "SEC-1338"
       (#{:shops-out-to-regions :regions-into-shops} probe-name)           "SEC-1342"
-      (and (= :generated test-k) (column-policies policy))                "SEC-1339"
+      (and (= :generated test-k) (hides-columns? policy))                "SEC-1339"
       (= outcome :not-meaningful)                                         "SEC-1338"
       :else                                                               :unclassified)))
 

@@ -1828,6 +1828,1271 @@
      :probe {:source :table/shops, :seed 0, :n-steps 4, :mutations [], :format :mbql5}},
     :outcome :hidden-column-in-sql,
     :ticket "SEC-1338"}]},
+ :generated-policies
+ {:h2
+  [{:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :card-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :model-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :card-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :model-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :orders-both-fks,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :regions-into-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :orders-breakout-shop-month,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops {:kind :card-join, :filters [{:column :tier, :op :!=, :via :literal, :value 1}], :hidden #{:tier}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card-join, :filters [{:column :tier, :op :!=, :via :literal, :value 1}], :hidden #{:tier}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card-join, :filters [{:column :tier, :op :!=, :via :literal, :value 1}], :hidden #{:tier}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card-join, :filters [{:column :tier, :op :!=, :via :literal, :value 1}], :hidden #{:tier}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :orders-breakout-shop-month,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :regions-into-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :shops-self-join,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "7", :via :attribute} {:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "7", :via :attribute} {:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "7", :via :attribute} {:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "7", :via :attribute} {:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :card-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :items-two-hops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :model-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :orders-implicit-price,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :orders-second-fk,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :regions-into-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :shops-self-join,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :table, :filters [{:column :parent_shop_id, :op :=, :value "1", :via :attribute}], :hidden #{}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops {:kind :table, :filters [{:column :parent_shop_id, :op :=, :value "2", :via :attribute}], :hidden #{}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}],
+  :postgres
+  [{:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :card-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :model-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card,
+       :filters
+       [{:column :rating, :op :=, :value "1.5", :via :attribute}
+        {:column :parent_shop_id, :op :=, :value "99", :via :attribute}],
+       :hidden #{:name}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :card-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :model-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :orders-both-fks,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :regions-into-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card, :filters [{:column :tier, :op :not-null, :via :literal}], :hidden #{:name :secret}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :orders-breakout-shop-month,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :card-join,
+       :filters [{:column :name, :op :starts-with, :via :literal, :value "Ea"}],
+       :hidden #{:tier :opened_on :rating}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops {:kind :card-join, :filters [{:column :tier, :op :!=, :via :literal, :value 1}], :hidden #{:tier}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card-join, :filters [{:column :tier, :op :!=, :via :literal, :value 1}], :hidden #{:tier}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card-join, :filters [{:column :tier, :op :!=, :via :literal, :value 1}], :hidden #{:tier}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :card-join, :filters [{:column :tier, :op :!=, :via :literal, :value 1}], :hidden #{:tier}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :orders-breakout-shop-month,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :regions-into-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "5", :via :attribute} {:column :price, :op :=, :value "3", :via :attribute}],
+       :hidden #{:opened_on :parent_shop_id}},
+      :regions
+      {:kind :card,
+       :filters [{:column :name, :op :is-null, :via :literal} {:column :tier, :op :=, :value "1", :via :attribute}],
+       :hidden #{}}},
+     :probe :shops-self-join,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "7", :via :attribute} {:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "7", :via :attribute} {:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "7", :via :attribute} {:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters
+       [{:column :id, :op :=, :value "7", :via :attribute} {:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :card-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :items-two-hops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :model-orders-implicit,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :orders-implicit-price,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :orders-second-fk,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :regions-into-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :parent_shop_id, :op :=, :value "4", :via :attribute}],
+       :hidden #{:price :rating}},
+      :regions {:kind :native, :filters [{:column :hq_shop_id, :op :=, :value "99", :via :attribute}], :hidden #{}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :card-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :model-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :nested-shops,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :hidden-column-in-sql,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops
+      {:kind :native,
+       :filters [{:column :tier, :op :=, :value "2", :via :attribute}],
+       :hidden #{:tier :parent_shop_id}}},
+     :probe :shops-self-join,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :accidental-rejection,
+    :ticket "SEC-1338"}
+   {:state
+    {:policy
+     {:shops {:kind :table, :filters [{:column :parent_shop_id, :op :=, :value "1", :via :attribute}], :hidden #{}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}
+   {:state
+    {:policy
+     {:shops {:kind :table, :filters [{:column :parent_shop_id, :op :=, :value "2", :via :attribute}], :hidden #{}}},
+     :probe :shops-out-to-regions,
+     :transport [:http :dataset],
+     :format :legacy,
+     :mode :production},
+    :outcome :missing-columns,
+    :ticket "SEC-1342"}]},
  :grid
  {:h2
   [{:state

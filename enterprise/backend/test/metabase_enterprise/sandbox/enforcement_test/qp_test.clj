@@ -19,8 +19,13 @@
   | generated, 40 per policy    | table-tier, card-hide-price, two-tables | production | any | in-process + dataset | yes |
   | hand-written + grid slice   | table-tier, card-hide-price   | production   | all 3   | in-process            | yes   |
   | hand-written + parameters   | policies with a varied dataset| production   | legacy  | in-process            | yes   |
+  | roles + sources             | generated, 2 specs per kind   | production   | legacy  | in-process + dataset  | yes   |
+  | hand-written + parameters   | generated, on their varied data | production | legacy  | in-process            | local |
 
-  `MB_SANDBOX_FULL=true` runs both modes on every row. The drivers are [[harness/drivers]]; the grid beyond its CI
+  Generated policies are specs drawn by `policies.generated` (`MB_SANDBOX_GEN_POLICIES` per kind,
+  `MB_SANDBOX_GEN_SEED`), each with its restricted and varied datasets derived from the spec. `MB_SANDBOX_FULL=true`
+  runs both modes on every row, every hand-written probe under the generated policies, and their noninterference
+  test. The drivers are [[harness/drivers]]; the grid beyond its CI
   slice and longer generated runs are REPL work (`MB_SANDBOX_GEN_CASES`, `MB_SANDBOX_GEN_SEED`). Tests that expose
   filed findings stay red on purpose until the fixes land."
   (:require
@@ -193,13 +198,35 @@
     (mt/test-drivers (harness/drivers)
       (doseq [mode               (:modes (policies/scope :ci))
               [policy-k policy]  policies/all
-              :when              (and (policies/varied-datasets (:restricted policy))
+              :when              (and (seq (policies/varied policy-k))
                                       (not (#{:error :unrestricted} (:expect policy)))
                                       (mt/dataset dataset/shops (policies/supported? policy-k)))
               {:keys [probe varied base varied-response]} (harness/in-mode mode #(harness/run-noninterference! policy-k))]
-        (testing (format "%s under %s on %s in %s mode" probe policy-k (:name (meta varied)) mode)
+        (testing (format "%s under %s on %s in %s mode" probe policy-k (dataset/dataset-name varied) mode)
           (is (= base varied-response)
               (u/truncate (pr-str (take 2 (data/diff base varied-response))) 2000)))))))
+
+(deftest ^:synchronized generated-policies-hold-test
+  (testing "Sandboxes nobody wrote by hand, drawn from the spec generator, each judged against the restricted dataset derived from its spec"
+    (mt/test-drivers (harness/drivers)
+      (ledger/with-ledger :generated-policies
+        (doseq [state (run-states! (assoc (policies/scope :generated-policies)
+                                          :probes (if (policies/full-run?)
+                                                    hand-written/all
+                                                    (merge hand-written/roles hand-written/sources))))]
+          (holds! :generated-policies state))))))
+
+(deftest ^:synchronized generated-policies-do-not-see-hidden-data-test
+  (testing "Under generated policies, changing only what the sandbox hides leaves every sandboxed result the same"
+    (if-not (policies/full-run?)
+      (is true "a local run: set MB_SANDBOX_FULL=true")
+      (mt/test-drivers (harness/drivers)
+        (doseq [policy-k (:policies (policies/scope :generated-policies))
+                :when    (mt/dataset dataset/shops (policies/supported? policy-k))
+                {:keys [probe varied base varied-response]} (harness/in-mode :production #(harness/run-noninterference! policy-k))]
+          (testing (format "%s under %s on %s" probe (pr-str policy-k) (dataset/dataset-name varied))
+            (is (= base varied-response)
+                (u/truncate (pr-str (take 2 (data/diff base varied-response))) 2000))))))))
 
 (deftest ^:synchronized responses-are-hygienic-test
   (testing "Nothing in a sandboxed user's API response reveals the sandbox or the raw table: no fingerprints, no native or preprocessed forms, no SQL text"

@@ -233,6 +233,21 @@
   (str "card__" (get-in ids [:cards card-k])))
 
 ;;; -------------------------------------------- Restricted variants -----------------------------------------------
+;;;
+;;; A variant is named by its var here, or is a plain definition value when derived from a policy spec (see
+;;; `policies.generated`); [[definition]] and [[dataset-name]] take either.
+
+(defn definition
+  "The dataset definition `d` names: a var holding one, or the definition itself."
+  [d]
+  (if (var? d) (var-get d) d))
+
+(defn dataset-name
+  "A stable name for the dataset `d`, a var or a definition."
+  [d]
+  (if (var? d)
+    (str (:name (meta d)))
+    (:database-name (tx/get-dataset-definition d))))
 
 (defn- row->map [{:keys [field-definitions]} row]
   (zipmap (map (comp keyword :field-name) field-definitions) row))
@@ -240,7 +255,7 @@
 (defn- map->row [{:keys [field-definitions]} m]
   (mapv (comp m keyword :field-name) field-definitions))
 
-(defn- keep-rows
+(defn keep-rows
   "Transform fn: keep only the rows of `table-name` for which `pred` of the row as a map is truthy."
   [table-name pred]
   (tx/transform-dataset-update-table
@@ -248,7 +263,7 @@
    :table (fn [tabledef]
             (update tabledef :rows #(filterv (comp pred (partial row->map tabledef)) %)))))
 
-(defn- null-columns
+(defn null-columns
   "Transform fn: set `columns` to nil in every row of `table-name`."
   [table-name columns]
   (tx/transform-dataset-update-table
@@ -258,7 +273,7 @@
                     #(mapv (fn [row] (map->row tabledef (merge (row->map tabledef row) (zipmap columns (repeat nil)))))
                            %)))))
 
-(defn- update-rows
+(defn update-rows
   "Transform fn: replace each row of `table-name` for which `pred` of the row as a map is truthy with `(f row-map)`."
   [table-name pred f]
   (tx/transform-dataset-update-table
@@ -270,30 +285,46 @@
                                (if (pred m) (map->row tabledef (f m)) row)))
                            %)))))
 
-(defn- vary-hidden-columns
-  "A SHOPS row map with PRICE and the canary columns changed. The new values are not canaries."
-  [{:keys [id price] :as shop}]
-  (assoc shop
-         :price      (+ 100 price)
-         :secret     (str "VARIED-" id)
-         :secret_num (+ 100000 id)))
+(def ^:private hidden-columns [:price :secret :secret_num])
+
+(defn base-rows
+  "The rows of `table` in the base dataset, as maps."
+  [table]
+  (let [tabledef (first (filter #(= (name table) (:table-name %)) (:table-definitions (tx/get-dataset-definition shops))))]
+    (mapv (partial row->map tabledef) (:rows tabledef))))
+
+(def varyable-columns
+  "Table -> the columns a varied dataset may change: the data columns, not the ids and keys that tie rows together."
+  {:shops   [:name :price :rating :opened_on :secret :secret_num]
+   :regions [:name :secret :secret_num]})
+
+(defn vary
+  "The row map with `columns` changed to values that are not canaries and not in the base dataset."
+  [{:keys [id] :as row} columns]
+  (reduce (fn [row column]
+            (assoc row column (case column
+                                :name       (str "Varied " id)
+                                :price      (+ 100 (:price row))
+                                :rating     9.5
+                                :opened_on  (java.time.LocalDate/of 2025 6 (int id))
+                                :secret     (str "VARIED-" id)
+                                :secret_num (+ 100000 id)
+                                :tier       (+ 10 (:tier row)))))
+          row
+          columns))
 
 (def shops-tier2-varied
   "The base dataset with only the tier 2 SHOPS rows changed: every column but id and tier, a later opening date, and
   shop 8 removed. A sandbox that hides tier 2 must give the same answers here as on the base dataset."
   (tx/transformed-dataset-definition "shops-tier2-varied" shops
-                                     (update-rows "shops" #(= 2 (:tier %))
-                                                  #(-> (vary-hidden-columns %)
-                                                       (assoc :name      (str "Varied " (:id %))
-                                                              :rating    9.5
-                                                              :opened_on (java.time.LocalDate/of 2025 6 (int (:id %))))))
+                                     (update-rows "shops" #(= 2 (:tier %)) #(vary % (varyable-columns :shops)))
                                      (keep-rows "shops" #(not= 8 (:id %)))))
 
 (def shops-hidden-cols-varied
   "The base dataset with PRICE and the canary columns of every SHOPS row changed. A sandbox that hides those columns
   must give the same answers here as on the base dataset."
   (tx/transformed-dataset-definition "shops-hidden-cols-varied" shops
-                                     (update-rows "shops" (constantly true) vary-hidden-columns)))
+                                     (update-rows "shops" (constantly true) #(vary % hidden-columns))))
 
 (def tier-1-regions
   "IDs of the REGIONS rows with tier 1."
@@ -319,8 +350,6 @@
   "No SHOPS rows at all, as a sandbox whose filter matches nothing."
   (tx/transformed-dataset-definition "shops-empty" shops
                                      (keep-rows "shops" (constantly false))))
-
-(def ^:private hidden-columns [:price :secret :secret_num])
 
 (def shops-hide-price
   "Every SHOPS row, with PRICE and the canary columns hidden, as a sandbox card that leaves them out would. A hidden

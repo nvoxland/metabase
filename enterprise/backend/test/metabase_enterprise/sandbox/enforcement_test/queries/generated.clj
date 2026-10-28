@@ -195,7 +195,9 @@
                 ;; shrinks toward `:legacy`, the first format
                 :format    (gen/elements (keys formats/query-formats))))
 
-(defn- env-long [var-name default]
+(defn env-long
+  "The long value of environment variable `var-name`, or `default`."
+  [var-name default]
   (or (some-> (System/getenv var-name) parse-long) default))
 
 (defn cases-per-policy

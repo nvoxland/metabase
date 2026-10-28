@@ -1,10 +1,12 @@
 (ns metabase-enterprise.sandbox.enforcement-test.policies
   "The ways a sandbox can be set up on SHOPS (and REGIONS), each paired with the restricted dataset variant that equals
-  it applied by hand. [[all]] is every policy, with its keys documented there; [[attribute-variants]] reruns a policy
+  it applied by hand. Besides these hand-written policies, a policy key can be a generated spec, whose restricted
+  dataset is derived from it (see `policies.generated`). [[all]] is every policy, with its keys documented there; [[attribute-variants]] reruns a policy
   with other login attribute values; [[varied-datasets]] pairs a restricted variant with datasets that change only what
   it hides. The gtap builders at the top are evaluated inside the harness's temporary copy of the base database."
   (:require
    [metabase-enterprise.sandbox.enforcement-test.dataset :as dataset]
+   [metabase-enterprise.sandbox.enforcement-test.policies.generated :as generated]
    [metabase.driver :as driver]
    [metabase.driver.sql :as driver.sql]
    [metabase.driver.util :as driver.u]
@@ -121,7 +123,9 @@
   * `:attributes`  the user's login attributes
   * `:restricted`  the dataset variant that equals the sandbox applied by hand
   * `:expect`      `:restricted` (user == admin on restricted), `:unrestricted` (user == admin on base) or `:error`
-  * `:hidden-cols` SHOPS columns the sandbox card leaves out
+  * `:hidden`      table -> the columns the sandbox card leaves out
+  * `:spec`        the same policy as a generated-policy spec (see `policies.generated`), when it is expressible as one;
+    `policies.generated-test` checks that the spec derives `:restricted`
   * `:accepted-rejections` patterns of the errors that are a known way for the sandbox to fail closed (a policy
     with `:hidden-cols` must instead refuse on purpose: see `invariants/differential`); any other
     failure of the user's query alone is a finding
@@ -132,29 +136,41 @@
   * `:persist?`    persist every model as an admin before probing
   * `:premium-features` features granted besides `:sandboxes`"
   (array-map
-   :table-tier      {:gtaps shops-table-gtap           :attributes {"tier" "1"} :restricted #'dataset/shops-tier1}
-   :card-rows       {:gtaps shops-card-gtap            :attributes {"tier" "1"} :restricted #'dataset/shops-tier1}
-   :card-join       {:gtaps shops-card-join-gtap       :attributes {"tier" "1"} :restricted #'dataset/shops-in-tier1-regions}
+   :table-tier      {:gtaps shops-table-gtap           :attributes {"tier" "1"} :restricted #'dataset/shops-tier1
+                     :spec {:shops {:kind :table :filters [{:column :tier :op := :value "1" :via :attribute}] :hidden #{}}}}
+   :card-rows       {:gtaps shops-card-gtap            :attributes {"tier" "1"} :restricted #'dataset/shops-tier1
+                     :spec {:shops {:kind :card :filters [{:column :tier :op := :value "1" :via :attribute}] :hidden #{}}}}
+   :card-join       {:gtaps shops-card-join-gtap       :attributes {"tier" "1"} :restricted #'dataset/shops-in-tier1-regions
+                     :spec {:shops {:kind :card-join :filters [{:column :tier :op := :value "1" :via :attribute}] :hidden #{}}}}
    ;; ratings are tier + 0.5, so rating 1.5 selects the tier 1 rows
-   :table-rating    {:gtaps shops-rating-gtap :attributes {"rating" "1.5"} :restricted #'dataset/shops-tier1}
+   :table-rating    {:gtaps shops-rating-gtap :attributes {"rating" "1.5"} :restricted #'dataset/shops-tier1
+                     :spec {:shops {:kind :table :filters [{:column :rating :op := :value "1.5" :via :attribute}] :hidden #{}}}}
    ;; the sandbox card itself is a persisted model: its cache holds every row
    :card-rows+persisted-sandbox {:gtaps shops-card-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1
                                  :setup persist-sandbox-card! :persist? true :feature :persist-models}
    :card-extra-column {:gtaps shops-card-extra-column-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1}
    :card-hide-price {:gtaps shops-hide-price-gtap      :attributes {}           :restricted #'dataset/shops-hide-price
-                     :hidden-cols #{:price :secret :secret_num}}
+                     :hidden {:shops #{:price :secret :secret_num}}
+                     :spec {:shops {:kind :card :filters [] :hidden #{:price :secret :secret_num}}}}
    :card-rows+hide  {:gtaps shops-rows+hide-price-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1-hide-price
-                     :hidden-cols #{:price :secret :secret_num}}
+                     :hidden {:shops #{:price :secret :secret_num}}
+                     :spec {:shops {:kind :card :filters [{:column :tier :op := :value "1" :via :attribute}]
+                                    :hidden #{:price :secret :secret_num}}}}
    :native          {:gtaps shops-native-gtap          :attributes {"tier" "1"} :restricted #'dataset/shops-tier1
-                     :feature :native-parameters}
+                     :feature :native-parameters
+                     :spec {:shops {:kind :native :filters [{:column :tier :op := :value "1" :via :attribute}] :hidden #{}}}}
    :native-extra-column {:gtaps shops-native-extra-column-gtap :attributes {"tier" "1"}
                          :restricted #'dataset/shops-tier1 :feature :native-parameters
                          :accepted-rejections schema-check-rejections}
    :native-hide-price {:gtaps shops-native-hide-price-gtap :attributes {"tier" "1"}
                        :restricted #'dataset/shops-tier1-hide-price :feature :native-parameters
-                       :hidden-cols #{:price :secret :secret_num}}
+                       :hidden {:shops #{:price :secret :secret_num}}
+                       :spec {:shops {:kind :native :filters [{:column :tier :op := :value "1" :via :attribute}]
+                                      :hidden #{:price :secret :secret_num}}}}
    :two-tables      {:gtaps (fn [] (merge (shops-table-gtap) {:regions {:remappings (tier-remapping :regions)}}))
-                     :attributes {"tier" "1"} :restricted #'dataset/shops-tier1-regions-tier1 :sandboxed #{:shops :regions}}
+                     :attributes {"tier" "1"} :restricted #'dataset/shops-tier1-regions-tier1 :sandboxed #{:shops :regions}
+                     :spec {:shops   {:kind :table :filters [{:column :tier :op := :value "1" :via :attribute}] :hidden #{}}
+                            :regions {:kind :table :filters [{:column :tier :op := :value "1" :via :attribute}] :hidden #{}}}}
    ;; ORDERS.SHOP_ID displays SHOPS.NAME: remaps add implicit joins to the sandboxed table in the outer query
    :table-tier+remap {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1
                       :remaps [[:orders :shop_id :shops :name]]}
@@ -162,7 +178,7 @@
    :table-tier+persisted {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1
                           :persist? true :feature :persist-models}
    :card-hide-price+persisted {:gtaps shops-hide-price-gtap :attributes {} :restricted #'dataset/shops-hide-price
-                               :hidden-cols #{:price :secret :secret_num}
+                               :hidden {:shops #{:price :secret :secret_num}}
                                :persist? true :feature :persist-models}
    ;; SHOPS.SECRET_NUM displays admin-entered labels, one per row, from FieldValues of the whole table
    :table-tier+value-remap {:gtaps shops-table-gtap :attributes {"tier" "1"} :restricted #'dataset/shops-tier1
@@ -210,18 +226,23 @@
    ;; a native sandbox fails safe on a list: its `{{tier}}` matches nothing
    :native-list       {:base :native     :attributes {"tier" ["3"]}      :restricted #'dataset/shops-empty
                        :accepted-rejections schema-check-rejections}
-   :rating-integer    {:base :table-rating :attributes {"rating" "1"}   :restricted #'dataset/shops-empty}
+   :rating-integer    {:base :table-rating :attributes {"rating" "1"}   :restricted #'dataset/shops-empty
+                       :spec {:shops {:kind :table :filters [{:column :rating :op := :value "1" :via :attribute}] :hidden #{}}}}
    :rating-junk       {:base :table-rating :attributes {"rating" "1.5x"} :expect :error}
    :rating-list       {:base :table-rating :attributes {"rating" ["2.5"]} :expect :error}
    :native-sql-like   {:base :native     :attributes {"tier" "1 OR 1=1"} :expect :error}
    :native-missing    {:base :native     :attributes {}                  :expect :error}))
 
 (defn policy
-  "The config named `policy-k`, from [[policies/all]] or [[attribute-variants]]."
+  "The config named `policy-k`: a key of [[policies/all]] or [[attribute-variants]], or a generated-policy spec (a map;
+  see `policies.generated`)."
   [policy-k]
-  (or (all policy-k)
-      (let [{:keys [base] :as variant} (attribute-variants policy-k)]
-        (merge (all base) (dissoc variant :base)))))
+  (cond
+    (map? policy-k) (generated/policy policy-k)
+    (all policy-k)  (all policy-k)
+    :else           (let [{:keys [base] :as variant} (attribute-variants policy-k)]
+                      ;; a variant's spec, if any, is its own: the base's describes other attributes
+                      (merge (dissoc (all base) :spec) (dissoc variant :base)))))
 
 (defn sandboxed-tables
   "The tables with an enforced sandbox under `policy-k`, for the structural invariant."
@@ -245,6 +266,12 @@
    #'dataset/shops-hide-price       [#'dataset/shops-hidden-cols-varied]
    #'dataset/shops-tier1-hide-price [#'dataset/shops-tier2-varied #'dataset/shops-hidden-cols-varied]})
 
+(defn varied
+  "The varied datasets for `policy-k`: derived from its spec for a generated policy, else from [[varied-datasets]]."
+  [policy-k]
+  (let [{:keys [restricted] varied-dataset :varied} (policy policy-k)]
+    (if varied-dataset [varied-dataset] (varied-datasets restricted))))
+
 ;;; --------------------------------------------------- Scopes -----------------------------------------------------
 
 (defn full-run?
@@ -266,9 +293,12 @@
    :card-policies {:modes [:production] :policies [:card-rows :card-hide-price :native :native-hide-price]}})
 
 (defn scope
-  "The modes and policies for scope `k`, widened to both modes on every policy for a full run."
+  "The modes and policies for scope `k`, widened to both modes on every policy for a full run. `:generated-policies`
+  is the sample of generated specs, drawn when asked so the environment knobs apply."
   [k]
-  (cond-> (scopes k)
+  (cond-> (if (= k :generated-policies)
+            {:modes [:production] :policies (generated/in-scope)}
+            (scopes k))
     (full-run?) (assoc :modes [:production :test])))
 
 ;;; ------------------------------------------------ Several users -------------------------------------------------
