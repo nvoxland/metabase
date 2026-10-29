@@ -285,33 +285,49 @@
       (scan [] x))
     @acc))
 
+(defn normalize-fingerprint
+  "`fingerprint` as JSON gives it back, numbers as doubles, so one from the app DB, a result and a response compare
+  equal."
+  [fingerprint]
+  (walk/postwalk (fn [x]
+                   (cond
+                     (number? x) (double x)
+                     (map? x)    (update-keys x keyword)
+                     :else       x))
+                 fingerprint))
+
 (defn hygiene
   "Looks at the response text, wherever it sits: a fingerprint of a sandboxed table's column (a column of another
-  table is the user's to see; an aggregation's fingerprint comes from the sandboxed rows), a native or
-  preprocessed form, internal query stages, the physical name of a sandboxed table, or SQL text in an error. A failure
-  here is in error handling, metadata stripping or the driver. `:json_query` echoes the user's own input and is
-  skipped."
-  [{:keys [ids sandboxed]} user]
+  table is the user's to see), or one equal to a fingerprint of the whole data the sandbox restricts
+  (`:secret-fingerprints`, compared through [[normalize-fingerprint]]), which catches the stored metadata of an
+  aggregation or a native query, whose columns name no table; a native or preprocessed form, internal query stages,
+  the physical name of a sandboxed table, or SQL text in an error. A failure here is in error handling, metadata
+  stripping or the driver. `:json_query` echoes the user's own input and is skipped, and so, for all but
+  fingerprints, is a saved question's or segment's own query (`:dataset_query`, `:definition`), which the user reads."
+  [{:keys [ids sandboxed secret-fingerprints]} user]
   (let [body        (let [b (:body user)] (if (map? b) (dissoc b :json_query :dataset_query) b))
         table-names (into #{} (map #(mt/format-name (name %))) sandboxed)
         table-ids   (into #{} (map #(dataset/tid ids %)) sandboxed)
+        secret-fps  (into #{} (map normalize-fingerprint) secret-fingerprints)
+        scanned     (remove (fn [[path _]] (some #{:dataset_query :definition} path)) (scan-paths body))
         problems    (concat
                      (for [[path m] (fingerprinted-maps body)
                            :let [table-id (or (:table_id m) (:table-id m))]
                            ;; a column that names a field but no table is treated as sandboxed; one that names
-                           ;; neither (an aggregation, an expression) was fingerprinted from the sandboxed rows
-                           :when (if table-id (contains? table-ids table-id) (some? (:id m)))]
+                           ;; neither (an aggregation, an expression) is judged by its numbers alone
+                           :when (or (if table-id (contains? table-ids table-id) (some? (:id m)))
+                                     (contains? secret-fps (normalize-fingerprint (:fingerprint m))))]
                        {:kind :internal-metadata :path (conj path :fingerprint)})
-                     (for [[path v] (scan-paths body)
+                     (for [[path v] scanned
                            :when (and (some? v)
                                       (some #{:native :preprocessed :native_form "native_form"} path))]
                        {:kind :internal-metadata :path path})
-                     (for [[path v] (scan-paths body)
+                     (for [[path v] scanned
                            :when (and (string? v)
                                       (or (some #(str/includes? v (str "\"" % "\"")) table-names)
                                           (re-find sql-text-pattern v)))]
                        {:kind :sql-text :path path :value (u/truncate v 120)})
-                     (for [[path _] (scan-paths body)
+                     (for [[path _] scanned
                            :when (some #{:stages "stages"} path)]
                        {:kind :internal-query :path path}))
         problems    (vec (distinct (map #(update % :path (partial take 4)) problems)))]

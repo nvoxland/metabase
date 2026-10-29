@@ -97,7 +97,7 @@
         forged     (when (and (vector? probe) (= :forged-metadata (first probe))) (second probe))]
     (cond
       (#{:scanned-entry-points :two-users-scanned} test-k)
-      (if (and (= :canary (:check state)) (= policy :table-tier+value-remap)) "SEC-1333" "SEC-1335")
+      (if (and (= :canary (:check state)) (= policy :table-tier+value-remap) (= :leak outcome)) "SEC-1333" "SEC-1335")
 
       (= policy :table-tier+value-remap)                                  "SEC-1333"
       (attribute-lists policy)                                            "SEC-1334"

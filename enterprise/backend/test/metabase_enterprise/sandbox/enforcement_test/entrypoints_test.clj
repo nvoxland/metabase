@@ -40,6 +40,16 @@
         (is (#{:routed :bypassing :setup} kind))
         (is (or transport request policies))))))
 
+(deftest ^:parallel canary-outcome-test
+  (let [allowed #{[:shops 1]}
+        hidden  (dataset/canary-num :shops 2)]
+    (testing "a hidden row's canary as a value"
+      (is (= :leak (ep/canary-outcome allowed {:values [[hidden]] :fingerprint {:type {:type/Number {:max hidden}}}}))))
+    (testing "only in a fingerprint's numbers"
+      (is (= :fingerprint-leak (ep/canary-outcome allowed {:fields [{:fingerprint {:type {:type/Number {:max hidden}}}}]}))))
+    (testing "an allowed canary"
+      (is (= :clean (ep/canary-outcome allowed {:values [[(dataset/canary-num :shops 1)]]}))))))
+
 (deftest ^:synchronized routed-entry-points-equal-the-processor-test
   (testing "A result-set entry point returns what the processor returns in-process, and passes every invariant"
     (mt/test-drivers (harness/drivers)
@@ -60,9 +70,9 @@
   (mt/test-drivers #{:h2}
     (ledger/with-ledger :scanned-entry-points
       (doseq [policy-k ep/scanned-policies
-              [k {:keys [leaked hygiene]}] (ep/scan-entry-points! policy-k)]
+              [k {:keys [canary hygiene]}] (ep/scan-entry-points! policy-k)]
         (ledger/check! :scanned-entry-points {:policy policy-k :entry-point k :check :canary}
-                       (if leaked :leak :clean) (boolean leaked))
+                       canary (not= :clean canary))
         (ledger/check! :scanned-entry-points {:policy policy-k :entry-point k :check :hygiene}
                        (:verdict hygiene) (not= :clean (:verdict hygiene)))))))
 

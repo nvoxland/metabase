@@ -157,6 +157,28 @@
       (is ((set invariants/failing-outcomes) :hidden-name-in-error))
       (is (not (invariants/leak-outcomes :hidden-name-in-error))))))
 
+(deftest ^:parallel hygiene-test
+  (let [secret   {:global {:distinct-count 6 :nil% 0.0} :type {:type/Number {:min 1.0 :max 6.0}}}
+        ctx      {:ids {:tables {:shops 7}} :sandboxed #{:shops} :secret-fingerprints #{secret}}
+        verdict  (fn [body] (:verdict (invariants/hygiene ctx {:body body})))
+        own      {:global {:distinct-count 2 :nil% 0.0} :type {:type/Number {:min 1.0 :max 2.0}}}]
+    (testing "a column of the sandboxed table"
+      (is (= :dirty (verdict {:cols [{:table_id 7 :fingerprint own}]}))))
+    (testing "a column of another table"
+      (is (= :clean (verdict {:cols [{:table_id 8 :fingerprint own}]}))))
+    (testing "an aggregation over the user's own rows"
+      (is (= :clean (verdict {:cols [{:name "count" :fingerprint own}]}))))
+    (testing "a column with no table, carrying what the whole table gives: stored metadata of an aggregation or a native query"
+      (is (= :dirty (verdict {:result_metadata [{:name "count" :fingerprint secret}]})))
+      (is (= :dirty (verdict {:cards [{:result_metadata [{:name "ID" :table_id 8 :fingerprint secret}]}]}))))
+    (testing "a saved question's or segment's own query is content the user reads, not an internal form"
+      (is (= :clean (verdict {:cards [{:dataset_query {:stages [{:native "SELECT * FROM SHOPS"}]}}]
+                              :segments [{:definition {:stages [{:source-table 7}]}}]})))
+      (is (= :dirty (verdict {:data {:native_form {:query "SELECT 1"}}}))))
+    (testing "the same numbers after a JSON round trip"
+      (is (= :dirty (verdict {:cols [{:name "count" :fingerprint {:global {:distinct-count 6 :nil% 0}
+                                                                  :type   {:type/Number {:min 1 :max 6}}}}]}))))))
+
 (deftest ^:parallel http-equivalence-test
   (let [executed {:rows [[1 "Alpha" 900000015838]] :body {:data {:cols [{:name "ID" :base_type "type/Integer"} {:name "NAME" :base_type "type/Text"} {:name "SECRET_NUM" :base_type "type/BigInteger"}]}}}]
     (testing "no HTTP transport"

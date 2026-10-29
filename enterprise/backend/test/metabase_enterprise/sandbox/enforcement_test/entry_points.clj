@@ -5,42 +5,117 @@
   does not open, with the reason. [[scan!]] calls every scanned entry point as one user. The tests are in
   `entrypoints-test` and, for several users at once, `multi-user-test`."
   (:require
+   [clojure.walk :as walk]
    [metabase-enterprise.sandbox.enforcement-test.dataset :as dataset]
    [metabase-enterprise.sandbox.enforcement-test.harness :as harness]
    [metabase-enterprise.sandbox.enforcement-test.invariants :as invariants]
    [metabase-enterprise.sandbox.enforcement-test.policies :as policies]
    [metabase-enterprise.sandbox.enforcement-test.queries.hand-written :as hand-written]
+   [metabase.mcp.v2.test-util :as mcp.tu]
+   [metabase.sync.core :as sync]
    [metabase.test :as mt]
-   [metabase.util.json :as json]))
+   [metabase.test.http-client :as client]
+   [metabase.util.json :as json]
+   [toucan2.core :as t2]))
 
 (set! *warn-on-reflection* true)
 
 ;;; ---------------------------------------------- Requests per entry point ----------------------------------------
 
+(defn- admin-metadata
+  "The result metadata of an admin's run of `query`, which the query builder saves with a question: fingerprints of
+  the whole table, an aggregation's and a native column's included."
+  [query]
+  (get-in (mt/user-http-request :crowberto :post 202 "dataset" query) [:data :results_metadata :columns]))
+
+(defn- do-with-fingerprinted-pk!
+  "Call `thunk` with SHOPS.ID fingerprinted, as it is when an admin marks a column as the entity key after sync
+  fingerprinted it (a view, or a table without a key constraint). The loader's tables have one, so sync skips the
+  column, and the fingerprinter gives a key nothing: fingerprint it as a category, then type it."
+  [ids thunk]
+  (let [field-id (dataset/fid ids :shops :id)]
+    (t2/update! :model/Field field-id {:semantic_type :type/Category})
+    (sync/refingerprint-field! (t2/select-one :model/Field :id field-id))
+    (t2/update! :model/Field field-id {:semantic_type :type/PK})
+    (try
+      (thunk)
+      (finally
+        (t2/update! :model/Field field-id {:fingerprint nil})))))
+
+(defn- do-with-segment!
+  "Call `(f segment-id)` with an admin's segment on SHOPS. Not `with-temp`: its defaults read a table of another
+  dataset."
+  [ids f]
+  (let [shops (dataset/tid ids :shops)
+        id    (t2/insert-returning-pk! :model/Segment {:name       "tier 1 shops"
+                                                       :creator_id (mt/user->id :crowberto)
+                                                       :table_id   shops
+                                                       :definition {:source-table shops
+                                                                    :filter       [:= [:field (dataset/fid ids :shops :tier) nil] 1]}})]
+    (try
+      (f id)
+      (finally
+        (t2/delete! :model/Segment :id id)))))
+
 (defn do-with-dashboard!
-  "Create a dashboard showing the SHOPS card and the ORDERS card with implicit SHOPS columns, with `secret` and `tier`
-  parameters wired to SHOPS directly and through the implicit join, and call `(f dashboard)`, where `dashboard` has
-  `:id` and `:dashcards`, card key -> `[dashcard-id card-id]`."
+  "Create the content the scans read, and call `(f fixture)`. A dashboard shows the SHOPS card, with two series, and
+  the ORDERS card with implicit SHOPS columns; its `secret` and `tier` parameters are wired to SHOPS directly and
+  through the implicit join, and its `shop` parameter to the ORDERS foreign key, so it hydrates the key's target and
+  name fields. The series are saved questions with an admin's result metadata: an aggregation of SHOPS and a native
+  query on it, whose columns name no table. A metric and a segment on SHOPS, and SHOPS.ID fingerprinted. `fixture`
+  has the dashboard `:id`, `:dashcards` (card key -> `[dashcard-id card-id]`), `:cards` (`:summary`, `:native`,
+  `:metric`), `:segment`, and `:queries`, those cards' queries, whose fingerprints the scan compares with the user's
+  own."
   [ids f]
   (let [orders-card (get-in ids [:cards :card/orders-implicit])
         shops-card  (get-in ids [:cards :card/shops])
+        shops       (dataset/tid ids :shops)
+        field       #(vector :field (dataset/fid ids :shops %) nil)
+        summary-q   {:database (:db ids) :type :query
+                     :query    {:source-table shops
+                                :aggregation  [[:count] [:sum (field :price)] [:max (field :secret_num)]]
+                                :breakout     [(field :tier)]}}
+        metric-q    {:database (:db ids) :type :query
+                     :query    {:source-table shops :aggregation [[:max (field :secret_num)]]}}
+        native-q    {:database (:db ids) :type :native
+                     :native   {:query (format "SELECT %s, COUNT(*) AS N, MAX(%s) AS M FROM %s GROUP BY %s"
+                                               (mt/format-name "tier") (mt/format-name "secret_num")
+                                               (mt/format-name "shops") (mt/format-name "tier"))}}
         mappings    (fn [card-id field-ref-fn]
                       (for [param ["secret" "tier"]]
                         {:parameter_id param :card_id card-id :target ["dimension" (field-ref-fn (keyword param))]}))]
-    (mt/with-temp [:model/Dashboard {dash-id :id} {:parameters [{:id "secret" :slug "secret" :name "secret" :type "string/="}
-                                                                {:id "tier" :slug "tier" :name "tier" :type "number/="}]}
+    (mt/with-temp [:model/Card {summary-card :id} {:dataset_query summary-q :display :bar :result_metadata (admin-metadata summary-q)}
+                   :model/Card {native-card :id} {:dataset_query native-q :display :bar :result_metadata (admin-metadata native-q)}
+                   :model/Card {metric-card :id} {:dataset_query metric-q :type :metric :result_metadata (admin-metadata metric-q)}
+                   :model/Dashboard {dash-id :id} {:parameters [{:id "secret" :slug "secret" :name "secret" :type "string/="}
+                                                                {:id "tier" :slug "tier" :name "tier" :type "number/="}
+                                                                {:id "shop" :slug "shop" :name "shop" :type "id"}]}
                    :model/DashboardCard {orders-dc :id} {:dashboard_id       dash-id
                                                          :card_id            orders-card
-                                                         :parameter_mappings (mappings orders-card #(hand-written/implicit ids :orders :shop_id :shops %))}
+                                                         :parameter_mappings (cons {:parameter_id "shop" :card_id orders-card
+                                                                                    :target       ["dimension" [:field (dataset/fid ids :orders :shop_id) nil]]}
+                                                                                   (mappings orders-card #(hand-written/implicit ids :orders :shop_id :shops %)))}
                    :model/DashboardCard {shops-dc :id} {:dashboard_id       dash-id
                                                         :card_id            shops-card
-                                                        :parameter_mappings (mappings shops-card #(vector :field (dataset/fid ids :shops %) nil))}]
-      (f {:id dash-id :dashcards {:card/orders-implicit [orders-dc orders-card] :card/shops [shops-dc shops-card]}}))))
+                                                        :parameter_mappings (mappings shops-card field)}
+                   :model/DashboardCardSeries _ {:dashboardcard_id shops-dc :card_id summary-card :position 0}
+                   :model/DashboardCardSeries _ {:dashboardcard_id shops-dc :card_id native-card :position 1}]
+      (do-with-segment!
+       ids
+       (fn [segment]
+         (do-with-fingerprinted-pk!
+          ids
+          #(f {:id        dash-id
+               :dashcards {:card/orders-implicit [orders-dc orders-card] :card/shops [shops-dc shops-card]}
+               :cards     {:summary summary-card :native native-card :metric metric-card}
+               :segment   segment
+               :queries   [summary-q native-q metric-q]})))))))
 
 (defn request
-  "`[method path body?]` for entry point `k`, against the base copy `ids` and the dashboard of [[do-with-dashboard!]].
-  Tier 2 is hidden by the row sandboxes."
-  [k ids {dash :id :keys [dashcards]}]
+  "`[method path body?]` for entry point `k`, against the base copy `ids` and the fixture of [[do-with-dashboard!]].
+  Method `:mcp` calls the MCP tool named by `path` with `body` as its arguments. Tier 2 is hidden by the row
+  sandboxes."
+  [k ids {dash :id :keys [dashcards cards segment]}]
   (let [shops        (dataset/tid ids :shops)
         secret       (dataset/fid ids :shops :secret)
         secret-num   (dataset/fid ids :shops :secret_num)
@@ -105,6 +180,17 @@
       :dashboard-param-search   [:get (format "dashboard/%d/params/secret/search/CANARY" dash)]
       :dashboard-chain-filter   [:get (format "dashboard/%d/params/secret/values?tier=2" dash)]
       :dashboard-chain-filter-tier [:get (format "dashboard/%d/params/tier/values?secret=%s" dash (dataset/canary-text :shops 2))]
+      :card-series              [:get (format "card/%d/series" (:summary cards))]
+      :table-related            [:get (format "table/%d/related" shops)]
+      :segment-related          [:get (format "segment/%d/related" segment)]
+      :virtual-db-metadata      [:get "database/-1337/metadata"]
+      :virtual-db-schema        [:get "database/-1337/schema/Everything else"]
+      :mcp-get-content          [:mcp "get_content" {:items   [{:type "question" :id card}
+                                                               {:type "question" :id (:summary cards)}
+                                                               {:type "question" :id (:native cards)}
+                                                               {:type "metric" :id (:metric cards)}
+                                                               {:type "dashboard" :id dash}]
+                                                     :include ["fields"]}]
       :xray-table               [:get (format "automagic-dashboards/table/%d" (dataset/tid ids :shops))]
       :xray-field-secret-num    [:get (format "automagic-dashboards/field/%d" (dataset/fid ids :shops :secret_num))])))
 
@@ -129,7 +215,8 @@
     :field-summary-secret-num :table-query-metadata :table :table-fks :database-metadata
     :database-fields :database-idfields :parameter-values :parameter-search :card-get-model :card-get
     :card-query-metadata :table-card-metadata :dashboard-get :dashboard-query-metadata :dashboard-param-values
-    :dashboard-param-search :dashboard-chain-filter :dashboard-chain-filter-tier :xray-table :xray-field-secret-num})
+    :dashboard-param-search :dashboard-chain-filter :dashboard-chain-filter-tier :xray-table :xray-field-secret-num
+    :card-series :table-related :segment-related :virtual-db-metadata :virtual-db-schema :mcp-get-content})
 
 (def setup
   "Entry points that decide which sandboxes the processor sees, and the policies the processor tests cover them with.
@@ -150,7 +237,8 @@
 (def untested-entry-points
   "Entry points this suite does not open, and why."
   {:field-related        "returns a few related fields picked by a tie-break on field ids, so whether its response holds a hidden column's fingerprint changes between setups; that fingerprint leak is checked deterministically through :field-secret-num"
-   :mcp-and-metabot      "no HTTP contract to replay; they reach the processor through the card and ad-hoc paths tested here"
+   :mcp-other-tools      "query tools reach the processor through the card and ad-hoc paths tested here; :mcp-get-content stands for the metadata reads"
+   :metabot              "no HTTP contract to replay; it reaches the processor through the card and ad-hoc paths tested here"
    :api-keys             "authentication, not data access; the same handlers run"
    :public-and-embed     "run as the card's creator by design, so no sandbox applies; documented, with its own suite"
    :subscriptions-alerts "rendered as the recipient out of band; metabase-enterprise.sandbox.pulse-test owns them"
@@ -161,26 +249,69 @@
 
 ;;; ---------------------------------------------------- Scans -----------------------------------------------------
 
+(defn- mcp-call
+  "Call MCP tool `tool` with `arguments` as `user`, over a bearer token holding every scope: `{:status :body}`, the
+  body being the data the tool returned, or the JSON-RPC error."
+  [user tool arguments]
+  (mcp.tu/do-with-bearer-token!
+   user mcp.tu/all-scopes
+   (fn [auth]
+     (let [post!      (fn [body headers]
+                        (client/client-full-response :post "metabase-mcp" {:request-options {:headers (merge auth headers)}} body))
+           session-id (get-in (post! {:jsonrpc "2.0" :method "initialize" :params {:capabilities {}} :id 1} {})
+                              [:headers "Mcp-Session-Id"])
+           _          (post! {:jsonrpc "2.0" :method "notifications/initialized" :params {}} {"mcp-session-id" session-id})
+           {:keys [status body]} (post! {:jsonrpc "2.0" :method "tools/call" :params {:name tool :arguments arguments} :id 2}
+                                        {"mcp-session-id" session-id})
+           text       (-> body :result :content first :text)]
+       {:status status
+        :body   (if-let [[_ data] (some-> text mcp.tu/data-parts)] (json/decode+kw data) body)}))))
+
 (defn request-as
   "`[method path body?]` as `user`: `{:status :body}`."
   [user [method path body]]
-  (let [{:keys [status] response :body} (if body
-                                          (mt/user-http-request-full-response user method path body)
-                                          (mt/user-http-request-full-response user method path))]
-    {:status status :body response}))
+  (if (= :mcp method)
+    (mcp-call user path body)
+    (let [{:keys [status] response :body} (if body
+                                            (mt/user-http-request-full-response user method path body)
+                                            (mt/user-http-request-full-response user method path))]
+      {:status status :body response})))
+
+(defn- secret-fingerprints
+  "The fingerprints an admin's run of `queries` gives that `user`'s own run does not: what the whole table says and
+  the user's sandbox does not."
+  [user queries]
+  (let [fingerprints (fn [u q]
+                       (let [{:keys [body]} (mt/user-http-request-full-response u :post "dataset" q)]
+                         (into #{} (keep (comp invariants/normalize-fingerprint :fingerprint))
+                               (get-in body [:data :results_metadata :columns]))))]
+    (into #{} (mapcat (fn [q] (remove (fingerprints user q) (fingerprints :crowberto q)))) queries)))
+
+(defn canary-outcome
+  "`:leak` when the response shows a canary outside the sandbox, `:fingerprint-leak` when only a fingerprint's
+  numbers do, else `:clean`."
+  [allowed body]
+  (let [leaked #(seq (remove allowed (dataset/canary-ids %)))]
+    (cond
+      (leaked (walk/postwalk #(if (map? %) (dissoc % :fingerprint) %) body)) :leak
+      (leaked body)                                                          :fingerprint-leak
+      :else                                                                  :clean)))
 
 (defn scan!
-  "Call every scanned entry point (`:request` ones) as `(:user ctx)` (default `:rasta`) against the dashboard of
-  [[do-with-dashboard!]]. Returns entry point -> `{:status :leaked :hygiene}`, where `:leaked` is the canary ids
-  outside that user's sandbox."
-  [{:keys [ids allowed user] :or {user :rasta} :as ctx} dashboard]
-  (into (sorted-map)
-        (for [[k {scanned? :request}] entry-points
-              :when scanned?]
-          (let [{:keys [status body]} (request-as user (request k ids dashboard))]
-            [k {:status  status
-                :leaked  (not-empty (into (sorted-set) (remove allowed) (dataset/canary-ids body)))
-                :hygiene (invariants/hygiene ctx {:body body})}]))))
+  "Call every scanned entry point (`:request` ones) as `(:user ctx)` (default `:rasta`) against the fixture of
+  [[do-with-dashboard!]]. Returns entry point -> `{:status :leaked :canary :hygiene}`, where `:leaked` is the canary
+  ids outside that user's sandbox and `:canary` the [[canary-outcome]]. Hygiene compares fingerprints with the
+  fixture queries' [[secret-fingerprints]]."
+  [{:keys [ids allowed user] :or {user :rasta} :as ctx} fixture]
+  (let [ctx (assoc ctx :secret-fingerprints (secret-fingerprints user (:queries fixture)))]
+    (into (sorted-map)
+          (for [[k {scanned? :request}] entry-points
+                :when scanned?]
+            (let [{:keys [status body]} (request-as user (request k ids fixture))]
+              [k {:status  status
+                  :leaked  (not-empty (into (sorted-set) (remove allowed) (dataset/canary-ids body)))
+                  :canary  (canary-outcome allowed body)
+                  :hygiene (invariants/hygiene ctx {:body body})}])))))
 
 (defn scan-entry-points!
   "[[scan!]] as the sandboxed user under `policy-k`."

@@ -66,4 +66,8 @@
 (deftest ^:parallel classify-test
   (testing "a hidden column's name in an error is part of the column sandbox's accidental failure"
     (is (= "SEC-1338" (ledger/classify :hand-written {:policy :card-hide-price :mode :production :probe :nested-shops}
-                                       :hidden-name-in-error)))))
+                                       :hidden-name-in-error))))
+  (testing "a hidden row's canary at an entry point is the value remap's leak only when no fingerprint carries it"
+    (let [state {:policy :table-tier+value-remap :entry-point :card-series :check :canary}]
+      (is (= "SEC-1333" (ledger/classify :scanned-entry-points state :leak)))
+      (is (= "SEC-1335" (ledger/classify :scanned-entry-points state :fingerprint-leak))))))

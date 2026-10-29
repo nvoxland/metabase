@@ -9157,35 +9157,52 @@
    {:state {:policy :card-hide-price, :entry-point :binning-secret-num, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
-   {:state {:policy :card-hide-price, :entry-point :card-get, :check :canary}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :card-get, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :card-get, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :card-get-model, :check :canary},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :card-get-model, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :card-query-metadata, :check :canary},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :card-query-metadata, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :card-series, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :card-series, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :dashboard-chain-filter, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :dashboard-chain-filter-tier, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
-   {:state {:policy :card-hide-price, :entry-point :dashboard-get, :check :canary}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :dashboard-get, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :dashboard-get, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :dashboard-param-search, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :dashboard-query-metadata, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :dashboard-query-metadata, :check :hygiene},
     :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :database-idfields, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :database-metadata, :check :canary},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :database-metadata, :check :hygiene},
     :outcome :dirty,
@@ -9194,7 +9211,7 @@
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :field-secret-num, :check :canary},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :field-secret-num, :check :hygiene},
     :outcome :dirty,
@@ -9202,11 +9219,41 @@
    {:state {:policy :card-hide-price, :entry-point :field-summary-secret-num, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :mcp-get-content, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :mcp-get-content, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :segment-related, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :segment-related, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :table-card-metadata, :check :canary},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :table-card-metadata, :check :hygiene},
+    :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :table-fks, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :table-query-metadata, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :table-query-metadata, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :table-related, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :table-related, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :virtual-db-metadata, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-hide-price, :entry-point :virtual-db-metadata, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :card-hide-price, :entry-point :xray-field-secret-num, :check :hygiene},
@@ -9237,6 +9284,12 @@
    {:state {:policy :table-tier+value-remap, :entry-point :card-run-model, :check :canary},
     :outcome :leak,
     :ticket "SEC-1333"}
+   {:state {:policy :table-tier+value-remap, :entry-point :card-series, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier+value-remap, :entry-point :card-series, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :dashboard-get, :check :canary},
     :outcome :leak,
     :ticket "SEC-1333"}
@@ -9244,17 +9297,20 @@
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :dashboard-query-metadata, :check :canary},
-    :outcome :leak,
-    :ticket "SEC-1333"}
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :dashboard-query-metadata, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :dashcard-shops-hidden-tier, :check :canary},
     :outcome :leak,
     :ticket "SEC-1333"}
+   {:state {:policy :table-tier+value-remap, :entry-point :database-idfields, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :database-metadata, :check :canary},
-    :outcome :leak,
-    :ticket "SEC-1333"}
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :database-metadata, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
@@ -9262,9 +9318,15 @@
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :field-secret-num, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier+value-remap, :entry-point :field-secret-num, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier+value-remap, :entry-point :mcp-get-content, :check :canary},
     :outcome :leak,
     :ticket "SEC-1333"}
-   {:state {:policy :table-tier+value-remap, :entry-point :field-secret-num, :check :hygiene},
+   {:state {:policy :table-tier+value-remap, :entry-point :mcp-get-content, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :pivot, :check :hygiene},
@@ -9276,16 +9338,37 @@
    {:state {:policy :table-tier+value-remap, :entry-point :pivot-secret-num, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
+   {:state {:policy :table-tier+value-remap, :entry-point :segment-related, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier+value-remap, :entry-point :segment-related, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :table-card-metadata, :check :canary},
     :outcome :leak,
     :ticket "SEC-1333"}
+   {:state {:policy :table-tier+value-remap, :entry-point :table-card-metadata, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :table-fks, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :table-query-metadata, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier+value-remap, :entry-point :table-query-metadata, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier+value-remap, :entry-point :table-related, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier+value-remap, :entry-point :table-related, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier+value-remap, :entry-point :virtual-db-metadata, :check :canary},
     :outcome :leak,
     :ticket "SEC-1333"}
-   {:state {:policy :table-tier+value-remap, :entry-point :table-query-metadata, :check :hygiene},
+   {:state {:policy :table-tier+value-remap, :entry-point :virtual-db-metadata, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier+value-remap, :entry-point :xray-field-secret-num, :check :hygiene},
@@ -9294,41 +9377,79 @@
    {:state {:policy :table-tier+value-remap, :entry-point :xray-table, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
-   {:state {:policy :table-tier, :entry-point :card-get, :check :canary}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :card-get, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :card-get, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
-   {:state {:policy :table-tier, :entry-point :card-get-model, :check :canary}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :card-get-model, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :card-get-model, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :card-query-metadata, :check :canary},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :card-query-metadata, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
-   {:state {:policy :table-tier, :entry-point :dashboard-get, :check :canary}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :card-series, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :card-series, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :dashboard-get, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :dashboard-get, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :dashboard-query-metadata, :check :canary},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :dashboard-query-metadata, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
-   {:state {:policy :table-tier, :entry-point :database-metadata, :check :canary}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :database-idfields, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :database-metadata, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :database-metadata, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :field-secret, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
-   {:state {:policy :table-tier, :entry-point :field-secret-num, :check :canary}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :field-secret-num, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :field-secret-num, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :mcp-get-content, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :mcp-get-content, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :pivot, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :pivot-secret-num, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :segment-related, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :segment-related, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :table-card-metadata, :check :canary},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :table-card-metadata, :check :hygiene},
+    :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :table-fks, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :table-query-metadata, :check :canary},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :table-query-metadata, :check :hygiene},
+    :outcome :dirty,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :table-related, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :table-related, :check :hygiene}, :outcome :dirty, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :virtual-db-metadata, :check :canary},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :entry-point :virtual-db-metadata, :check :hygiene},
     :outcome :dirty,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :entry-point :xray-field-secret-num, :check :hygiene},
@@ -12265,352 +12386,638 @@
  :two-users-scanned
  {:h2
   [{:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :card-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :dashboard-query-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :database-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :table-query-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 0, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :card-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :dashboard-query-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :database-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :table-query-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :lucky, :round 1, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :card-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :dashboard-query-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :database-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :table-query-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 0, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :card-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :dashboard-query-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :database-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :table-query-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows+hide, :user :rasta, :round 1, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :lucky, :round 0, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :lucky, :round 1, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 0, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :native, :user :lucky, :round 0, :entry-point :card-get-model}, :outcome :leak, :ticket "SEC-1335"}
-   {:state {:policy :native, :user :lucky, :round 0, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :card-rows, :user :rasta, :round 1, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 0, :entry-point :card-get-model},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 0, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 0, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :native, :user :lucky, :round 0, :entry-point :dashboard-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 0, :entry-point :card-series},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 0, :entry-point :dashboard-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 0, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 0, :entry-point :database-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 0, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 0, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 0, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 0, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :native, :user :lucky, :round 1, :entry-point :card-get-model}, :outcome :leak, :ticket "SEC-1335"}
-   {:state {:policy :native, :user :lucky, :round 1, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 0, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 1, :entry-point :card-get-model},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 1, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 1, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :native, :user :lucky, :round 1, :entry-point :dashboard-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 1, :entry-point :card-series},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 1, :entry-point :dashboard-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 1, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 1, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 1, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 1, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 1, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :lucky, :round 1, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :native, :user :rasta, :round 0, :entry-point :card-get-model}, :outcome :leak, :ticket "SEC-1335"}
-   {:state {:policy :native, :user :rasta, :round 0, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :native, :user :lucky, :round 1, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 0, :entry-point :card-get-model},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 0, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 0, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :native, :user :rasta, :round 0, :entry-point :dashboard-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 0, :entry-point :card-series},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 0, :entry-point :dashboard-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 0, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 0, :entry-point :database-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 0, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 0, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 0, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 0, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 0, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :native, :user :rasta, :round 1, :entry-point :card-get-model}, :outcome :leak, :ticket "SEC-1335"}
-   {:state {:policy :native, :user :rasta, :round 1, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 0, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 0, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 1, :entry-point :card-get-model},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 1, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 1, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :native, :user :rasta, :round 1, :entry-point :dashboard-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 1, :entry-point :card-series},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 1, :entry-point :dashboard-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 1, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 1, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 1, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 1, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 1, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 1, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :native, :user :rasta, :round 1, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 1, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :native, :user :rasta, :round 1, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :lucky, :round 0, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :lucky, :round 1, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 0, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :card-get-model},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
-   {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :card-get}, :outcome :leak, :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :card-get},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :card-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :card-series},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :dashboard-get},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :dashboard-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :database-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :field-secret-num},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :mcp-get-content},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :segment-related},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :table-card-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}
    {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :table-query-metadata},
-    :outcome :leak,
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :table-related},
+    :outcome :fingerprint-leak,
+    :ticket "SEC-1335"}
+   {:state {:policy :table-tier, :user :rasta, :round 1, :entry-point :virtual-db-metadata},
+    :outcome :fingerprint-leak,
     :ticket "SEC-1335"}]}}

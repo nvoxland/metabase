@@ -114,6 +114,6 @@
                 ids
                 (fn [dashboard]
                   (doseq [[round {:keys [user] :as ctx}] (turns ctxs)
-                          [k {:keys [leaked]}]          (ep/scan! ctx dashboard)]
+                          [k {:keys [canary]}]          (ep/scan! ctx dashboard)]
                     (ledger/check! :two-users-scanned {:policy policy-k :user user :round round :entry-point k}
-                                   (if leaked :leak :clean) (boolean leaked)))))))))))))
+                                   canary (not= :clean canary)))))))))))))
