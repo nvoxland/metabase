@@ -104,7 +104,7 @@
     -1
     (tu.rng/rand-int (count (:stages query)))))
 
-(def ^:private ^:dynamic *safe-for-old-refs*
+(def ^:dynamic *safe-for-old-refs*
   "Controls whether the generators will construct queries with things like multiple joins to the same table, which
   create ambiguous refs in classic MBQL 5.
 

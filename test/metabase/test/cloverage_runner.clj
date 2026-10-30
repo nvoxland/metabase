@@ -12,5 +12,5 @@
                    (cond-> options
                      (seq (k options)) (update k (partial map re-pattern))))
                  options
-                 [:ns-regex :ns-exclude-regex])]
+                 [:ns-regex :ns-exclude-regex :test-ns-regex])]
     (cloverage.coverage/run-project options)))

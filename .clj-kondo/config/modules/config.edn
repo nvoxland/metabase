@@ -4730,7 +4730,8 @@
      "test\\.impl"                          ; anything that contains `test.impl`
      "test-setup"                           ; anything that contains `test-setup`
      "test[-_]helpers"                      ; anything that contains `test-helpers` or `test_helpers`
-     "^metabase(?:-enterprise)?\\.test"}}}} ; anything starting with `metabase.test` or `metabase-enterprise.test`
+     "^metabase(?:-enterprise)?\\.test"     ; anything starting with `metabase.test` or `metabase-enterprise.test`
+     "^metabase-enterprise\\.sandbox\\.enforcement-test\\."}}}} ; helper namespaces of the sandbox enforcement tests
 
 ;; !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 ;; !!                                                                                       !!
