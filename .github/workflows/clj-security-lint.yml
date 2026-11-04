@@ -1,0 +1,76 @@
+# Static security lint with metabase-clj-security-lint (metabase/security-review-automation, private), uploaded to
+# GitHub code scanning. On master it records the baseline; on a pull request, code scanning shows the alerts the
+# change introduces.
+#
+# This fork is public: a pull request's annotations are visible to anyone. Test it with made-up vulnerable code only,
+# never on code with a real, unfixed finding. The scan prints counts only (summary mode); the SARIF goes to code
+# scanning, whose alert list needs write access.
+#
+# Needs the secret MCSL_REPO_TOKEN: a fine-grained token with read-only Contents on metabase/security-review-automation.
+name: clj-security-lint
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+concurrency:
+  group: clj-security-lint-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out the linter
+        uses: actions/checkout@v4
+        with:
+          repository: metabase/security-review-automation
+          ref: mcsl-engine
+          token: ${{ secrets.MCSL_REPO_TOKEN }}
+          path: .mcsl
+          persist-credentials: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: DeLaGuardo/setup-clojure@12.5
+        with:
+          cli: latest
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+          key: clj-security-lint-${{ hashFiles('deps.edn', '.mcsl/metabase-clj-security-lint/deps.edn') }}
+          restore-keys: clj-security-lint-
+
+      # The linter reads the code through clj-kondo, with the configs Metabase's libraries export
+      # (.clj-kondo/<lib>/, untracked): Metabase's own documented command to copy them
+      - name: Copy the libraries' clj-kondo configs
+        run: clojure -M:kondo --copy-configs --dependencies --lint "$(clojure -A:dev -Spath)" --skip-lint --parallel
+
+      - name: Scan
+        id: scan
+        uses: ./.mcsl/metabase-clj-security-lint
+        with:
+          profile: metabase
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif-file }}
+          category: clj-security-lint
